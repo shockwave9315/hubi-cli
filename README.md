@@ -13,9 +13,15 @@ separate, explicitly approved installation step.
 Menu choices are entered as one character followed by Enter. Hubi reads the
 whole line, so arrow keys, PageUp/PageDown, escape sequences, and pasted text
 are rejected instead of being interpreted byte-by-byte. Bracketed paste is
-tracked through its closing marker even across embedded newlines, and queued
-input is discarded at menu/shell/tmux boundaries so one burst cannot cross
-into another menu or a writable agent.
+structurally quarantined through its closing marker even across embedded
+newlines. An unterminated bracketed paste is discarded after a five-second
+bound instead of blocking the launcher indefinitely.
+
+Raw/unbracketed queued input receives best-effort short-window draining at
+menu, shell, and tmux boundaries. Input delayed enough to be indistinguishable
+from deliberate typing is intentionally treated as ordinary user input; Hubi
+does not claim an absolute quarantine guarantee for terminals that omit
+bracketed-paste markers.
 
 ```text
 hubi
@@ -27,7 +33,10 @@ hubi sessions
 
 `REPO` must resolve to a Git repository root beneath `~/repos` (or
 `$HUBI_REPOS`). Both normal clones and Git worktrees are supported. Repository
-and session lists paginate after nine entries.
+and session lists paginate after nine entries. Immediately before tmux and
+systemd creation, Hubi revalidates the repository path, root, containment, and
+filesystem identity so a vanished or replaced repository cannot fall back to
+the home directory.
 
 Agent states are:
 
@@ -100,7 +109,9 @@ ssh -t HOST 'HUBI_NOAUTO=1 bash -il'
 Runtime dependencies are Bash, Git, tmux, core Debian utilities, and a running
 systemd user manager (`systemd-run --user` / `systemctl --user`). Claude keeps
 `--permission-mode bypassPermissions`; Codex receives no added permission flag.
-Both programs and their arguments are passed as separate argv elements.
+Both programs and their arguments are passed as separate argv elements. Hubi
+checks full-cgroup kill support before creating a managed agent and fails
+closed if the local systemd interface cannot provide it.
 
 Run the isolated test suite with:
 
@@ -108,6 +119,9 @@ Run the isolated test suite with:
 ./tests/run.sh
 python3 tests/adversarial.py
 ```
+
+At this revision the functional harness reports 16 tests and the adversarial
+suite contains 31 tests; both totals must be fully green for release review.
 
 The harness uses a unique tmux socket, disposable Git repositories, fake agent
 processes, and unique systemd scopes. It never attaches to or stops the default

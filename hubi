@@ -17,12 +17,14 @@ CLAUDE_BIN="${HUBI_CLAUDE_BIN:-$HOME/.local/bin/claude}"
 MENU_HINT=""
 RESOLVED_REPO_DIR=""
 RESOLVED_REPO_KEY=""
+RESOLVED_REPO_ID=""
 FOUND_SESSION=""
 FOUND_SESSION_KIND=""
 FOUND_PANE=""
 ENSURED_SESSION=""
 ATTACH_MODE=""
 HUBI_LOCK_TIMEOUT="${HUBI_LOCK_TIMEOUT:-3}"
+HUBI_PASTE_TIMEOUT="${HUBI_PASTE_TIMEOUT:-5}"
 
 tmux_cmd() {
     if [[ -n "${HUBI_TMUX_SOCKET:-}" ]]; then
@@ -30,6 +32,10 @@ tmux_cmd() {
     else
         command env -u HUBI_ACTIVE "$TMUX_BIN" "$@"
     fi
+}
+
+sanitize_tmux_environment() {
+    tmux_cmd set-environment -gu HUBI_ACTIVE >/dev/null 2>&1 || true
 }
 
 clear_screen() { printf '\033[2J\033[H'; }
@@ -51,21 +57,28 @@ discard_queued_input() {
 }
 
 discard_bracketed_paste() {
-    local initial="$1" byte tail="$1"
+    local initial="$1" byte tail="$1" deadline complete=0 timeout="$HUBI_PASTE_TIMEOUT"
 
     if [[ "$initial" == *$'\e[201~'* ]]; then
         discard_queued_input
-        return
+        return 0
     fi
+    [[ "$timeout" =~ ^[1-9][0-9]*$ ]] || timeout=5
+    deadline=$((SECONDS + timeout))
     # read -n switches the tty to character reads, so the closing marker does
     # not need a trailing newline. Embedded newlines are deliberately ignored.
-    while IFS= read -rsn1 byte; do
+    while (( SECONDS < deadline )) && IFS= read -rsn1 -t "$((deadline - SECONDS))" byte; do
         tail="${tail: -5}${byte}"
         if [[ "$tail" == *$'\e[201~' ]]; then
+            complete=1
             break
         fi
     done
     discard_queued_input
+    if (( ! complete )); then
+        printf '\n  Niepełne wklejenie zostało odrzucone po %ss.\n' "$timeout" >&2
+        return 1
+    fi
 }
 
 on_signal() {
@@ -126,6 +139,7 @@ resolve_repo() {
     local argument="$1" root candidate top
     RESOLVED_REPO_DIR=""
     RESOLVED_REPO_KEY=""
+    RESOLVED_REPO_ID=""
 
     if [[ -z "$argument" || "$argument" == /* || "$argument" == *$'\n'* ]]; then
         repo_error "nieprawidłowa nazwa repozytorium: ${argument:-<pusta>}"
@@ -165,6 +179,50 @@ resolve_repo() {
     fi
     RESOLVED_REPO_DIR="$candidate"
     RESOLVED_REPO_KEY="${candidate#"$root"/}"
+    RESOLVED_REPO_ID="$(stat -Lc '%d:%i' -- "$candidate" 2>/dev/null)" || {
+        repo_error "nie można ustalić tożsamości repozytorium: $candidate"
+        RESOLVED_REPO_DIR=""
+        RESOLVED_REPO_KEY=""
+        return 2
+    }
+}
+
+revalidate_repo_for_start() {
+    local repo_key="$1" directory="$2" expected_id="$3" root candidate top actual_id
+    if ! root="$(realpath -e -- "$REPOS_ROOT" 2>/dev/null)" || [[ ! -d "$root" ]]; then
+        repo_error "katalog repozytoriów zniknął przed startem: $REPOS_ROOT"
+        return 1
+    fi
+    if ! candidate="$(realpath -e -- "$directory" 2>/dev/null)" || [[ ! -d "$candidate" ]]; then
+        repo_error "repozytorium zniknęło przed startem: $directory"
+        return 1
+    fi
+    if [[ "$candidate" != "$directory" ]]; then
+        repo_error "ścieżka repozytorium zmieniła się przed startem: $directory"
+        return 1
+    fi
+    case "$candidate/" in
+        "$root"/*) ;;
+        *) repo_error "repozytorium nie znajduje się już pod $root"; return 1 ;;
+    esac
+    if ! top="$(git -C "$candidate" rev-parse --show-toplevel 2>/dev/null)" \
+        || ! top="$(realpath -e -- "$top" 2>/dev/null)" \
+        || [[ "$top" != "$candidate" ]]; then
+        repo_error "katalog nie jest już tym samym repozytorium Git: $directory"
+        return 1
+    fi
+    if [[ "${candidate#"$root"/}" != "$repo_key" ]]; then
+        repo_error "klucz repozytorium zmienił się przed startem: $repo_key"
+        return 1
+    fi
+    actual_id="$(stat -Lc '%d:%i' -- "$candidate" 2>/dev/null)" || {
+        repo_error "nie można ponownie ustalić tożsamości repozytorium: $directory"
+        return 1
+    }
+    if [[ -z "$expected_id" || "$actual_id" != "$expected_id" ]]; then
+        repo_error "tożsamość repozytorium zmieniła się przed startem: $directory"
+        return 1
+    fi
 }
 
 repo_list() {
@@ -265,9 +323,6 @@ session_status() {
         clients="$(session_clients "$session")"
         if (( clients > 0 )); then printf '● ATTACHED (%d)' "$clients"; else printf '● RUNNING'; fi
     fi
-    # Remove stale tmux global-environment state before this client or any
-    # later pane is allowed to use the managed server.
-    tmux_cmd set-environment -gu HUBI_ACTIVE >/dev/null 2>&1 || true
 }
 
 agent_status() {
@@ -341,6 +396,9 @@ attach_session() {
         pause_for_ack
         return 1
     fi
+    # Attaching is an explicit initialization boundary. Remove any stale
+    # launcher-only guard before this client or later panes use the server.
+    sanitize_tmux_environment
     choose_attach_mode "$session" || { enable_safe_input; discard_queued_input; return 0; }
     mode="$ATTACH_MODE"
     clear_screen
@@ -370,9 +428,12 @@ ensure_agent_session() {
     local agent="$1" repo_key="$2" directory="$3" executable="$4"
     shift 4
     local -a arguments=("$@")
-    local session locks lock_file output rc
+    local session locks lock_file output rc expected_repo_id
     ENSURED_SESSION=""
     session="$(agent_session_name "$agent" "$repo_key")"
+    expected_repo_id="$RESOLVED_REPO_ID"
+    require_scope_kill_capability || return 1
+    revalidate_repo_for_start "$repo_key" "$directory" "$expected_repo_id" || return 1
     locks="$(lock_root)" || { printf 'Hubi: nie można utworzyć katalogu blokad startowych.\n' >&2; return 1; }
     lock_file="$locks/$(name_hash "$agent:$repo_key").lock"
     if [[ ! "$HUBI_LOCK_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
@@ -385,7 +446,8 @@ ensure_agent_session() {
     output="$("$FLOCK_BIN" --exclusive --close --wait "$HUBI_LOCK_TIMEOUT" \
         --conflict-exit-code 75 "$lock_file" \
         env -u HUBI_ACTIVE bash "$HUBI_SCRIPT_PATH" __start-locked \
-        "$agent" "$repo_key" "$directory" "$executable" "${arguments[@]}" 2>&1)"
+        "$agent" "$repo_key" "$directory" "$expected_repo_id" \
+        "$executable" "${arguments[@]}" 2>&1)"
     rc=$?
     if (( rc == 75 )); then
         printf 'Hubi: limit %ss oczekiwania na blokadę startu (startup lock) %s/%s został przekroczony.\n' \
@@ -401,8 +463,8 @@ ensure_agent_session() {
 }
 
 ensure_agent_session_locked() {
-    local agent="$1" repo_key="$2" directory="$3" executable="$4"
-    shift 4
+    local agent="$1" repo_key="$2" directory="$3" expected_repo_id="$4" executable="$5"
+    shift 5
     local -a arguments=("$@")
     local session scope output pane start_command stored_agent stored_repo
     session="$(agent_session_name "$agent" "$repo_key")"
@@ -430,6 +492,10 @@ ensure_agent_session_locked() {
         terminate_scope "$scope" || return 1
     fi
 
+    # This is the last check before tmux receives -c and before systemd creates
+    # a scope. It also detects replacement of a repository at the same path.
+    revalidate_repo_for_start "$repo_key" "$directory" "$expected_repo_id" || return 1
+
     if ! output="$(tmux_cmd new-session -d -P -F '#{pane_id}' -s "$session" -c "$directory" -- sleep 30 2>&1)"; then
         printf 'Hubi: tmux nie utworzył sesji %s:\n%s\n' "$session" "$output" >&2
         return 1
@@ -440,7 +506,13 @@ ensure_agent_session_locked() {
         return 1
     fi
 
-    tmux_cmd set-environment -gu HUBI_ACTIVE >/dev/null 2>&1 || true
+    if [[ "$(tmux_cmd display-message -p -t "$pane" '#{pane_current_path}' 2>/dev/null || true)" != "$directory" ]]; then
+        printf 'Hubi: tmux nie zachował katalogu repozytorium %s; start został przerwany.\n' "$directory" >&2
+        tmux_cmd kill-session -t "$session" >/dev/null 2>&1 || true
+        return 1
+    fi
+
+    sanitize_tmux_environment
     if ! tmux_cmd set-option -t "$session" @hubi-managed v4 \
         || ! tmux_cmd set-option -t "$session" @hubi-agent "$agent" \
         || ! tmux_cmd set-option -t "$session" @hubi-repo "$repo_key" \
@@ -457,6 +529,11 @@ ensure_agent_session_locked() {
         return 1
     fi
 
+    if ! revalidate_repo_for_start "$repo_key" "$directory" "$expected_repo_id"; then
+        printf 'Hubi: repozytorium zmieniło się przed utworzeniem scope; usuwanie sesji startowej %s.\n' "$session" >&2
+        tmux_cmd kill-session -t "$session" >/dev/null 2>&1 || true
+        return 1
+    fi
     if ! output="$(tmux_cmd respawn-pane -k -t "$pane" -- \
         "$SYSTEMD_RUN_BIN" --user --scope --quiet --collect --unit="$scope" -- \
         "$executable" "${arguments[@]}" 2>&1)"; then
@@ -657,7 +734,9 @@ sessions_menu() {
         printf '\n  HUBINET DEVBOX — SESJE (strona %d/%d)\n  ──────────────────────────────────\n\n' "$((page + 1))" "$pages"
         show_hint
         for ((i = start; i < end; i++)); do
-            session="${sessions[$i]}"; clients="$(session_clients "$session")"; status="$(session_status "$session")"
+            session="${sessions[$i]}"
+            clients="$(session_clients "$session")"
+            status="$(session_status "$session")"
             printf '  [%d] %-32s %s; klienci: %s\n' "$((i - start + 1))" "$session" "$status" "$clients"
         done
         printf '\n  [n] Następna  [p] Poprzednia  [b] Powrót\n  > '
@@ -673,12 +752,15 @@ sessions_menu() {
 }
 
 project_menu() {
-    local repo_key="$1" directory="$2" choice
+    local repo_key="$1" directory="$2" choice git_state codex_state claude_state
     while true; do
         clear_screen
+        git_state="$(git_summary "$directory")"
+        codex_state="$(agent_status codex "$repo_key")"
+        claude_state="$(agent_status claude "$repo_key")"
         printf '\n  ╭────────────────────────────────────────╮\n  │          HUBINET DEVBOX — v%s          │\n  ╰────────────────────────────────────────╯\n\n' "$HUBI_VERSION"
-        printf '  Projekt: %s\n  Git:     %s\n' "$repo_key" "$(git_summary "$directory")"
-        printf '  Codex:   %s\n  Claude:  %s\n\n' "$(agent_status codex "$repo_key")" "$(agent_status claude "$repo_key")"
+        printf '  Projekt: %s\n  Git:     %s\n' "$repo_key" "$git_state"
+        printf '  Codex:   %s\n  Claude:  %s\n\n' "$codex_state" "$claude_state"
         show_hint
         printf '  [1] Codex  — uruchom / podłącz / zobacz EXITED\n'
         printf '  [2] Claude — uruchom / podłącz / zobacz EXITED\n'
@@ -700,6 +782,7 @@ project_menu() {
 
 main_menu() {
     local page=0 page_size=9 pages start end i index choice repo
+    local host_name user_name session_total codex_state claude_state
     local -a repos=()
     if [[ -n "${TMUX:-}" ]]; then
         printf 'Hubi: menu działa wyłącznie poza tmuxem. Odłącz sesję i spróbuj ponownie.\n' >&2
@@ -711,14 +794,19 @@ main_menu() {
         pages=$(( (${#repos[@]} + page_size - 1) / page_size )); (( pages == 0 )) && pages=1
         (( page >= pages )) && page=$((pages - 1))
         start=$((page * page_size)); end=$((start + page_size)); (( end > ${#repos[@]} )) && end=${#repos[@]}
+        host_name="$(hostname)"
+        user_name="$(whoami)"
+        session_total="$(session_count)"
         printf '\n  ╭────────────────────────────────────────╮\n  │          HUBINET DEVBOX — v%s          │\n  ╰────────────────────────────────────────╯\n\n' "$HUBI_VERSION"
         printf '  Host:     %s\n  User:     %s\n  Sesje:    %s\n  Projekty (strona %d/%d):\n\n' \
-            "$(hostname)" "$(whoami)" "$(session_count)" "$((page + 1))" "$pages"
+            "$host_name" "$user_name" "$session_total" "$((page + 1))" "$pages"
         show_hint
         for ((i = start; i < end; i++)); do
             repo="${repos[$i]}"
+            codex_state="$(agent_status codex "$repo")"
+            claude_state="$(agent_status claude "$repo")"
             printf '  [%d] %-20s C:%-18s A:%s\n' "$((i - start + 1))" "$repo" \
-                "$(agent_status codex "$repo")" "$(agent_status claude "$repo")"
+                "$codex_state" "$claude_state"
         done
         if (( ${#repos[@]} == 0 )); then printf '  Nie znaleziono repozytoriów Git pod %s.\n' "$REPOS_ROOT"; fi
         printf '\n  [n] Następna  [p] Poprzednia  [s] Sesje\n  [h] Shell  [q] Zwykły prompt  [x] Wyloguj\n  > '
@@ -767,7 +855,7 @@ hubi_main() {
 
 if [[ "${BASH_SOURCE[0]}" == "$0" && "${1:-}" == "__start-locked" ]]; then
     shift
-    if (( $# < 4 )); then
+    if (( $# < 5 )); then
         printf 'Hubi: niepełne argumenty wewnętrznego startu.\n' >&2
         exit 2
     fi

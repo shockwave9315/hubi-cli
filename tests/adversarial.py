@@ -337,11 +337,37 @@ class HubiAdversarialTests(unittest.TestCase):
         leaked = self.input_log.read_text() if self.input_log.exists() else ""
         self.assertNotIn("BURST_LEAK", leaked)
 
+        # Positive control: the same choices, deliberately typed after each
+        # screen transition, must still attach writable and reach the agent.
+        typed = self.spawn_hubi()
+        typed.send(b"1\n")
+        typed.wait_for(b"Projekt:")
+        typed.send(b"1\n")
+        typed.wait_for("Sesja ma już podłączonych klientów".encode("utf-8"))
+        typed.send(b"s\n")
+        typed.wait_for(b"AGENT_READY")
+        typed.send(b"TYPED_CONTROL\n")
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            content = self.input_log.read_text() if self.input_log.exists() else ""
+            if "TYPED_CONTROL" in content:
+                break
+            time.sleep(0.05)
+        self.assertIn("TYPED_CONTROL", content)
+
     def test_multiline_paste_with_all_action_keys_is_inert(self) -> None:
         self.start_agent()
         hubi = self.spawn_hubi()
         self.enter_project(hubi)
         hubi.send(b"\x1b[200~\nc\ny\na\n1\n2\np\ns\nx\nq\n\x1b[201~")
+        self.assert_agent_survives()
+
+    def test_unterminated_bracketed_paste_recovers_without_action(self) -> None:
+        self.start_agent()
+        hubi = self.spawn_hubi()
+        self.enter_project(hubi)
+        hubi.send(b"\x1b[200~c\ny\nPARTIAL_WITHOUT_CLOSER\n")
+        hubi.wait_for("Niepełne wklejenie zostało odrzucone".encode("utf-8"), timeout=8)
         self.assert_agent_survives()
 
     def make_stalling_tmux_wrapper(self) -> Path:
@@ -460,6 +486,74 @@ class HubiAdversarialTests(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("pełnego cgroup", result.stderr)
+
+    def test_agent_start_checks_full_cgroup_capability_before_creation(self) -> None:
+        unsupported = self.temp / "systemctl-no-full-cgroup"
+        unsupported.write_text(
+            "#!/usr/bin/env bash\n"
+            "if [[ \"$1\" == kill && \"${2-}\" == --help ]]; then\n"
+            "  echo 'kill help without required options'\n"
+            "  exit 0\n"
+            "fi\n"
+            "exec /usr/bin/systemctl \"$@\"\n"
+        )
+        unsupported.chmod(0o755)
+        result = self.bash(
+            'source "$HUBI_FILE"; resolve_repo "$REPO_NAME"; '
+            'ensure_agent_session codex "$RESOLVED_REPO_KEY" '
+            '"$RESOLVED_REPO_DIR" "$FAKE_AGENT"',
+            check=False,
+            env={
+                **self.env,
+                "HUBI_SYSTEMCTL_BIN": str(unsupported),
+                "REPO_NAME": self.repo_name,
+                "FAKE_AGENT": str(self.fake_agent),
+            },
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("pełnego cgroup", result.stdout + result.stderr)
+        self.assertNotEqual(
+            self.tmux("has-session", "-t", self.session_name(), check=False).returncode,
+            0,
+        )
+        self.assertFalse(self.scope_active())
+
+    def test_deleted_repo_after_validation_fails_closed_before_creation(self) -> None:
+        moved = self.temp / "repo-moved-after-validation"
+        result = self.bash(
+            'source "$HUBI_FILE"; resolve_repo "$REPO_NAME"; '
+            'mv -- "$RESOLVED_REPO_DIR" "$MOVED_REPO"; '
+            'ensure_agent_session codex "$RESOLVED_REPO_KEY" '
+            '"$RESOLVED_REPO_DIR" "$FAKE_AGENT"',
+            check=False,
+            env={
+                **self.env,
+                "REPO_NAME": self.repo_name,
+                "MOVED_REPO": str(moved),
+                "FAKE_AGENT": str(self.fake_agent),
+            },
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("repozytor", (result.stdout + result.stderr).lower())
+        self.assertNotEqual(
+            self.tmux("has-session", "-t", self.session_name(), check=False).returncode,
+            0,
+        )
+        self.assertFalse(self.scope_active())
+
+    def test_session_status_does_not_mutate_tmux_environment(self) -> None:
+        self.start_agent()
+        sentinel = f"status-readonly-{self.unique}"
+        self.tmux("set-environment", "-g", "HUBI_ACTIVE", sentinel)
+        result = self.bash(
+            'source "$HUBI_FILE"; session_status "$SESSION"',
+            env={**self.env, "SESSION": self.session_name()},
+        )
+        self.assertIn("RUNNING", result.stdout)
+        after = self.tmux(
+            "show-environment", "-g", "HUBI_ACTIVE", check=False
+        ).stdout.strip()
+        self.assertEqual(after, f"HUBI_ACTIVE={sentinel}")
 
     def test_missing_tmux_session_is_reported_and_cleanup_of_scope_works(self) -> None:
         orphan_agent = self.temp / "orphan-agent"
@@ -675,6 +769,48 @@ class HubiAdversarialTests(unittest.TestCase):
             process.read_available()
             self.assertIn(b"odebrano " + name, process.buffer)
 
+    def test_many_repo_menu_signal_stress_has_clean_explicit_codes(self) -> None:
+        for number in range(2, 15):
+            subprocess.run(
+                ["git", "init", "-q", str(self.repos / f"{self.unique}-repo-{number:02d}")],
+                check=True,
+            )
+        slow_tmux = self.temp / "tmux-slow-render"
+        slow_tmux.write_text(
+            "#!/usr/bin/env bash\n"
+            "sleep 0.015\n"
+            f"exec {REAL_TMUX} -f /dev/null \"$@\"\n"
+        )
+        slow_tmux.chmod(0o755)
+        stress_env = {**self.env, "HUBI_TMUX_BIN": str(slow_tmux)}
+        burner = subprocess.Popen(
+            ["bash", "-c", "while :; do :; done"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            for signum, expected, name in (
+                (signal.SIGINT, 130, b"INT"),
+                (signal.SIGHUP, 129, b"HUP"),
+                (signal.SIGTERM, 143, b"TERM"),
+            ):
+                for _ in range(3):
+                    process = PtyProcess([str(HUBI)], stress_env)
+                    self.ptys.append(process)
+                    process.wait_for(b"HUBINET DEVBOX")
+                    os.killpg(os.tcgetpgrp(process.fd), signum)
+                    self.assertEqual(process.wait(timeout=4), expected)
+                    process.read_available()
+                    output = bytes(process.buffer)
+                    self.assertIn(b"odebrano " + name, output)
+                    self.assertNotIn(b"unexpected EOF", output)
+                    self.assertNotIn(b"syntax error", output)
+                    self.assertNotIn(b"interrupt trap", output)
+                    self.assertNotIn(b"hubi: line", output)
+        finally:
+            burner.terminate()
+            burner.wait(timeout=2)
+
     def test_ctrl_c_while_attached_reaches_agent_not_launcher(self) -> None:
         marker = self.temp / "foreground-int"
         foreground_agent = self.temp / "foreground-agent"
@@ -723,6 +859,17 @@ class HubiAdversarialTests(unittest.TestCase):
         process.wait_for(b"legacy/unmanaged")
         process.send(b"a\n")
         process.wait_for(b"LEGACY_READY")
+        deadline = time.monotonic() + 2
+        clients = []
+        while time.monotonic() < deadline:
+            clients = self.tmux(
+                "list-clients", "-t", legacy, "-F", "#{client_name}", check=False
+            ).stdout.splitlines()
+            if clients:
+                break
+            time.sleep(0.05)
+        self.assertTrue(clients, "legacy tmux client was not fully attached")
+        time.sleep(0.1)
         process.send(b"\x02d")
         self.assertEqual(process.wait(), 0)
         result = self.bash(
