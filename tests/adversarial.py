@@ -243,6 +243,64 @@ class HubiAdversarialTests(unittest.TestCase):
         slug = self.repo_name[:28]
         return f"hubi-{agent}-{slug}-{digest}"
 
+    def render_sync_wrapper(self) -> Path:
+        wrapper = self.temp / "tmux-render-sync"
+        wrapper.write_text(
+            "#!/usr/bin/env bash\n"
+            "matched_command=0\n"
+            "matched_target=0\n"
+            "previous=\n"
+            "for argument in \"$@\"; do\n"
+            "    [[ \"$argument\" == \"$HUBI_SYNC_COMMAND\" ]] && matched_command=1\n"
+            "    if [[ \"$previous\" == -t && \"$argument\" == \"$HUBI_SYNC_TARGET\" ]]; then\n"
+            "        matched_target=1\n"
+            "    fi\n"
+            "    previous=\"$argument\"\n"
+            "done\n"
+            "if (( matched_command && matched_target )); then\n"
+            "    trap '' INT HUP TERM\n"
+            "    if (set -o noclobber; printf 'inside status query\\n' >\"$HUBI_SYNC_MARKER\") 2>/dev/null; then\n"
+            "        sleep 0.5\n"
+            "    fi\n"
+            "fi\n"
+            f"exec {REAL_TMUX} -f /dev/null \"$@\"\n"
+        )
+        wrapper.chmod(0o755)
+        return wrapper
+
+    def wait_for_marker(self, marker: Path, timeout: float = 4.0) -> None:
+        deadline = time.monotonic() + timeout
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(marker.exists(), "render synchronization query was not reached")
+
+    def assert_synchronized_render_signal(
+        self,
+        argv: list[str],
+        env: dict[str, str],
+        marker: Path,
+        signum: signal.Signals,
+        expected: int,
+        name: bytes,
+    ) -> bytes:
+        process = PtyProcess(argv, env)
+        self.ptys.append(process)
+        self.wait_for_marker(marker)
+        foreground = os.tcgetpgrp(process.fd)
+        self.assertEqual(foreground, process.pid)
+        os.killpg(foreground, signum)
+        rc = process.wait(timeout=4)
+        process.read_available()
+        output = bytes(process.buffer)
+        self.assertEqual(rc, expected, output[-4000:])
+        self.assertIn(b"odebrano " + name, output)
+        self.assertIn(b"\x1b[?2004l", output)
+        self.assertNotIn(b"unexpected EOF", output)
+        self.assertNotIn(b"syntax error", output)
+        self.assertNotIn(b"interrupt trap", output)
+        self.assertNotIn(b"hubi: line", output)
+        return output
+
     def scope_active(self, agent: str = "codex") -> bool:
         return (
             subprocess.run(
@@ -769,20 +827,15 @@ class HubiAdversarialTests(unittest.TestCase):
             process.read_available()
             self.assertIn(b"odebrano " + name, process.buffer)
 
-    def test_many_repo_menu_signal_stress_has_clean_explicit_codes(self) -> None:
+    def test_main_menu_render_signals_are_deferred_at_synchronized_status_query(self) -> None:
         for number in range(2, 15):
             subprocess.run(
                 ["git", "init", "-q", str(self.repos / f"{self.unique}-repo-{number:02d}")],
                 check=True,
             )
-        slow_tmux = self.temp / "tmux-slow-render"
-        slow_tmux.write_text(
-            "#!/usr/bin/env bash\n"
-            "sleep 0.015\n"
-            f"exec {REAL_TMUX} -f /dev/null \"$@\"\n"
-        )
-        slow_tmux.chmod(0o755)
-        stress_env = {**self.env, "HUBI_TMUX_BIN": str(slow_tmux)}
+        wrapper = self.render_sync_wrapper()
+        target = self.session_name("codex")
+        sessions_before = self.tmux("list-sessions", "-F", "#S", check=False).stdout
         burner = subprocess.Popen(
             ["bash", "-c", "while :; do :; done"],
             stdout=subprocess.DEVNULL,
@@ -794,19 +847,73 @@ class HubiAdversarialTests(unittest.TestCase):
                 (signal.SIGHUP, 129, b"HUP"),
                 (signal.SIGTERM, 143, b"TERM"),
             ):
-                for _ in range(3):
-                    process = PtyProcess([str(HUBI)], stress_env)
-                    self.ptys.append(process)
-                    process.wait_for(b"HUBINET DEVBOX")
-                    os.killpg(os.tcgetpgrp(process.fd), signum)
-                    self.assertEqual(process.wait(timeout=4), expected)
-                    process.read_available()
-                    output = bytes(process.buffer)
-                    self.assertIn(b"odebrano " + name, output)
-                    self.assertNotIn(b"unexpected EOF", output)
-                    self.assertNotIn(b"syntax error", output)
-                    self.assertNotIn(b"interrupt trap", output)
-                    self.assertNotIn(b"hubi: line", output)
+                for iteration in range(3):
+                    with self.subTest(signal=name, iteration=iteration):
+                        marker = self.temp / f"main-{name.decode()}-{iteration}.marker"
+                        sync_env = {
+                            **self.env,
+                            "HUBI_TMUX_BIN": str(wrapper),
+                            "HUBI_SYNC_COMMAND": "has-session",
+                            "HUBI_SYNC_TARGET": target,
+                            "HUBI_SYNC_MARKER": str(marker),
+                        }
+                        self.assert_synchronized_render_signal(
+                            [str(HUBI)], sync_env, marker, signum, expected, name
+                        )
+                        self.assertEqual(
+                            self.tmux("list-sessions", "-F", "#S", check=False).stdout,
+                            sessions_before,
+                        )
+                        self.assertFalse(self.scope_active("codex"))
+                        self.assertFalse(self.scope_active("claude"))
+                        self.assertFalse(self.input_log.exists())
+        finally:
+            burner.terminate()
+            burner.wait(timeout=2)
+
+    def test_sessions_menu_render_signals_are_deferred_at_synchronized_status_query(self) -> None:
+        session_names = [f"render-session-{number}" for number in range(4)]
+        for session_name in session_names:
+            self.tmux("new-session", "-d", "-s", session_name, "--", "sleep", "30")
+        sessions_before = self.tmux("list-sessions", "-F", "#S").stdout
+        wrapper = self.render_sync_wrapper()
+        target = session_names[1]
+        burner = subprocess.Popen(
+            ["bash", "-c", "while :; do :; done"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            for signum, expected, name in (
+                (signal.SIGINT, 130, b"INT"),
+                (signal.SIGHUP, 129, b"HUP"),
+                (signal.SIGTERM, 143, b"TERM"),
+            ):
+                for iteration in range(3):
+                    with self.subTest(signal=name, iteration=iteration):
+                        marker = self.temp / f"sessions-{name.decode()}-{iteration}.marker"
+                        sync_env = {
+                            **self.env,
+                            "HUBI_TMUX_BIN": str(wrapper),
+                            "HUBI_SYNC_COMMAND": "list-clients",
+                            "HUBI_SYNC_TARGET": target,
+                            "HUBI_SYNC_MARKER": str(marker),
+                        }
+                        self.assert_synchronized_render_signal(
+                            [str(HUBI), "sessions"],
+                            sync_env,
+                            marker,
+                            signum,
+                            expected,
+                            name,
+                        )
+                        self.assertEqual(
+                            self.tmux("list-sessions", "-F", "#S").stdout,
+                            sessions_before,
+                        )
+                        self.assertFalse(self.scope_active("codex"))
+                        self.assertFalse(self.scope_active("claude"))
+                        self.assertFalse(self.input_log.exists())
         finally:
             burner.terminate()
             burner.wait(timeout=2)
