@@ -247,21 +247,29 @@ class HubiAdversarialTests(unittest.TestCase):
         wrapper = self.temp / "tmux-render-sync"
         wrapper.write_text(
             "#!/usr/bin/env bash\n"
-            "matched_command=0\n"
-            "matched_target=0\n"
+            "matched_sync_command=0\n"
+            "matched_sync_target=0\n"
+            "matched_after_command=0\n"
+            "matched_after_target=0\n"
             "previous=\n"
             "for argument in \"$@\"; do\n"
-            "    [[ \"$argument\" == \"$HUBI_SYNC_COMMAND\" ]] && matched_command=1\n"
+            "    [[ \"$argument\" == \"$HUBI_SYNC_COMMAND\" ]] && matched_sync_command=1\n"
+            "    [[ \"$argument\" == \"$HUBI_AFTER_COMMAND\" ]] && matched_after_command=1\n"
             "    if [[ \"$previous\" == -t && \"$argument\" == \"$HUBI_SYNC_TARGET\" ]]; then\n"
-            "        matched_target=1\n"
+            "        matched_sync_target=1\n"
+            "    fi\n"
+            "    if [[ \"$previous\" == -t && \"$argument\" == \"$HUBI_AFTER_TARGET\" ]]; then\n"
+            "        matched_after_target=1\n"
             "    fi\n"
             "    previous=\"$argument\"\n"
             "done\n"
-            "if (( matched_command && matched_target )); then\n"
-            "    trap '' INT HUP TERM\n"
+            "if (( matched_sync_command && matched_sync_target )); then\n"
             "    if (set -o noclobber; printf 'inside status query\\n' >\"$HUBI_SYNC_MARKER\") 2>/dev/null; then\n"
-            "        sleep 0.5\n"
+            "        sleep 1\n"
             "    fi\n"
+            "fi\n"
+            "if (( matched_after_command && matched_after_target )); then\n"
+            "    printf 'reached safe boundary\\n' >\"$HUBI_AFTER_MARKER\"\n"
             "fi\n"
             f"exec {REAL_TMUX} -f /dev/null \"$@\"\n"
         )
@@ -279,6 +287,7 @@ class HubiAdversarialTests(unittest.TestCase):
         argv: list[str],
         env: dict[str, str],
         marker: Path,
+        after_marker: Path,
         signum: signal.Signals,
         expected: int,
         name: bytes,
@@ -293,6 +302,11 @@ class HubiAdversarialTests(unittest.TestCase):
         process.read_available()
         output = bytes(process.buffer)
         self.assertEqual(rc, expected, output[-4000:])
+        self.assertTrue(
+            after_marker.exists(),
+            b"signal trap exited before the guarded status block reached its safe boundary\n"
+            + output[-4000:],
+        )
         self.assertIn(b"odebrano " + name, output)
         self.assertIn(b"\x1b[?2004l", output)
         self.assertNotIn(b"unexpected EOF", output)
@@ -850,15 +864,25 @@ class HubiAdversarialTests(unittest.TestCase):
                 for iteration in range(3):
                     with self.subTest(signal=name, iteration=iteration):
                         marker = self.temp / f"main-{name.decode()}-{iteration}.marker"
+                        after_marker = self.temp / f"main-{name.decode()}-{iteration}.after"
                         sync_env = {
                             **self.env,
                             "HUBI_TMUX_BIN": str(wrapper),
                             "HUBI_SYNC_COMMAND": "has-session",
                             "HUBI_SYNC_TARGET": target,
                             "HUBI_SYNC_MARKER": str(marker),
+                            "HUBI_AFTER_COMMAND": "has-session",
+                            "HUBI_AFTER_TARGET": self.session_name("claude"),
+                            "HUBI_AFTER_MARKER": str(after_marker),
                         }
                         self.assert_synchronized_render_signal(
-                            [str(HUBI)], sync_env, marker, signum, expected, name
+                            [str(HUBI)],
+                            sync_env,
+                            marker,
+                            after_marker,
+                            signum,
+                            expected,
+                            name,
                         )
                         self.assertEqual(
                             self.tmux("list-sessions", "-F", "#S", check=False).stdout,
@@ -892,17 +916,22 @@ class HubiAdversarialTests(unittest.TestCase):
                 for iteration in range(3):
                     with self.subTest(signal=name, iteration=iteration):
                         marker = self.temp / f"sessions-{name.decode()}-{iteration}.marker"
+                        after_marker = self.temp / f"sessions-{name.decode()}-{iteration}.after"
                         sync_env = {
                             **self.env,
                             "HUBI_TMUX_BIN": str(wrapper),
                             "HUBI_SYNC_COMMAND": "list-clients",
                             "HUBI_SYNC_TARGET": target,
                             "HUBI_SYNC_MARKER": str(marker),
+                            "HUBI_AFTER_COMMAND": "has-session",
+                            "HUBI_AFTER_TARGET": target,
+                            "HUBI_AFTER_MARKER": str(after_marker),
                         }
                         self.assert_synchronized_render_signal(
                             [str(HUBI), "sessions"],
                             sync_env,
                             marker,
+                            after_marker,
                             signum,
                             expected,
                             name,

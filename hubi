@@ -23,6 +23,9 @@ FOUND_SESSION_KIND=""
 FOUND_PANE=""
 ENSURED_SESSION=""
 ATTACH_MODE=""
+RENDER_CRITICAL=0
+PENDING_SIGNAL=""
+PENDING_SIGNAL_RC=0
 HUBI_LOCK_TIMEOUT="${HUBI_LOCK_TIMEOUT:-3}"
 HUBI_PASTE_TIMEOUT="${HUBI_PASTE_TIMEOUT:-5}"
 
@@ -88,10 +91,33 @@ on_signal() {
     exit "$rc"
 }
 
+handle_signal() {
+    local signal="$1" rc="$2"
+    if (( RENDER_CRITICAL )); then
+        if [[ -z "$PENDING_SIGNAL" ]]; then
+            PENDING_SIGNAL="$signal"
+            PENDING_SIGNAL_RC="$rc"
+        fi
+        return
+    fi
+    on_signal "$signal" "$rc"
+}
+
+begin_render_critical() {
+    RENDER_CRITICAL=1
+}
+
+end_render_critical() {
+    RENDER_CRITICAL=0
+    if [[ -n "$PENDING_SIGNAL" ]]; then
+        on_signal "$PENDING_SIGNAL" "$PENDING_SIGNAL_RC"
+    fi
+}
+
 install_signal_handlers() {
-    trap 'on_signal INT 130' INT
-    trap 'on_signal HUP 129' HUP
-    trap 'on_signal TERM 143' TERM
+    trap 'handle_signal INT 130' INT
+    trap 'handle_signal HUP 129' HUP
+    trap 'handle_signal TERM 143' TERM
     trap disable_safe_input EXIT
 }
 
@@ -735,8 +761,10 @@ sessions_menu() {
         show_hint
         for ((i = start; i < end; i++)); do
             session="${sessions[$i]}"
+            begin_render_critical
             clients="$(session_clients "$session")"
             status="$(session_status "$session")"
+            end_render_critical
             printf '  [%d] %-32s %s; klienci: %s\n' "$((i - start + 1))" "$session" "$status" "$clients"
         done
         printf '\n  [n] Następna  [p] Poprzednia  [b] Powrót\n  > '
@@ -803,8 +831,10 @@ main_menu() {
         show_hint
         for ((i = start; i < end; i++)); do
             repo="${repos[$i]}"
+            begin_render_critical
             codex_state="$(agent_status codex "$repo")"
             claude_state="$(agent_status claude "$repo")"
+            end_render_critical
             printf '  [%d] %-20s C:%-18s A:%s\n' "$((i - start + 1))" "$repo" \
                 "$codex_state" "$claude_state"
         done
