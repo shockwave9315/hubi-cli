@@ -763,6 +763,8 @@ sessions_menu() {
             session="${sessions[$i]}"
             begin_render_critical
             clients="$(session_clients "$session")"
+            end_render_critical
+            begin_render_critical
             status="$(session_status "$session")"
             end_render_critical
             printf '  [%d] %-32s %s; klienci: %s\n' "$((i - start + 1))" "$session" "$status" "$clients"
@@ -833,6 +835,8 @@ main_menu() {
             repo="${repos[$i]}"
             begin_render_critical
             codex_state="$(agent_status codex "$repo")"
+            end_render_critical
+            begin_render_critical
             claude_state="$(agent_status claude "$repo")"
             end_render_critical
             printf '  [%d] %-20s C:%-18s A:%s\n' "$((i - start + 1))" "$repo" \

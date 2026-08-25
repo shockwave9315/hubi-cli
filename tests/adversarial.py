@@ -270,6 +270,7 @@ class HubiAdversarialTests(unittest.TestCase):
             "fi\n"
             "if (( matched_after_command && matched_after_target )); then\n"
             "    printf 'reached safe boundary\\n' >\"$HUBI_AFTER_MARKER\"\n"
+            "    sleep \"$HUBI_AFTER_DELAY\"\n"
             "fi\n"
             f"exec {REAL_TMUX} -f /dev/null \"$@\"\n"
         )
@@ -297,15 +298,21 @@ class HubiAdversarialTests(unittest.TestCase):
         self.wait_for_marker(marker)
         foreground = os.tcgetpgrp(process.fd)
         self.assertEqual(foreground, process.pid)
+        started = time.monotonic()
         os.killpg(foreground, signum)
-        rc = process.wait(timeout=4)
+        rc = process.wait(timeout=5)
+        elapsed = time.monotonic() - started
         process.read_available()
         output = bytes(process.buffer)
         self.assertEqual(rc, expected, output[-4000:])
-        self.assertTrue(
+        self.assertLess(
+            elapsed,
+            1.5,
+            f"signal exit took {elapsed:.2f}s; second status marker={after_marker.exists()}",
+        )
+        self.assertFalse(
             after_marker.exists(),
-            b"signal trap exited before the guarded status block reached its safe boundary\n"
-            + output[-4000:],
+            b"second status query started after a signal was pending\n" + output[-4000:],
         )
         self.assertIn(b"odebrano " + name, output)
         self.assertIn(b"\x1b[?2004l", output)
@@ -874,6 +881,7 @@ class HubiAdversarialTests(unittest.TestCase):
                             "HUBI_AFTER_COMMAND": "has-session",
                             "HUBI_AFTER_TARGET": self.session_name("claude"),
                             "HUBI_AFTER_MARKER": str(after_marker),
+                            "HUBI_AFTER_DELAY": "3",
                         }
                         self.assert_synchronized_render_signal(
                             [str(HUBI)],
@@ -926,6 +934,7 @@ class HubiAdversarialTests(unittest.TestCase):
                             "HUBI_AFTER_COMMAND": "has-session",
                             "HUBI_AFTER_TARGET": target,
                             "HUBI_AFTER_MARKER": str(after_marker),
+                            "HUBI_AFTER_DELAY": "3",
                         }
                         self.assert_synchronized_render_signal(
                             [str(HUBI), "sessions"],
