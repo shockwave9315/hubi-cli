@@ -4,6 +4,7 @@
 import os
 import pty
 import signal
+import subprocess
 import sys
 import time
 
@@ -18,7 +19,7 @@ def main() -> int:
     if pid == 0:
         environment = os.environ.copy()
         environment.pop("TMUX", None)
-        environment.setdefault("TERM", "xterm-256color")
+        environment["TERM"] = "xterm-256color"
         command = ["tmux", "-L", socket, "attach-session"]
         if mode == "readonly":
             command.append("-r")
@@ -26,7 +27,18 @@ def main() -> int:
         os.execvpe(command[0], command, environment)
 
     try:
-        time.sleep(0.35)
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            clients = subprocess.run(
+                ["tmux", "-L", socket, "list-clients", "-t", session, "-F", "#{client_pid}"],
+                text=True,
+                capture_output=True,
+            )
+            if clients.stdout.splitlines():
+                break
+            time.sleep(0.05)
+        else:
+            raise TimeoutError(f"tmux client {pid} did not attach to {session}")
         os.write(fd, payload.encode() + b"\n")
         time.sleep(0.35)
     finally:

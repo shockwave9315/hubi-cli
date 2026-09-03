@@ -25,8 +25,8 @@ bracketed-paste markers.
 
 ```text
 hubi
-hubi codex REPO
-hubi claude REPO
+hubi codex REPO [INSTANCE [new|resume]]
+hubi claude REPO [INSTANCE [new|resume]]
 hubi shell REPO
 hubi sessions
 ```
@@ -37,6 +37,16 @@ and session lists paginate after nine entries. Immediately before tmux and
 systemd creation, Hubi revalidates the repository path, root, containment, and
 filesystem identity so a vanished or replaced repository cannot fall back to
 the home directory.
+
+Each managed agent is identified by repository, agent, and instance name. The
+project screen lists Claude and Codex instances separately; its instance menu
+can create, attach, inspect, or stop one exact instance. Names are 1–32
+characters, start with an alphanumeric character, and otherwise contain only
+alphanumerics, `_`, or `-`. `primary` retains the original v4 tmux name, scope,
+startup lock, and metadata compatibility. Existing v4 sessions without
+`@hubi-instance` are recognized as `primary` without being renamed or mutated.
+Secondary instances use names and scopes containing the agent, validated
+instance, repository hash, and a hash of the complete identity.
 
 Agent states are:
 
@@ -51,6 +61,10 @@ Agent states are:
 Selecting an `EXITED` agent opens the retained terminal output. Use the
 project's stop action to discard that retained session before starting it
 again.
+
+New instances can start a new conversation or enter the agent's own supported
+resume picker. Claude is invoked with `--resume`; Codex is invoked with its
+`resume` subcommand. Hubi does not select models or interpret conversation IDs.
 
 When a live session already has a client, Hubi asks whether to attach in one of
 three modes:
@@ -80,6 +94,11 @@ after three seconds instead of freezing the menu. Hubi reconciles the tmux
 session and scope independently; an orphan scope can be safely cleaned and a
 restart can recover.
 
+The startup lock is per repository, agent, and instance, so simultaneous
+starters for the same identity converge while different instances may start
+independently. Status, capture, signals, orphan cleanup, and stop operations use
+the selected instance's exact scope and pinned pane.
+
 Hubi preserves tmux and systemd diagnostics when startup or attachment fails.
 A failed/ended pane remains available as `EXITED` rather than disappearing.
 Pre-v4 tmux session names are recognized as legacy/unmanaged for migration.
@@ -97,6 +116,10 @@ Launcher signal behavior is explicit:
 - `q` returns 98 so autologin leaves the user at a normal SSH prompt.
 - `x` returns 99 so autologin disconnects the SSH shell.
 - Exiting a temporary shell returns to Hubi.
+
+Project and host shells remain temporary and outside the managed lifecycle.
+They display a warning that processes started there may end when SSH
+disconnects and direct users to managed Claude/Codex instances for persistence.
 
 `HUBI_ACTIVE` prevents nested launchers. If autologin is broken, bypass it with:
 
@@ -118,10 +141,12 @@ Run the isolated test suite with:
 ```bash
 ./tests/run.sh
 python3 tests/adversarial.py
+python3 tests/multi_instance.py
 ```
 
-At this revision the functional harness reports 16 tests and the adversarial
-suite contains 31 tests; both totals must be fully green for release review.
+At this revision the functional harness reports 16 tests, the adversarial
+suite contains 32 tests, and the multi-instance suite contains 8 tests; all
+totals must be fully green for release review.
 
 The harness uses a unique tmux socket, disposable Git repositories, fake agent
 processes, and unique systemd scopes. It never attaches to or stops the default
