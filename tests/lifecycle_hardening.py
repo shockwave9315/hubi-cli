@@ -531,6 +531,62 @@ class LifecycleHardeningTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), str(safe_base / "state"))
 
+    # -----------------------------------------------------------------
+    # P2-03/P2-08: a malformed trusted record (bad content, wrong mode, or a
+    # symlink standing in for the record file) must never be treated as
+    # ownership proof, and must not silently authorize anything.
+    # -----------------------------------------------------------------
+    def test_malformed_state_record_is_never_trusted(self) -> None:
+        state_dir = self.bash_value('source "$HUBI_FILE"; state_root', self.env)
+        self.assertTrue(state_dir)
+        hash_value = self.bash_value(
+            'source "$HUBI_FILE"; compute_identity_hash "$CANON" codex primary',
+            {**self.env, "CANON": str(self.repo)},
+        )
+        record_path = Path(state_dir) / f"{hash_value}.rec"
+
+        # Garbage content, correct permissions.
+        record_path.write_text("this is not key=value data at all\n")
+        record_path.chmod(0o600)
+        result = self.bash(
+            'source "$HUBI_FILE"; load_state_record "$HASH"; echo "rc=$?"',
+            {**self.env, "HASH": hash_value},
+        )
+        self.assertIn("rc=2", result.stdout)
+
+        # Well-formed content, but world-readable (unsafe mode).
+        record_path.write_text(
+            "schema=1\nagent=codex\ninstance=primary\ncanonical_path=/x\n"
+            "repo_dev_inode=1:1\nsession=s\npane=%1\nscope=sc.scope\n"
+            "token=deadbeef\nstate=COMMITTED\ncreated=1\ncommitted=1\n"
+        )
+        record_path.chmod(0o644)
+        result = self.bash(
+            'source "$HUBI_FILE"; load_state_record "$HASH"; echo "rc=$?"',
+            {**self.env, "HASH": hash_value},
+        )
+        self.assertIn("rc=2", result.stdout)
+        record_path.unlink()
+
+        # A symlink standing in for the record file.
+        target = self.temp / "record-symlink-target"
+        target.write_text("schema=1\nstate=COMMITTED\n")
+        record_path.symlink_to(target)
+        result = self.bash(
+            'source "$HUBI_FILE"; load_state_record "$HASH"; echo "rc=$?"',
+            {**self.env, "HASH": hash_value},
+        )
+        self.assertIn("rc=2", result.stdout)
+        record_path.unlink()
+
+        # None of this authorized starting a real agent at this identity to
+        # somehow inherit the forged/malformed session or scope names.
+        status = self.bash(
+            'source "$HUBI_FILE"; agent_status codex "$CANON" primary',
+            {**self.env, "CANON": str(self.repo)},
+        ).stdout
+        self.assertIn("STOPPED", status)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -261,7 +261,7 @@ python3 tests/lifecycle_hardening.py
 At this revision `tests/run.sh` reports 21 checks, the adversarial suite
 contains 32 tests, the multi-instance suite contains 11 tests, and
 `lifecycle_hardening.py` (identity/ownership/lifecycle regression coverage for
-the P1–P3 hardening batch) contains 13 tests; all totals must be fully green
+the P1–P3 hardening batch) contains 14 tests; all totals must be fully green
 for release review.
 
 Every suite uses a unique tmux socket, a private `HUBI_RUNTIME_DIR`,
