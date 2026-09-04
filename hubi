@@ -239,6 +239,7 @@ repo_list() {
 }
 
 name_hash() { printf '%s' "$1" | sha256sum | cut -c1-12; }
+instance_name_hash() { printf '%s\0%s' "$1" "$2" | sha256sum | cut -c1-12; }
 safe_slug() {
     local slug
     slug="$(printf '%s' "$1" | tr -c '[:alnum:]_-' '-')"
@@ -255,7 +256,7 @@ agent_session_name() {
         printf 'hubi-%s-%s-%s' "$agent" "$(safe_slug "${repo_key##*/}")" "$(name_hash "$repo_key")"
     else
         printf 'hubi-%s-%s-%s-%s' "$agent" "$(safe_slug "${repo_key##*/}")" \
-            "$(safe_slug "$instance")" "$(name_hash "$repo_key:$instance")"
+            "$(safe_slug "$instance")" "$(instance_name_hash "$repo_key" "$instance")"
     fi
 }
 
@@ -265,7 +266,7 @@ agent_scope_name() {
     if [[ "$instance" == "primary" ]]; then
         printf 'hubi-%s-%s.scope' "$agent" "$(name_hash "$repo_key")"
     else
-        printf 'hubi-%s-%s.scope' "$agent" "$(name_hash "$repo_key:$instance")"
+        printf 'hubi-%s-%s.scope' "$agent" "$(instance_name_hash "$repo_key" "$instance")"
     fi
 }
 
@@ -466,9 +467,12 @@ ensure_agent_session() {
     require_scope_kill_capability || return 1
     revalidate_repo_for_start "$repo_key" "$directory" "$expected_repo_id" || return 1
     locks="$(lock_root)" || { printf 'Hubi: nie można utworzyć katalogu blokad startowych.\n' >&2; return 1; }
-    lock_identity="$agent:$repo_key"
-    [[ "$instance" == "primary" ]] || lock_identity+=":$instance"
-    lock_file="$locks/$(name_hash "$lock_identity").lock"
+    if [[ "$instance" == "primary" ]]; then
+        lock_identity="$agent:$repo_key"
+        lock_file="$locks/$(name_hash "$lock_identity").lock"
+    else
+        lock_file="$locks/$agent-$(instance_name_hash "$repo_key" "$instance").lock"
+    fi
     if [[ ! "$HUBI_LOCK_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
         printf 'Hubi: nieprawidłowy limit oczekiwania na blokadę: %s\n' "$HUBI_LOCK_TIMEOUT" >&2
         return 1

@@ -29,10 +29,14 @@ cleanup() {
         for agent in codex claude; do
             for instance in primary review upstream capture-one capture-two \
                 argv-c-new argv-c-resume argv-a-new argv-a-resume; do
-                identity="$agent:$REPO_NAME"
-                [[ "$instance" == primary ]] || identity+=":$instance"
-                digest="$(printf '%s' "$identity" | sha256sum | cut -c1-12)"
-                rm -f -- "$lock_dir/$digest.lock"
+                if [[ "$instance" == primary ]]; then
+                    identity="$agent:$REPO_NAME"
+                    digest="$(printf '%s' "$identity" | sha256sum | cut -c1-12)"
+                    rm -f -- "$lock_dir/$digest.lock"
+                else
+                    digest="$(printf '%s\0%s' "$REPO_NAME" "$instance" | sha256sum | cut -c1-12)"
+                    rm -f -- "$lock_dir/$agent-$digest.lock"
+                fi
             done
         done
     fi
@@ -120,6 +124,52 @@ test_naming() {
         && "$(scope_name codex review)" != "$(scope_name claude review)" ]]
 }
 check "primary names are compatible and secondary identities are unique" test_naming
+
+test_structural_identity_collision() {
+    local primary_session secondary_session primary_scope secondary_scope
+    local primary_lock secondary_lock primary_hash secondary_hash
+    local lock_dir="${XDG_RUNTIME_DIR:-/tmp}/hubi-locks-$UID"
+    local -a lock_paths=()
+    git init -q "$REPOS/foo"
+    git init -q "$REPOS/foo:bar"
+    cat >"$TEST_ROOT/flock-recorder" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$7" >>"$LOCK_LOG"
+EOF
+    chmod +x "$TEST_ROOT/flock-recorder"
+    primary_session="$(hubi_env HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; agent_session_name codex "foo:bar" primary')"
+    secondary_session="$(hubi_env HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; agent_session_name codex foo bar')"
+    primary_scope="$(hubi_env HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; agent_scope_name codex "foo:bar" primary')"
+    secondary_scope="$(hubi_env HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; agent_scope_name codex foo bar')"
+    secondary_hash="$(hubi_env HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; instance_name_hash foo bar')"
+    primary_hash="$(printf '%s' 'codex:foo:bar' | sha256sum | cut -c1-12)"
+    hubi_env HUBI_FLOCK_BIN="$TEST_ROOT/flock-recorder" LOCK_LOG="$TEST_ROOT/lock-paths" \
+        HUBI_FILE="$HUBI" bash -c '
+            source "$HUBI_FILE"; resolve_repo "foo:bar"
+            ensure_agent_session codex "$RESOLVED_REPO_KEY" "$RESOLVED_REPO_DIR" "$HUBI_CODEX_BIN"
+        ' || return 1
+    hubi_env HUBI_FLOCK_BIN="$TEST_ROOT/flock-recorder" LOCK_LOG="$TEST_ROOT/lock-paths" \
+        HUBI_FILE="$HUBI" bash -c '
+            source "$HUBI_FILE"; resolve_repo foo
+            HUBI_AGENT_INSTANCE=bar ensure_agent_session codex \
+                "$RESOLVED_REPO_KEY" "$RESOLVED_REPO_DIR" "$HUBI_CODEX_BIN"
+        ' || return 1
+    mapfile -t lock_paths <"$TEST_ROOT/lock-paths"
+    primary_lock="${lock_paths[0]:-}"
+    secondary_lock="${lock_paths[1]:-}"
+    [[ "$primary_session" != "$secondary_session" \
+        && "$primary_scope" != "$secondary_scope" \
+        && "$primary_hash" != "$secondary_hash" \
+        && "$primary_lock" == "$lock_dir/$primary_hash.lock" \
+        && "$secondary_lock" == "$lock_dir/codex-$secondary_hash.lock" \
+        && "$primary_lock" != "$secondary_lock" ]]
+}
+check "primary and secondary delimiter identities cannot collide" test_structural_identity_collision
 
 test_invalid_names() {
     local value
