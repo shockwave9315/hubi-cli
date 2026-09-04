@@ -587,6 +587,109 @@ class LifecycleHardeningTests(unittest.TestCase):
         ).stdout
         self.assertIn("STOPPED", status)
 
+    # -----------------------------------------------------------------
+    # P2-05 (clean-install pass, part C): a launcher cancelled or killed
+    # BEFORE any trusted STARTING record exists — even before the tmux
+    # bootstrap object itself exists — must not let an unsupervised worker
+    # go on to finish creating a managed agent. Every case below sends the
+    # signal to the launcher process ONLY (os.kill, never a process group),
+    # matching the "parent-only" threat model exactly.
+    # -----------------------------------------------------------------
+    def _stalling_tmux_wrapper(self, marker: Path, match: str) -> Path:
+        # Stalls after the REAL tmux has already answered a specific command
+        # (matched by substring, e.g. "has-session" or "new-session"),
+        # giving a deterministic rendezvous point instead of a racy sleep.
+        wrapper = self.temp / f"tmux-stall-{marker.name}"
+        wrapper.write_text(
+            "#!/usr/bin/env bash\n"
+            f"if [[ \" $* \" == *\" {match} \"* ]]; then\n"
+            f"  {REAL_TMUX} -f /dev/null \"$@\"\n"
+            "  rc=$?\n"
+            f"  : >'{marker}'\n"
+            "  sleep 3\n"
+            "  exit \"$rc\"\n"
+            "fi\n"
+            f"exec {REAL_TMUX} -f /dev/null \"$@\"\n"
+        )
+        wrapper.chmod(0o755)
+        return wrapper
+
+    def _assert_absent_after_parent_only_signal(self, canonical: str) -> None:
+        session = self.session_name("codex", canonical)
+        scope = self.scope_name("codex", canonical)
+        self.assertEqual(
+            self.tmux("has-session", "-t", session, check=False).returncode, 1,
+            "a bootstrap tmux session survived an unsupervised parent death",
+        )
+        self.assertFalse(self.scope_active(scope), "a bootstrap scope survived an unsupervised parent death")
+        hash_value = self.bash_value(
+            'source "$HUBI_FILE"; compute_identity_hash "$CANON" codex primary',
+            {**self.env, "CANON": canonical},
+        )
+        diagnosis = self.bash_value(
+            'source "$HUBI_FILE"; if load_state_record "$HASH"; then printf "%s" "${REC[state]}"; '
+            'else printf "ABSENT"; fi',
+            {**self.env, "HASH": hash_value},
+        )
+        self.assertNotEqual(diagnosis, "COMMITTED", "a bogus COMMITTED record was left behind")
+
+    def _run_parent_only_signal_case(self, sig: signal.Signals, stage: str) -> None:
+        # stage "early": stalls right after the very first tmux call the
+        # worker makes (the pre-creation has-session CONFLICT check) — the
+        # bootstrap object does not exist yet at all.
+        # stage "mid": stalls right after tmux new-session itself returns —
+        # the bootstrap object exists but no STARTING record has been
+        # written yet.
+        canonical = str(self.repo)
+        env = dict(self.env)
+        session = self.session_name("codex", canonical)
+        match = "has-session" if stage == "early" else "new-session"
+        marker = self.temp / f"stall-{sig.name}-{stage}"
+        env["HUBI_TMUX_BIN"] = str(self._stalling_tmux_wrapper(marker, match))
+        process = subprocess.Popen(
+            [str(HUBI), "codex", self.repo_name],
+            env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        try:
+            deadline = time.monotonic() + 5
+            while not marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(marker.exists(), f"tmux {match} was never reached")
+            os.kill(process.pid, sig)  # parent-only: never the process group
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=5)
+        finally:
+            if process.stdout is not None:
+                process.stdout.close()
+        # Long enough that an unsupervised orphan worker would have finished
+        # creating and committing an agent, if nothing were stopping it
+        # (the stalling wrapper itself keeps running for 3s after the
+        # marker).
+        time.sleep(4)
+        self._assert_absent_after_parent_only_signal(canonical)
+
+    def test_parent_only_int_before_tmux_creation(self) -> None:
+        self._run_parent_only_signal_case(signal.SIGINT, stage="early")
+
+    def test_parent_only_hup_before_tmux_creation(self) -> None:
+        self._run_parent_only_signal_case(signal.SIGHUP, stage="early")
+
+    def test_parent_only_term_before_tmux_creation(self) -> None:
+        self._run_parent_only_signal_case(signal.SIGTERM, stage="early")
+
+    def test_parent_only_term_while_tmux_new_session_is_delayed(self) -> None:
+        self._run_parent_only_signal_case(signal.SIGTERM, stage="mid")
+
+    def test_parent_only_sigkill_before_tmux_creation(self) -> None:
+        self._run_parent_only_signal_case(signal.SIGKILL, stage="early")
+
+    def test_parent_only_sigkill_while_tmux_new_session_is_delayed(self) -> None:
+        self._run_parent_only_signal_case(signal.SIGKILL, stage="mid")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

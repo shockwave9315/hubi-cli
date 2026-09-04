@@ -1050,7 +1050,13 @@ class HubiAdversarialTests(unittest.TestCase):
         process.send(b"\x02d")
         self.assertEqual(process.wait(), 0)
 
-    def test_legacy_session_is_attachable_but_never_managed(self) -> None:
+    def test_v3_style_session_is_never_treated_as_managed(self) -> None:
+        # Clean-install contract: a v3-style bare-named session
+        # ("<agent>-<repo>", no Hubi metadata at all) is never adopted or
+        # attached through the project agent lifecycle. It is invisible to
+        # find_agent_session/agent_status/stop_agent_now entirely — Hubi
+        # simply does not recognize it as an object it could ever own. It
+        # remains inspectable only as an ordinary session via `hubi sessions`.
         legacy = f"codex-{self.repo_name}"
         self.tmux(
             "new-session",
@@ -1064,33 +1070,16 @@ class HubiAdversarialTests(unittest.TestCase):
             "-c",
             "echo LEGACY_READY; while :; do sleep 1; done",
         )
-        process = PtyProcess([str(HUBI), "codex", self.repo_name], self.env)
-        self.ptys.append(process)
-        process.wait_for(b"legacy/unmanaged")
-        process.send(b"a\n")
-        process.wait_for(b"LEGACY_READY")
-        deadline = time.monotonic() + 2
-        clients = []
-        while time.monotonic() < deadline:
-            clients = self.tmux(
-                "list-clients", "-t", legacy, "-F", "#{client_name}", check=False
-            ).stdout.splitlines()
-            if clients:
-                break
-            time.sleep(0.05)
-        self.assertTrue(clients, "legacy tmux client was not fully attached")
-        time.sleep(0.1)
-        process.send(b"\x02d")
-        self.assertEqual(process.wait(), 0)
         result = self.bash(
             'source "$HUBI_FILE"; resolve_repo "$REPO_NAME"; printf "STATUS=%s\\n" '
             '"$(agent_status codex "$RESOLVED_REPO_DIR")"; stop_agent_now codex "$RESOLVED_REPO_DIR"',
             check=False,
             env={**self.env, "REPO_NAME": self.repo_name},
         )
-        self.assertIn("LEGACY/UNMANAGED", result.stdout)
+        self.assertIn("STATUS=○ STOPPED", result.stdout)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.tmux("has-session", "-t", legacy, check=False).returncode, 0)
+        self.tmux("kill-session", "-t", legacy, check=False)
 
     def test_laptop_and_phone_keep_second_window_at_largest_size(self) -> None:
         self.start_agent()

@@ -127,18 +127,6 @@ class MultiInstanceTests(unittest.TestCase):
             )
         return self._scope_cache[key]
 
-    def legacy_v4_session(self, agent: str, repo: str) -> str:
-        return self.bash_value(
-            'source "$HUBI_FILE"; legacy_v4_session_name "$AGENT" "$REPO"',
-            {**self.env, "AGENT": agent, "REPO": repo},
-        )
-
-    def legacy_v4_scope(self, agent: str, repo: str) -> str:
-        return self.bash_value(
-            'source "$HUBI_FILE"; legacy_v4_scope_name "$AGENT" "$REPO"',
-            {**self.env, "AGENT": agent, "REPO": repo},
-        )
-
     def active(self, identity: tuple[str, str, str]) -> bool:
         return subprocess.run(
             ["systemctl", "--user", "is-active", "--quiet", self.scope(*identity)]
@@ -218,74 +206,42 @@ class MultiInstanceTests(unittest.TestCase):
             )
             self.assertTrue(self.active(identity))
 
-    def test_legacy_v4_primary_is_safely_adopted_and_unchanged_by_secondary(self) -> None:
-        # A session created by Hubi before this revision's identity fix: old
-        # naming, old (relative-key) @hubi-repo, no @hubi-token/@hubi-instance.
-        session = self.legacy_v4_session("claude", self.repo_x)
-        scope = self.legacy_v4_scope("claude", self.repo_x)
+    def test_old_v4_looking_session_is_never_adopted_mutated_or_killed(self) -> None:
+        # Clean-install contract: a session that LOOKS like something an
+        # older Hubi could have produced (old-style @hubi-repo, no
+        # @hubi-token, no @hubi-instance) but carries no CURRENT trusted
+        # record is simply not our object — never adopted, never enriched,
+        # never destroyed, regardless of how convincing its metadata is.
+        session = f"hubi-claude-{self.repo_x}-oldlooking"
         pane = self.tmux(
             "new-session", "-d", "-P", "-F", "#{pane_id}", "-s", session,
             "-c", str(self.repos / self.repo_x), "--", "sleep", "30",
         ).stdout.strip()
         for option, value in (
             ("@hubi-managed", "v4"), ("@hubi-agent", "claude"),
-            ("@hubi-repo", self.repo_x), ("@hubi-scope", scope),
-            ("@hubi-pane", pane),
+            ("@hubi-repo", self.repo_x), ("@hubi-pane", pane),
         ):
             self.tmux("set-option", "-t", session, option, value)
-        original = dict(
-            line.split(" ", 1) for line in self.tmux("show-options", "-t", session).stdout.splitlines()
-        )
-
-        found = self.bash(
-            'source "$HUBI_FILE"; resolve_repo "$REPO"; '
-            'find_agent_session claude "$RESOLVED_REPO_DIR" primary; '
-            'printf "%s|%s" "$FOUND_SESSION" "$FOUND_SESSION_KIND"',
-            {**self.env, "REPO": self.repo_x},
-        )
-        self.assertEqual(found.stdout, f"{session}|managed")
-
-        # Adoption is additive-only: every pre-existing field keeps its
-        # original value; nothing is renamed, removed, or mutated (req #7).
-        after_adoption = dict(
-            line.split(" ", 1) for line in self.tmux("show-options", "-t", session).stdout.splitlines()
-        )
-        for key, line in original.items():
-            self.assertEqual(after_adoption.get(key), line, key)
-        self.assertIn("@hubi-token", after_adoption)
-
         before = self.tmux("show-options", "-t", session).stdout
-        secondary = ("claude", self.repo_x, "review")
-        self.assert_started(secondary)
-        self.assertEqual(self.tmux("show-options", "-t", session).stdout, before)
-        self.assertEqual(self.tmux("show-option", "-qv", "-t", session, "@hubi-instance").stdout, "")
 
-    def test_legacy_v4_wrong_cwd_is_not_adopted(self) -> None:
-        # A same-named old-v4-looking session whose pane cwd does not match
-        # the repository being requested must never be treated as ours,
-        # even though every tmux option matches (req #7 / P1-02 adjacent).
-        session = self.legacy_v4_session("claude", self.repo_x)
-        scope = self.legacy_v4_scope("claude", self.repo_x)
-        pane = self.tmux(
-            "new-session", "-d", "-P", "-F", "#{pane_id}", "-s", session,
-            "-c", str(self.repos / self.repo_y), "--", "sleep", "30",
-        ).stdout.strip()
-        for option, value in (
-            ("@hubi-managed", "v4"), ("@hubi-agent", "claude"),
-            ("@hubi-repo", self.repo_x), ("@hubi-scope", scope),
-            ("@hubi-pane", pane),
-        ):
-            self.tmux("set-option", "-t", session, option, value)
         found = self.bash(
             'source "$HUBI_FILE"; resolve_repo "$REPO"; '
             'find_agent_session claude "$RESOLVED_REPO_DIR" primary',
             {**self.env, "REPO": self.repo_x},
-            timeout=10,
         )
         self.assertNotEqual(found.returncode, 0)
-        self.assertTrue(
-            self.tmux("show-option", "-qv", "-t", session, "@hubi-token").stdout.strip() == ""
+
+        stop = self.bash(
+            'source "$HUBI_FILE"; resolve_repo "$REPO"; '
+            'stop_agent_now claude "$RESOLVED_REPO_DIR" primary',
+            {**self.env, "REPO": self.repo_x},
         )
+        self.assertNotEqual(stop.returncode, 0)
+
+        # Nothing about it changed: no adoption, no enrichment, no mutation.
+        self.assertEqual(self.tmux("show-options", "-t", session).stdout, before)
+        self.assertEqual(self.tmux("has-session", "-t", session, check=False).returncode, 0)
+        self.tmux("kill-session", "-t", session, check=False)
 
     def test_stop_and_orphan_reconciliation_are_isolated(self) -> None:
         primary = ("claude", self.repo_x, "primary")
@@ -408,12 +364,13 @@ class MultiInstanceTests(unittest.TestCase):
         def record(*fields: str) -> str:
             return "".join(f"{len(field.encode())}:{field}" for field in fields)
 
+        canonical_x = self.canonical(self.repo_x)
+        canonical_y = self.canonical(self.repo_y)
         records = [
-            record("managed-review", "v4", "codex", self.repo_x, "", "review"),
-            record("legacy-primary", "v4", "codex", self.repo_x, "", ""),
-            record("unmanaged", "", "", "", "", ""),
-            record("wrong-agent", "v4", "claude", self.repo_x, "", "review"),
-            record("wrong-repo", "v4", "codex", self.repo_y, "", "review"),
+            record("managed-review", "v4", "codex", canonical_x, "review"),
+            record("unmanaged", "", "", "", ""),
+            record("wrong-agent", "v4", "claude", canonical_x, "review"),
+            record("wrong-repo", "v4", "codex", canonical_y, "review"),
         ]
         tmux_batch.write_text(
             "#!/usr/bin/env bash\n"
@@ -443,7 +400,7 @@ class MultiInstanceTests(unittest.TestCase):
         self.assertEqual(len(calls), 1, calls)
         self.assertIn("list-sessions", calls[0])
         self.assertNotIn("show-option", calls[0])
-        for field in ("session_name", "@hubi-managed", "@hubi-agent", "@hubi-repo", "@hubi-repo-canon", "@hubi-instance"):
+        for field in ("session_name", "@hubi-managed", "@hubi-agent", "@hubi-repo-canon", "@hubi-instance"):
             self.assertIn(field, calls[0])
 
     def test_unsafe_names_and_unmanaged_lookalike_are_never_claimed(self) -> None:

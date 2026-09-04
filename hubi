@@ -21,7 +21,6 @@ RESOLVED_REPO_DIR=""
 RESOLVED_REPO_KEY=""
 RESOLVED_REPO_ID=""
 FOUND_SESSION=""
-FOUND_SESSION_KIND=""
 FOUND_PANE=""
 ENSURED_SESSION=""
 ATTACH_MODE=""
@@ -31,6 +30,7 @@ PENDING_SIGNAL=""
 PENDING_SIGNAL_RC=0
 STARTUP_WORKER_PID=""
 STARTUP_IDENTITY_HASH=""
+STARTUP_WATCH_FIFO=""
 HUBI_LOCKFD=""
 declare -gA REC=()
 HUBI_LOCK_TIMEOUT="${HUBI_LOCK_TIMEOUT:-3}"
@@ -108,15 +108,21 @@ on_signal() {
 # in flock's own descriptor table, never inherited by the --close'd worker
 # command, so the lock is gone as soon as that one process dies — bounding
 # cancellation without needing to reach into whatever tmux/systemd-run
-# subprocess it may currently be blocked on. Any grandchild orphaned by this
-# is reconciled afterward through the persisted STARTING record, which is
-# the actual rollback mechanism (session/scope killed by verified token),
-# not process-tree chasing.
+# subprocess it may currently be blocked on.
+#
+# This alone only reliably reconciles a bootstrap AFTER its trusted STARTING
+# record exists. The earlier window — the worker still resolving tmux/repo
+# checks or blocked inside its first tmux new-session call — is covered
+# separately by the parent-death watchdog the worker itself arms (see
+# start_parent_death_watchdog): our own exit here (for any reason, including
+# a signal this trap cannot even catch) closes STARTUP_WATCH_FIFO's write
+# end, which is what that watchdog is actually waiting on.
 cancel_startup_worker() {
-    local signal="$1" rc="$2" pid="$STARTUP_WORKER_PID" hash="$STARTUP_IDENTITY_HASH" waited=0
+    local signal="$1" rc="$2" pid="$STARTUP_WORKER_PID" hash="$STARTUP_IDENTITY_HASH" fifo="$STARTUP_WATCH_FIFO" waited=0
     trap - INT HUP TERM
     STARTUP_WORKER_PID=""
     STARTUP_IDENTITY_HASH=""
+    STARTUP_WATCH_FIFO=""
     printf '\nHubi: odebrano %s podczas startu; anulowanie i wycofywanie zmian.\n' "$signal" >&2
     kill -TERM "$pid" 2>/dev/null || true
     while (( waited < 20 )) && kill -0 "$pid" 2>/dev/null; do sleep 0.1; ((waited += 1)); done
@@ -126,6 +132,7 @@ cancel_startup_worker() {
     fi
     wait "$pid" 2>/dev/null || true
     [[ -z "$hash" ]] || rollback_starting_record "$hash"
+    [[ -z "$fifo" ]] || rm -f -- "$fifo" 2>/dev/null || true
     exit "$rc"
 }
 
@@ -347,7 +354,6 @@ random_token() {
     fi
 }
 
-name_hash() { printf '%s' "$1" | sha256sum | cut -c1-12; }
 safe_slug() {
     local slug
     slug="$(printf '%s' "$1" | tr -c '[:alnum:]_-' '-')"
@@ -386,47 +392,6 @@ agent_scope_name() {
     else
         printf 'hubi-%s-%s-%s.scope' "$agent" "$(safe_slug "$instance")" "$hash"
     fi
-}
-
-# Pre-identity-fix v4 naming (repo-key based, 12-hex sha256, no @hubi-token).
-# Used ONLY to detect and safely adopt sessions created before this revision;
-# never to compute the identity used for anything created from now on.
-legacy_v4_session_name() {
-    local agent="$1" repo_key="$2"
-    printf 'hubi-%s-%s-%s' "$agent" "$(safe_slug "${repo_key##*/}")" "$(name_hash "$repo_key")"
-}
-legacy_v4_scope_name() {
-    local agent="$1" repo_key="$2"
-    printf 'hubi-%s-%s.scope' "$agent" "$(name_hash "$repo_key")"
-}
-
-# tmux replaces ':' and '.' with '_' in a session name at creation time
-# (verified empirically), which is the "dot/colon canonicalization" the v3
-# legacy-naming audit finding refers to. Reconstructing the name a v3 session
-# would actually have requires applying the same substitution.
-tmux_canonicalize_session_name() {
-    local name="$1"
-    name="${name//:/_}"
-    name="${name//./_}"
-    printf '%s' "$name"
-}
-
-# v3 passed the accepted repo directory name straight to tmux as "<agent>-<repo>"
-# with no character restriction beyond being a single path segment (v3's
-# repo_list only ever considered direct children of $HOME/repos).
-legacy_session_name() {
-    local agent="$1" repo_key="$2"
-    [[ "$repo_key" != */* && -n "$repo_key" ]] || return 1
-    tmux_canonicalize_session_name "$agent-$repo_key"
-}
-
-# v3 session names are unmanaged and may collide after tmux's own
-# canonicalization (P2-01); only offer attach when the pane's actual working
-# directory still matches the canonical repository being requested.
-legacy_session_cwd_matches() {
-    local session="$1" canonical_path="$2" cwd
-    cwd="$(tmux_cmd display-message -p -t "=$session:" '#{pane_current_path}' 2>/dev/null || true)"
-    [[ -n "$cwd" && "$cwd" == "$canonical_path" ]]
 }
 
 # ---------------------------------------------------------------------------
@@ -471,6 +436,14 @@ state_root() {
     local base
     base="$(hubi_runtime_base)" || return 1
     secure_fallback_lock_root "$base/state"
+}
+
+# Private root for the parent-death watchdog FIFO (P2-05): same secure
+# validation as lock_root/state_root, never a bare /tmp path.
+watch_root() {
+    local base
+    base="$(hubi_runtime_base)" || return 1
+    secure_fallback_lock_root "$base/watch"
 }
 
 # ---------------------------------------------------------------------------
@@ -549,10 +522,11 @@ verify_record_live_session() {
     [[ "$pane_session" == "$session" ]] || return 1
 }
 
-# Best-effort OS-level cross-check: a scope Hubi creates now carries a
-# systemd unit Description tying it to the record's token. Old (pre-fix)
-# scopes never had this, so its absence alone is not disqualifying — callers
-# only require it when the record itself already vouches for the object.
+# OS-level cross-check: every scope Hubi creates carries a systemd unit
+# Description tying it to its trusted record's token (clean-install: there
+# is no compatibility case where a scope Hubi is willing to touch could
+# lack this). Terminating a scope without a token to check at all is a
+# narrow, deliberate exception — see terminate_scope.
 verify_scope_description_token() {
     local scope="$1" token="$2" desc
     [[ -n "$token" ]] || return 1
@@ -560,48 +534,17 @@ verify_scope_description_token() {
     [[ "$desc" == "hubi-owned:$token" ]]
 }
 
-validate_legacy_v4_session() {
-    local agent="$1" canonical_path="$2" repo_key="$3" session="$4" stored_instance pane_path expected_scope stored_scope
-    [[ "$(tmux_cmd show-option -qv -t "$session" @hubi-managed 2>/dev/null || true)" == v4 ]] || return 1
-    [[ "$(tmux_cmd show-option -qv -t "$session" @hubi-agent 2>/dev/null || true)" == "$agent" ]] || return 1
-    [[ "$(tmux_cmd show-option -qv -t "$session" @hubi-repo 2>/dev/null || true)" == "$repo_key" ]] || return 1
-    stored_instance="$(tmux_cmd show-option -qv -t "$session" @hubi-instance 2>/dev/null || true)"
-    [[ -z "$stored_instance" ]] || return 1
-    agent_pane "$session" || return 1
-    pane_path="$(tmux_cmd display-message -p -t "$FOUND_PANE" '#{pane_current_path}' 2>/dev/null || true)"
-    [[ "$pane_path" == "$canonical_path" ]] || return 1
-    expected_scope="$(legacy_v4_scope_name "$agent" "$repo_key")"
-    stored_scope="$(tmux_cmd show-option -qv -t "$session" @hubi-scope 2>/dev/null || true)"
-    [[ "$stored_scope" == "$expected_scope" ]] || return 1
-}
-
-# Opportunistic, safe adoption of a validated pre-fix v4 primary: enriches its
-# metadata (token, canonical path) and creates a trusted record under the NEW
-# identity hash without renaming or otherwise mutating anything the running
-# agent depends on. Only ever called after validate_legacy_v4_session passed.
-adopt_legacy_v4_session() {
-    local agent="$1" canonical_path="$2" instance="$3" session="$4" hash="$5" token repo_id scope
-    token="$(random_token)"
-    repo_id="$(stat -Lc '%d:%i' -- "$canonical_path" 2>/dev/null || true)"
-    scope="$(tmux_cmd show-option -qv -t "$session" @hubi-scope 2>/dev/null || true)"
-    agent_pane "$session" || return 0
-    tmux_cmd set-option -t "$session" @hubi-token "$token" >/dev/null 2>&1 || true
-    tmux_cmd set-option -t "$session" @hubi-identity-version "$HUBI_IDENTITY_VERSION" >/dev/null 2>&1 || true
-    tmux_cmd set-option -t "$session" @hubi-repo-canon "$canonical_path" >/dev/null 2>&1 || true
-    write_state_record "$hash" \
-        "identity_version=$HUBI_IDENTITY_VERSION" "agent=$agent" "instance=$instance" \
-        "canonical_path=$canonical_path" "repo_dev_inode=$repo_id" \
-        "session=$session" "pane=$FOUND_PANE" "scope=$scope" \
-        "token=$token" "state=COMMITTED" \
-        "created=$(date +%s)" "committed=$(date +%s)" || true
-}
-
 # ---------------------------------------------------------------------------
 # Discovery (P1-01, P1-02, P2-03, P2-08, P3-03).
 #
-# Returns via FOUND_SESSION/FOUND_SESSION_KIND and exit status:
-#   0  found, FOUND_SESSION_KIND is "managed" (new-scheme or adopted v4) or
-#      "legacy" (v3, unmanaged, attach-only)
+# Clean-install contract: Hubi manages ONLY objects created by this trusted-
+# state architecture. A tmux session or systemd scope with a matching or
+# predictable name that does NOT carry a valid current trusted ownership
+# record is not our object — never claimed, never mutated, never killed.
+# There is no migration/adoption path for anything created by an older Hubi.
+#
+# Returns via FOUND_SESSION and exit status:
+#   0  found and verified as a managed session
 #   1  not found (absent)
 #   3  CONFLICT: a session at the exact expected name exists but does not
 #      verify — never treated as managed, never destroyed by name alone
@@ -609,9 +552,8 @@ adopt_legacy_v4_session() {
 # ---------------------------------------------------------------------------
 find_agent_session() {
     local agent="$1" canonical_path="$2" instance="${3:-primary}"
-    local session hash record_rc root repo_key legacy_v4_session legacy live_token
+    local session hash record_rc live_token
     FOUND_SESSION=""
-    FOUND_SESSION_KIND=""
     validate_instance_name "$instance" || return 2
 
     hash="$(compute_identity_hash "$canonical_path" "$agent" "$instance")"
@@ -622,14 +564,12 @@ find_agent_session() {
         if verify_record_matches_repo "$canonical_path" && verify_record_live_session "$agent" "$instance" \
             && [[ "${REC[session]}" == "$session" ]]; then
             FOUND_SESSION="${REC[session]}"
-            FOUND_SESSION_KIND="managed"
             return 0
         fi
         if ! tmux_cmd has-session -t "${REC[session]}" 2>/dev/null; then
             return 1
         fi
         FOUND_SESSION="${REC[session]}"
-        FOUND_SESSION_KIND="conflict"
         return 3
     fi
 
@@ -638,53 +578,26 @@ find_agent_session() {
             live_token="$(tmux_cmd show-option -qv -t "$session" @hubi-token 2>/dev/null || true)"
             if [[ "$live_token" == "${REC[token]}" ]]; then
                 FOUND_SESSION="$session"
-                FOUND_SESSION_KIND="starting"
-                    return 4
+                return 4
             fi
         fi
         FOUND_SESSION="$session"
-        FOUND_SESSION_KIND="conflict"
         return 3
     fi
 
-    [[ "$instance" == "primary" ]] || return 1
-
-    root="$(realpath -e -- "$REPOS_ROOT" 2>/dev/null)" || return 1
-    repo_key="${canonical_path#"$root"/}"
-
-    legacy_v4_session="$(legacy_v4_session_name "$agent" "$repo_key")"
-    if [[ -n "$legacy_v4_session" ]] && tmux_cmd has-session -t "$legacy_v4_session" 2>/dev/null; then
-        if validate_legacy_v4_session "$agent" "$canonical_path" "$repo_key" "$legacy_v4_session"; then
-            adopt_legacy_v4_session "$agent" "$canonical_path" "$instance" "$legacy_v4_session" "$hash"
-            FOUND_SESSION="$legacy_v4_session"
-            FOUND_SESSION_KIND="managed"
-            return 0
-        fi
-    fi
-
-    legacy="$(legacy_session_name "$agent" "$repo_key" 2>/dev/null || true)"
-    if [[ -n "$legacy" ]] && tmux_cmd has-session -t "=$legacy" 2>/dev/null; then
-        if legacy_session_cwd_matches "$legacy" "$canonical_path"; then
-            FOUND_SESSION="$legacy"
-            FOUND_SESSION_KIND="legacy"
-            return 0
-        fi
-    fi
     return 1
 }
 
 agent_instance_list() {
     local LC_ALL=C
-    local agent="$1" canonical_path="$2" root repo_key record field_length
+    local agent="$1" canonical_path="$2" record field_length
     local -a fields=()
-    local session managed stored_agent stored_repo stored_repo_canon instance dir rec_file rec_hash
-    root="$(realpath -e -- "$REPOS_ROOT" 2>/dev/null || true)"
-    if [[ -n "$root" ]]; then repo_key="${canonical_path#"$root"/}"; else repo_key=""; fi
+    local session managed stored_agent stored_repo_canon instance dir rec_file rec_hash
     {
         printf 'primary\n'
         while IFS= read -r record; do
             fields=()
-            for _ in {1..6}; do
+            for _ in {1..5}; do
                 if [[ "$record" =~ ^([0-9]+):(.*)$ ]]; then
                     field_length="${BASH_REMATCH[1]}"
                     record="${BASH_REMATCH[2]}"
@@ -699,24 +612,18 @@ agent_instance_list() {
                 fields+=("${record:0:field_length}")
                 record="${record:field_length}"
             done
-            (( ${#fields[@]} == 6 )) || continue
+            (( ${#fields[@]} == 5 )) || continue
             session="${fields[0]}"
             managed="${fields[1]}"
             stored_agent="${fields[2]}"
-            stored_repo="${fields[3]}"
-            stored_repo_canon="${fields[4]}"
-            instance="${fields[5]}"
+            stored_repo_canon="${fields[3]}"
+            instance="${fields[4]}"
             [[ "$managed" == "v4" && "$stored_agent" == "$agent" ]] || continue
-            if [[ -n "$stored_repo_canon" ]]; then
-                [[ "$stored_repo_canon" == "$canonical_path" ]] || continue
-            else
-                [[ -n "$repo_key" && "$stored_repo" == "$repo_key" ]] || continue
-            fi
-            [[ -n "$instance" ]] || instance="primary"
+            [[ -n "$stored_repo_canon" && "$stored_repo_canon" == "$canonical_path" ]] || continue
             validate_instance_name "$instance" >/dev/null 2>&1 || continue
             printf '%s\n' "$instance"
         done < <(tmux_cmd list-sessions -F \
-            '#{n:session_name}:#{session_name}#{n:@hubi-managed}:#{@hubi-managed}#{n:@hubi-agent}:#{@hubi-agent}#{n:@hubi-repo}:#{@hubi-repo}#{n:@hubi-repo-canon}:#{@hubi-repo-canon}#{n:@hubi-instance}:#{@hubi-instance}' \
+            '#{n:session_name}:#{session_name}#{n:@hubi-managed}:#{@hubi-managed}#{n:@hubi-agent}:#{@hubi-agent}#{n:@hubi-repo-canon}:#{@hubi-repo-canon}#{n:@hubi-instance}:#{@hubi-instance}' \
             2>/dev/null || true)
 
         # Trusted records are the authoritative source for instances whose
@@ -794,10 +701,6 @@ agent_status() {
     hash="$(compute_identity_hash "$canonical_path" "$agent" "$instance")"
     case "$find_rc" in
         0)
-            if [[ "$FOUND_SESSION_KIND" == "legacy" ]]; then
-                printf '⚠ LEGACY/UNMANAGED'
-                return
-            fi
             scope="$(agent_scope_name "$agent" "$canonical_path" "$instance")"
             load_state_record "$hash" && scope="${REC[scope]}"
             scope_state "$scope"; st=$?
@@ -927,7 +830,11 @@ run_under_identity_lock() {
 release_identity_lock() {
     [[ -n "$HUBI_LOCKFD" ]] || return 0
     "$FLOCK_BIN" --unlock "$HUBI_LOCKFD" 2>/dev/null || true
-    exec {HUBI_LOCKFD}<&- 2>/dev/null || true
+    # A bare `exec` (no command) applies its redirections to this shell
+    # permanently, not just to the exec call itself — a trailing
+    # `2>/dev/null` here would silently swallow every later diagnostic this
+    # process ever prints. Do not add one.
+    exec {HUBI_LOCKFD}<&- || true
     HUBI_LOCKFD=""
 }
 
@@ -946,6 +853,7 @@ ensure_agent_instance_session() {
     shift 4
     local -a arguments=("$@")
     local hash locks lock_file rc output tmp_out worker_pid expected_repo_id
+    local watch_dir watch_fifo watch_write_fd
     ENSURED_SESSION=""
     validate_instance_name "$instance" || return 2
     expected_repo_id="$RESOLVED_REPO_ID"
@@ -964,6 +872,44 @@ ensure_agent_instance_session() {
         return 1
     }
 
+    # Parent-death watchdog (P2-05): a FIFO whose write end only WE hold
+    # open. We pass its path to the worker, which opens the read end and
+    # blocks on it in the background from the moment it is about to create
+    # anything. File-descriptor closure on process exit is unconditional
+    # kernel behavior — it happens whether we exit cleanly, via a caught
+    # signal, or via an uncatchable SIGKILL — so the worker's watchdog sees
+    # EOF and rolls back even in the one case cancel_startup_worker's trap
+    # cannot help with at all. Best-effort: if the FIFO can't be set up,
+    # startup still proceeds with the (already correct) protections that do
+    # not depend on it — only the earliest-window SIGKILL case loses this
+    # extra layer.
+    watch_fifo=""
+    watch_write_fd=""
+    if watch_dir="$(watch_root)" 2>/dev/null; then
+        watch_fifo="$watch_dir/$hash-$$-$RANDOM.fifo"
+        if mkfifo -m 600 -- "$watch_fifo" 2>/dev/null; then
+            # Opened read-write (not write-only): a plain write-only open
+            # would block right here until a reader opens the FIFO, but the
+            # worker that will do that hasn't even been spawned yet. O_RDWR
+            # on a FIFO never blocks (the fd trivially satisfies "a peer
+            # exists" against itself) while still behaving as a writer for
+            # the worker's blocking read to see EOF against once we close it.
+            #
+            # NOTE: a bare `exec` (no command) applies its redirections to
+            # THIS shell permanently, not just to the exec call itself — a
+            # trailing `2>/dev/null` here would silently swallow every later
+            # diagnostic this function prints. Do not add one.
+            if ! exec {watch_write_fd}<>"$watch_fifo"; then
+                watch_write_fd=""
+                rm -f -- "$watch_fifo" 2>/dev/null
+                watch_fifo=""
+            fi
+        else
+            watch_fifo=""
+        fi
+    fi
+    STARTUP_WATCH_FIFO="$watch_fifo"
+
     # flock owns the descriptor in a supervisor. --close guarantees that the
     # worker, tmux server, agent and every descendant start without that fd,
     # so killing the flock supervisor process alone (see
@@ -971,14 +917,28 @@ ensure_agent_instance_session() {
     # what its child is currently doing. The worker stays in the launcher's
     # own process group deliberately: a group-wide signal (e.g. the whole
     # session being torn down) already reaches it directly with no trap
-    # needed, same as before this revision. A parent-only SIGKILL cannot run
-    # any trap at all, which is why the persisted STARTING record — not
-    # process supervision — is what makes that case recoverable afterward.
-    "$FLOCK_BIN" --exclusive --close --wait "$HUBI_LOCK_TIMEOUT" \
-        --conflict-exit-code 75 "$lock_file" \
-        env -u HUBI_ACTIVE bash "$HUBI_SCRIPT_PATH" __start-locked \
-        "$agent" "$canonical_path" "$expected_repo_id" "$instance" "$hash" \
-        "$executable" "${arguments[@]}" >"$tmp_out" 2>&1 &
+    # needed, same as before this revision.
+    #
+    # watch_write_fd is explicitly closed for this one command below
+    # (`{watch_write_fd}<&-`) — a plain fd opened via `exec {var}<>file` is
+    # NOT close-on-exec by default, so without this the worker (and its own
+    # watchdog, forked further from it) would inherit our copy of the write
+    # end and the FIFO would never actually reach EOF when we exit: it would
+    # always still have this inherited writer reference open, defeating the
+    # whole mechanism. This closes only the child's copy; ours stays open.
+    if [[ -n "$watch_write_fd" ]]; then
+        "$FLOCK_BIN" --exclusive --close --wait "$HUBI_LOCK_TIMEOUT" \
+            --conflict-exit-code 75 "$lock_file" \
+            env -u HUBI_ACTIVE bash "$HUBI_SCRIPT_PATH" __start-locked \
+            "$agent" "$canonical_path" "$expected_repo_id" "$instance" "$hash" "$watch_fifo" \
+            "$executable" "${arguments[@]}" >"$tmp_out" 2>&1 {watch_write_fd}<&- &
+    else
+        "$FLOCK_BIN" --exclusive --close --wait "$HUBI_LOCK_TIMEOUT" \
+            --conflict-exit-code 75 "$lock_file" \
+            env -u HUBI_ACTIVE bash "$HUBI_SCRIPT_PATH" __start-locked \
+            "$agent" "$canonical_path" "$expected_repo_id" "$instance" "$hash" "$watch_fifo" \
+            "$executable" "${arguments[@]}" >"$tmp_out" 2>&1 &
+    fi
     worker_pid=$!
     STARTUP_WORKER_PID="$worker_pid"
     STARTUP_IDENTITY_HASH="$hash"
@@ -986,6 +946,12 @@ ensure_agent_instance_session() {
     rc=$?
     STARTUP_WORKER_PID=""
     STARTUP_IDENTITY_HASH=""
+    STARTUP_WATCH_FIFO=""
+    if [[ -n "$watch_write_fd" ]]; then
+        # See the NOTE above: no trailing 2>/dev/null on a bare exec.
+        exec {watch_write_fd}<&- || true
+    fi
+    [[ -z "$watch_fifo" ]] || rm -f -- "$watch_fifo" 2>/dev/null || true
     output="$(cat -- "$tmp_out" 2>/dev/null)"
     rm -f -- "$tmp_out"
 
@@ -1002,12 +968,18 @@ ensure_agent_instance_session() {
     ENSURED_SESSION="$(agent_session_name "$agent" "$canonical_path" "$instance")"
 }
 
-# Rolls a STARTING record all the way back to ABSENT: kills the bootstrap
-# tmux session (only if its live @hubi-token matches, never by name alone),
-# terminates any scope it created the same way, then removes the record.
-# Used both by cancellation and by self-healing at the top of a fresh start.
+# Rolls a STARTING record back toward ABSENT: kills the bootstrap tmux
+# session (only if its live @hubi-token matches, never by name alone),
+# terminates any scope it created the same way, then removes the record —
+# but ONLY once every resource whose ownership depends on that record has
+# been confirmed absent. If cleanup cannot be authoritatively completed
+# (a kill/terminate call itself fails, or scope state can't be confirmed),
+# the record is deliberately preserved as diagnostic/ownership evidence for
+# later reconciliation instead of being deleted out from under a possibly
+# still-live resource. Returns 0 if fully clean (record gone or never
+# existed), 1 if cleanup was incomplete (record preserved).
 rollback_starting_record() {
-    local hash="$1" session scope token live_token
+    local hash="$1" session scope token live_token ok=1 scope_rc
     load_state_record "$hash" || return 0
     [[ "${REC[state]}" == STARTING ]] || return 0
     session="${REC[session]}"
@@ -1016,24 +988,89 @@ rollback_starting_record() {
     if tmux_cmd has-session -t "$session" 2>/dev/null; then
         live_token="$(tmux_cmd show-option -qv -t "$session" @hubi-token 2>/dev/null || true)"
         if [[ "$live_token" == "$token" ]]; then
-            tmux_cmd kill-session -t "$session" >/dev/null 2>&1 || true
+            tmux_cmd kill-session -t "$session" >/dev/null 2>&1 || ok=0
         fi
     fi
     if [[ -n "$scope" ]]; then
-        terminate_scope "$scope" "$token" >/dev/null 2>&1 || true
+        terminate_scope "$scope" "$token"; scope_rc=$?
+        (( scope_rc == 0 )) || ok=0
     fi
-    delete_state_record "$hash"
+    if (( ok )); then
+        delete_state_record "$hash"
+        return 0
+    fi
+    printf 'Hubi: nie można w pełni wycofać przerwanego startu %s; zaufany rekord zachowany do rekoncyliacji.\n' "$hash" >&2
+    return 1
 }
 
 reconcile_leftover_starting() { rollback_starting_record "$1"; }
 
+# Same evidence-preservation contract as rollback_starting_record, for the
+# bootstrap failure paths inside ensure_agent_session_locked below (called
+# with a session Hubi just created itself in this exact invocation, so no
+# token check is needed for the session half — ownership is not in question,
+# only whether cleanup actually completed).
 rollback_bootstrap() {
-    local hash="$1" session="$2" scope="$3" token="$4"
-    [[ -z "$session" ]] || tmux_cmd kill-session -t "$session" >/dev/null 2>&1 || true
-    if [[ -n "$scope" ]]; then
-        terminate_scope "$scope" "$token" >/dev/null 2>&1 || true
+    local hash="$1" session="$2" scope="$3" token="$4" ok=1 scope_rc
+    if [[ -n "$session" ]]; then
+        tmux_cmd kill-session -t "$session" >/dev/null 2>&1 || ok=0
     fi
-    delete_state_record "$hash"
+    if [[ -n "$scope" ]]; then
+        terminate_scope "$scope" "$token"; scope_rc=$?
+        (( scope_rc == 0 )) || ok=0
+    fi
+    if (( ok )); then
+        delete_state_record "$hash"
+        return 0
+    fi
+    printf 'Hubi: nie można w pełni wycofać nieudanego startu %s; zaufany rekord zachowany do rekoncyliacji.\n' "$hash" >&2
+    return 1
+}
+
+# Spawns a background watchdog (inside the worker itself) that blocks on the
+# parent-death FIFO and, upon EOF — the launcher is gone for any reason,
+# including an uncatchable SIGKILL that no trap could ever see — terminates
+# this worker and rolls back whatever it finds:
+#
+#   - a trusted STARTING record, if one already exists, is the authoritative
+#     source and is rolled back exactly as rollback_starting_record already
+#     does (token-verified);
+#   - a COMMITTED record (the worker finished normally moments earlier) is
+#     left completely alone;
+#   - only when NO record exists at all does this fall back to checking the
+#     exact deterministic session/scope names for this identity directly.
+#     That narrow name-only exception is safe *here specifically* because
+#     this watchdog only ever runs while its worker still holds the
+#     identity's exclusive flock, and the worker already confirmed no
+#     session/scope existed at those exact names before arming it — so
+#     nothing else could have raced to create them independently, and
+#     anything found there now can only be what this attempt itself just
+#     created.
+start_parent_death_watchdog() {
+    local hash="$1" session="$2" scope="$3" fifo="$4" worker_pid="$$"
+    (
+        IFS= read -r _ <"$fifo" 2>/dev/null
+        kill -TERM "$worker_pid" 2>/dev/null || true
+        local waited=0
+        while (( waited < 20 )) && kill -0 "$worker_pid" 2>/dev/null; do sleep 0.1; ((waited += 1)); done
+        kill -KILL "$worker_pid" 2>/dev/null || true
+
+        local record_rc
+        load_state_record "$hash"; record_rc=$?
+        if (( record_rc == 0 )); then
+            if [[ "${REC[state]}" == STARTING ]]; then
+                rollback_starting_record "$hash" >/dev/null 2>&1 || true
+            fi
+            exit 0
+        fi
+        (( record_rc == 1 )) || exit 0
+        if [[ -n "$session" ]] && tmux_cmd has-session -t "$session" 2>/dev/null; then
+            tmux_cmd kill-session -t "$session" >/dev/null 2>&1 || true
+        fi
+        if [[ -n "$scope" ]]; then
+            terminate_scope "$scope" "" >/dev/null 2>&1 || true
+        fi
+    ) &
 }
 
 # The actual bootstrap (runs as the supervised worker, under the identity
@@ -1043,8 +1080,8 @@ rollback_bootstrap() {
 # respawn-pane succeeds — that is a legitimate EXITED object, not a failed
 # transaction, and is committed before the crash is even detected.
 ensure_agent_session_locked() {
-    local agent="$1" canonical_path="$2" expected_repo_id="$3" instance="$4" identity_hash="$5" executable="$6"
-    shift 6
+    local agent="$1" canonical_path="$2" expected_repo_id="$3" instance="$4" identity_hash="$5" watch_fifo="$6" executable="$7"
+    shift 7
     local -a arguments=("$@")
     local hash session scope pane output token created_ts st
 
@@ -1084,6 +1121,13 @@ ensure_agent_session_locked() {
     fi
 
     revalidate_repo_for_start "$canonical_path" "$expected_repo_id" || return 1
+
+    # From here on we are about to create a bootstrap object. Arm the
+    # parent-death watchdog first: a launcher that vanishes for ANY reason
+    # from this point on — including an uncatchable SIGKILL, which
+    # cancel_startup_worker's trap cannot help with at all — must not leave
+    # this attempt to finish unsupervised (P2-05).
+    [[ -z "$watch_fifo" ]] || start_parent_death_watchdog "$hash" "$session" "$scope" "$watch_fifo"
 
     token="$(random_token)"
     if ! output="$(tmux_cmd new-session -d -P -F '#{pane_id}' -s "$session" -c "$canonical_path" -- sleep 30 2>&1)"; then
@@ -1208,14 +1252,6 @@ start_agent() {
         return 1
     fi
     if (( find_rc == 0 )); then
-        if [[ "$FOUND_SESSION_KIND" == "legacy" ]]; then
-            printf '\n  Uwaga: %s jest sesją legacy/unmanaged; dostępna jest tylko bezpieczna funkcja attach.\n' "$FOUND_SESSION" >&2
-            printf '  [a] Podłącz legacy/unmanaged\n  [b] Anuluj\n  > '
-            local legacy_choice
-            if ! read_choice legacy_choice || [[ "$legacy_choice" != "a" && "$legacy_choice" != "A" ]]; then
-                return 0
-            fi
-        fi
         attach_session "$FOUND_SESSION"
         return $?
     fi
@@ -1248,15 +1284,40 @@ start_agent() {
 # success on the strength of scope state must fail closed on state 2.
 #   returns/sets via $? : 0 active, 1 inactive (confirmed), 2 error/unknown
 # ---------------------------------------------------------------------------
+# Queries systemd directly for ActiveState (and, for the "failed" case only,
+# TasksCurrent) rather than trusting the single-word "systemctl is-active"
+# shorthand. A multi-property "show" reply is parsed by KEY=VALUE, never by
+# line position — a real systemd was observed to reorder properties relative
+# to the order they were requested in, so positional parsing is unsafe.
+#
+#   active/reloading/activating/deactivating => 0 (not confirmed inactive:
+#     activating/deactivating are still transitioning, never treated as gone)
+#   inactive/dead                            => 1 (confirmed inactive)
+#   failed with TasksCurrent==0               => 1 (confirmed empty cgroup)
+#   failed with TasksCurrent>0 or unknown      => 0 / 2 (never assumed empty:
+#     "failed" is not automatically equivalent to nonexistent — its cgroup
+#     may still hold processes)
+#   query/D-Bus failure or unparseable reply  => 2 (error/unknown)
 scope_state() {
-    local scope="$1" out
-    out="$("$SYSTEMCTL_BIN" --user is-active -- "$scope" 2>/dev/null)"
-    if [[ "$out" == "active" ]]; then
-        return 0
+    local scope="$1" out rc key value
+    local active_state="" tasks_current=""
+    out="$("$SYSTEMCTL_BIN" --user show -p ActiveState -p TasksCurrent -- "$scope" 2>/dev/null)"
+    rc=$?
+    if (( rc != 0 )) || [[ -z "$out" ]]; then
+        return 2
     fi
-    case "$out" in
-        inactive|failed|activating|deactivating|unknown|"")
-            if "$SYSTEMCTL_BIN" --user show -p LoadState --value -- "$scope" >/dev/null 2>&1; then
+    while IFS='=' read -r key value; do
+        case "$key" in
+            ActiveState) active_state="$value" ;;
+            TasksCurrent) tasks_current="$value" ;;
+        esac
+    done <<<"$out"
+    case "$active_state" in
+        active|reloading|activating|deactivating) return 0 ;;
+        inactive|dead) return 1 ;;
+        failed)
+            if [[ "$tasks_current" =~ ^[0-9]+$ ]]; then
+                (( tasks_current > 0 )) && return 0
                 return 1
             fi
             return 2
@@ -1305,8 +1366,8 @@ wait_scope_inactive() {
 
 # Terminates a scope, never claiming success on an ambiguous systemctl
 # result (P1-03). When a token is supplied, the scope's own Description must
-# vouch for it before Hubi will touch it at all (P2-04); pass "" to fall back
-# to caller-established ownership (e.g. an already-validated legacy adoption).
+# vouch for it before Hubi will touch it at all (P2-04); pass "" only when
+# the caller has already independently established ownership by other means.
 # Returns: 0 confirmed terminated, 1 still active (failed), 2 unknown/error.
 terminate_scope() {
     local scope="$1" token="${2:-}" st
@@ -1387,11 +1448,6 @@ stop_agent_now_body() {
     fi
 
     session="$FOUND_SESSION"
-    if [[ "$FOUND_SESSION_KIND" == "legacy" ]]; then
-        printf 'Hubi: sesja %s jest legacy/unmanaged i nie ma bezpiecznej granicy cgroup.\n' "$session" >&2
-        printf 'Hubi: odmowa automatycznego zatrzymania; sesja i jej procesy pozostają bez zmian.\n' >&2
-        return 1
-    fi
 
     token=""
     scope="$(agent_scope_name "$agent" "$canonical_path" "$instance")"
@@ -1712,9 +1768,9 @@ stop_trusted_record() {
     scope="${REC[scope]}"
     token="${REC[token]}"
     if [[ "${REC[state]}" == STARTING ]]; then
-        rollback_starting_record "$hash"
+        rollback_starting_record "$hash"; rc=$?
         release_identity_lock
-        return 0
+        return "$rc"
     fi
     if tmux_cmd has-session -t "$session" 2>/dev/null; then
         local live_token
@@ -1733,8 +1789,16 @@ stop_trusted_record() {
     fi
     terminate_scope "$scope" "$token"; rc=$?
     if (( rc == 0 )); then
-        [[ -z "$session" ]] || tmux_cmd kill-session -t "$session" >/dev/null 2>&1 || true
-        delete_state_record "$hash"
+        local kill_ok=1
+        if [[ -n "$session" ]]; then
+            tmux_cmd kill-session -t "$session" >/dev/null 2>&1 || kill_ok=0
+        fi
+        if (( kill_ok )); then
+            delete_state_record "$hash"
+        else
+            printf 'Hubi: scope zakończony, ale nie udało się usunąć sesji tmux %s; rekord zachowany.\n' "$session" >&2
+            rc=1
+        fi
     fi
     release_identity_lock
     return "$rc"
@@ -1903,7 +1967,7 @@ hubi_main() {
 
 if [[ "${BASH_SOURCE[0]}" == "$0" && "${1:-}" == "__start-locked" ]]; then
     shift
-    if (( $# < 6 )); then
+    if (( $# < 7 )); then
         printf 'Hubi: niepełne argumenty wewnętrznego startu.\n' >&2
         exit 2
     fi

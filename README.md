@@ -59,9 +59,8 @@ Agent states are:
   `systemctl --user` query itself failed); Hubi never reports these as
   stopped or as a successful stop (see Identity and ownership below).
 - `⚠ CONFLICT` — something exists at the exact name Hubi would use, but does
-  not carry verifiable Hubi ownership. Never attached to, never destroyed.
-- `⚠ LEGACY/UNMANAGED` — a matching pre-v4 (v3) session is available only for
-  an explicitly confirmed attach and is never managed by v4 lifecycle actions.
+  not carry verifiable Hubi ownership. Never attached to, never destroyed —
+  see Clean install below.
 
 Selecting an `EXITED` agent opens the retained terminal output. Use the
 project's stop action to discard that retained session before starting it
@@ -115,8 +114,11 @@ short of that is reported as `CONFLICT`/`UNVERIFIED` and left alone.
 Startup is transactional. The record moves `STARTING → COMMITTED` only once
 the tmux session, its metadata, the environment sanitization check, the
 window/hook policy, and `respawn-pane` have all succeeded; any earlier
-failure rolls the tmux session, any scope it created, and the record back to
-absent. The one intentional exception: once `respawn-pane` itself has
+failure rolls the tmux session and any scope it created back and deletes the
+record — unless that cleanup itself cannot be confirmed complete (a
+kill/terminate call fails), in which case the record is deliberately kept
+instead of being deleted out from under a possibly still-live resource. The
+one intentional exception: once `respawn-pane` itself has
 succeeded and handed the agent to its scope, the record is committed before
 the quick-crash check, so an agent that starts and immediately exits is
 preserved as a legitimate `EXITED` object rather than rolled back.
@@ -131,40 +133,65 @@ Start, stop, and orphan reconciliation for one identity serialize through the
 identical per-identity lock file (keyed by the same structured hash), so a
 stop issued while a start is still resolving waits for that resolution
 instead of reporting "not running" and then leaving a live agent behind.
+
 Startup runs its actual tmux/systemd work in a `flock --close`-supervised
-worker; catching `INT`/`HUP`/`TERM` in the launcher terminates that
-supervisor (which releases the lock immediately, independent of whatever it
-was blocked on) and rolls back through the trusted record — bounded
-cancellation, never an indefinite wait. A `SIGKILL` of the launcher itself
-cannot run any of this, by construction; what it can leave behind is a
-`STARTING` record for deterministic later reconciliation (see Stale/unknown
-objects below), never a `COMMITTED` object with unmet guarantees.
+worker. Two independent mechanisms protect a launcher that goes away mid
+start, together covering the entire window from before the launcher even
+attempts anything through to a committed agent:
 
-### Old-v4 and v3 compatibility
+- Catching `INT`/`HUP`/`TERM` in the launcher terminates the flock supervisor
+  directly, which releases the identity lock immediately regardless of what
+  it was blocked on, then rolls back through the trusted record — bounded
+  cancellation, never an indefinite wait.
+- The worker itself arms a parent-death watchdog before it creates anything:
+  a FIFO whose write end only the launcher holds open. File-descriptor
+  closure on process exit is unconditional kernel behavior, so it fires
+  whether the launcher exited cleanly, via a caught signal, or via a
+  `SIGKILL` no trap could ever see. On it firing, the watchdog stops the
+  worker and rolls back — through the trusted record if one exists by then,
+  or, only when none exists at all yet, by checking the exact deterministic
+  session/scope names directly (safe specifically because this only runs
+  while still holding the identity's exclusive lock, having already
+  confirmed nothing existed at those names when the attempt began).
 
-Sessions created by Hubi **before** this identity model existed ("old-v4")
-have no trusted record, no `@hubi-token`, and no `@hubi-instance`. They are
-never renamed, killed, or otherwise mutated on discovery. A `primary`
-instance only adopts one when every independently-checkable fact lines up:
-the exact old deterministic session name, `@hubi-managed=v4`, matching
-`@hubi-agent`/`@hubi-repo`/empty `@hubi-instance`, the pinned pane resolving
-inside that exact session, the pane's actual working directory matching the
-canonical repository being requested, and the stored `@hubi-scope` matching
-the old deterministic scope name. Adoption is additive only — it enriches the
-session with a token and a canonical-path option, then creates a fresh
-trusted record — and never touches a field that was already there. If
-ownership cannot be established this way, the session is treated as
-legacy/unverified rather than destructively managed.
+Together these mean an unsupervised worker is never left to finish creating
+a managed agent after its launcher is gone — for any reason, including an
+uncatchable `SIGKILL`, and including the moment before the tmux bootstrap
+object itself exists.
 
-Pre-v4 (v3) session names remain fully unmanaged. v3 passed the repository
-directory name straight to tmux as `<agent>-<repo>` with no character
-restriction; tmux itself replaces `:` and `.` with `_` in a session name at
-creation time, so legacy detection reconstructs that exact transformation
-rather than merely widening a character-class regex. Because that
-reconstruction can still collide between differently-named repositories,
-legacy attach is only offered after confirming the candidate session's pane
-working directory actually matches the canonical repository being requested.
-Legacy sessions never receive destructive lifecycle actions.
+### Clean install — no migration, no adoption
+
+Hubi manages **only** objects created by this trusted-state architecture.
+There is no migration or adoption path for anything created by an older
+Hubi (pre-this-revision "v4", or the historical v3), and none is planned:
+
+    valid current trusted record + matching live objects  =>  managed
+    anything else                                          =>  not managed
+
+A tmux session or systemd scope with a matching or even fully convincing
+predictable name — `@hubi-managed=v4` set, plausible-looking `@hubi-agent`/
+`@hubi-repo` options, the right pane pinned — is still not Hubi's object if
+it carries no valid *current* trusted record. Hubi will not claim it, will
+not enrich or otherwise mutate its metadata, will not attach it as a managed
+agent, and will not kill it; it surfaces as `CONFLICT` (a live object at the
+expected name) or simply `○ STOPPED` (nothing at the expected name — an old
+differently-named session is invisible to the per-project agent lifecycle
+entirely). `hubi sessions` still lists it as an ordinary tmux session for
+manual inspection.
+
+**Upgrade boundary:** before replacing an older Hubi installation, finish or
+detach from any work as needed, stop all old managed agent sessions/scopes
+through the *old* Hubi, and verify none remain — then install the new
+version. A short read-only preflight:
+
+```bash
+tmux list-sessions                                    # any @hubi-managed sessions left?
+systemctl --user list-units --type=scope 'hubi-*.scope'  # any old scopes left?
+```
+
+If old-looking objects are still present after installing the new version,
+stop them manually (`tmux kill-session` / `systemctl --user kill
+--kill-whom=all --signal=TERM <scope>`) — Hubi will not do it automatically.
 
 ### Stale/unknown objects
 
@@ -178,11 +205,20 @@ record cannot be trusted (malformed, wrong owner/mode, a symlink), it is
 surfaced as such rather than silently treated as absent or used to authorize
 anything.
 
-Every `systemctl --user` query used for scope state is tri-state: `active`,
-confirmed `inactive`, or `error` (the query itself failed to answer). A
-stop/terminate never treats "error" as "inactive" — it fails closed, reports
-the ambiguity, and preserves whatever tmux/state evidence exists rather than
-claiming success.
+Every `systemctl --user` query used for scope state is tri-state — active,
+confirmed inactive, or error/unknown — read from `ActiveState` directly
+(`activating`/`deactivating` count as not-yet-inactive, never as gone; a
+`failed` unit is confirmed inactive only once `TasksCurrent` shows its
+cgroup is actually empty, since "failed" is not automatically equivalent to
+"nothing left running"). A stop/terminate never treats an unanswerable query
+as inactive — it fails closed, reports the ambiguity, and preserves whatever
+tmux/state evidence exists rather than claiming success. Rollback follows the
+same rule: a trusted record is deleted only once every resource whose
+ownership depends on it (its session, its scope) has been positively
+confirmed gone; if a kill/terminate call itself fails or a scope's state
+can't be confirmed, the record is deliberately kept as evidence for later
+reconciliation instead of being deleted out from under a possibly still-live
+resource.
 
 ## Lifecycle and signals
 
@@ -240,14 +276,14 @@ Both programs and their arguments are passed as separate argv elements. Hubi
 checks full-cgroup kill support before creating a managed agent and fails
 closed if the local systemd interface cannot provide it.
 
-Locks and trusted state live under a private, validated Hubi runtime root —
-`$HUBI_RUNTIME_DIR` if set, else `$XDG_RUNTIME_DIR/hubi-$UID`, else
-`/tmp/hubi-$UID` — as `locks/` and `state/` subdirectories. That root and each
-subdirectory must be a real directory (never a symlink), owned by the current
-user, mode `700`; an existing unsafe object is never repaired in place, only
-refused. `HUBI_RUNTIME_DIR` exists primarily so tests (and any sandboxed
-invocation) can point Hubi at a fully disposable root without touching a
-real one.
+Locks, trusted state, and the parent-death watchdog FIFOs live under a
+private, validated Hubi runtime root — `$HUBI_RUNTIME_DIR` if set, else
+`$XDG_RUNTIME_DIR/hubi-$UID`, else `/tmp/hubi-$UID` — as `locks/`, `state/`,
+and `watch/` subdirectories. That root and each subdirectory must be a real
+directory (never a symlink), owned by the current user, mode `700`; an
+existing unsafe object is never repaired in place, only refused.
+`HUBI_RUNTIME_DIR` exists primarily so tests (and any sandboxed invocation)
+can point Hubi at a fully disposable root without touching a real one.
 
 Run the isolated test suite with:
 
@@ -258,11 +294,12 @@ python3 tests/multi_instance.py
 python3 tests/lifecycle_hardening.py
 ```
 
-At this revision `tests/run.sh` reports 21 checks, the adversarial suite
-contains 32 tests, the multi-instance suite contains 11 tests, and
+At this revision `tests/run.sh` reports 22 checks, the adversarial suite
+contains 32 tests, the multi-instance suite contains 10 tests, and
 `lifecycle_hardening.py` (identity/ownership/lifecycle regression coverage for
-the P1–P3 hardening batch) contains 14 tests; all totals must be fully green
-for release review.
+the P1–P3 hardening batch, including the clean-install and parent-death-
+watchdog cases) contains 20 tests; all totals must be fully green for release
+review.
 
 Every suite uses a unique tmux socket, a private `HUBI_RUNTIME_DIR`,
 disposable Git repositories, fake agent processes, and unique systemd scopes.
