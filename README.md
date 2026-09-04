@@ -55,10 +55,12 @@ again.
 Each project has a `primary` Codex instance and a `primary` Claude instance,
 which keep the exact v4 tmux session and systemd scope names. The project's
 Instances menu can create additional names matching
-`^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$`, list the instances whose tmux sessions
-exist, and start, attach, inspect, or stop one instance without affecting its
-siblings. A stopped secondary instance can start a new conversation or ask the
-installed agent CLI to resume one; Hubi does not store conversation history.
+`^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$`, list secondary instances from managed tmux
+metadata, and also recover secondary `ORPHANED` instances from active systemd
+scope names when their tmux session is gone. It can start, attach, inspect, or
+stop one instance without affecting its siblings. A stopped secondary instance
+can start a new conversation or ask the installed agent CLI to resume one;
+Hubi does not store conversation history.
 
 When a live session already has a client, Hubi asks whether to attach in one of
 three modes:
@@ -134,7 +136,7 @@ python3 tests/adversarial.py
 ```
 
 At this revision the functional harness reports 16 tests and the adversarial
-suite contains 31 tests. The focused multi-instance harness reports 10 tests;
+suite contains 31 tests. The focused multi-instance harness reports 12 tests;
 all three totals must be fully green for release review.
 
 The harness uses a unique tmux socket, disposable Git repositories, fake agent
