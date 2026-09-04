@@ -344,6 +344,26 @@ test_tmux_lookalike_survives_start() {
 }
 check "a predictable-name lookalike with partial metadata is never destroyed" test_tmux_lookalike_survives_start
 
+# --- P2-08/P3-03: the interactive stale/unknown-objects menu lists a
+# managed identity whose repository has vanished. (list_trusted_records,
+# trusted_record_diagnosis, and stop_trusted_record are exercised directly,
+# including an actual stop, in tests/lifecycle_hardening.py; a plain
+# printf-piped run here only reliably delivers its first keystroke before
+# Hubi's own burst-paste protection drains the rest, same as the existing
+# pagination tests above, so this only checks the menu renders correctly.)
+test_stale_objects_menu() {
+    local repo="$PREFIX-repo-04" output
+    # shellcheck disable=SC2016
+    hubi_env REPO_NAME="$repo" HUBI_FILE="$HUBI" bash -c '
+        source "$HUBI_FILE"; resolve_repo "$REPO_NAME"
+        ensure_agent_session codex "$RESOLVED_REPO_DIR" "$CODEX_BIN"
+    ' >/dev/null 2>&1 || return 1
+    rm -rf "${REPOS:?}/$repo"
+    output="$(printf 'o\n' | hubi_env "$HUBI" 2>&1)" || true
+    [[ "$output" == *"OSIEROCONE"* && "$output" == *"STALE"* ]]
+}
+check "stale objects menu lists a managed identity with a vanished repo" test_stale_objects_menu
+
 # Stop the agent created by the startup race without touching any other socket.
 # Environment variables intentionally expand in child Bash.
 # shellcheck disable=SC2016
