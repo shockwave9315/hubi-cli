@@ -253,6 +253,130 @@ EOF
 }
 check "EXITED capture uses the selected instance's pinned pane" test_capture_targets_instance_pane
 
+test_exact_target_prefix_collision() {
+    local repo="prefix-collision-$$" collision_instance primary_session collision_session
+    local primary_scope collision_scope
+    mkdir -p "$REPOS/$repo"
+    git init -q "$REPOS/$repo"
+
+    # An instance name equal to the repo's own name-hash makes the secondary
+    # session name begin with the *exact* primary session name followed by a
+    # "-": a real tmux prefix-match hazard, not merely two similar strings.
+    collision_instance="$(hubi_env REPO="$repo" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; name_hash "$REPO"')"
+    primary_session="$(hubi_env REPO="$repo" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; agent_session_name codex "$REPO" primary')"
+    collision_session="$(hubi_env REPO="$repo" INSTANCE="$collision_instance" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; agent_session_name codex "$REPO" "$INSTANCE"')"
+    primary_scope="$(hubi_env REPO="$repo" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; agent_scope_name codex "$REPO" primary')"
+    collision_scope="$(hubi_env REPO="$repo" INSTANCE="$collision_instance" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; agent_scope_name codex "$REPO" "$INSTANCE"')"
+    [[ "$collision_session" == "$primary_session"-* ]] || return 1
+
+    # Start ONLY the collision-prone secondary; primary is never created, so
+    # tmux's own prefix-matching is the one and only way anything could later
+    # resolve "primary_session" to this sibling.
+    hubi_env AGENT=codex INSTANCE="$collision_instance" REPO_NAME="$repo" HUBI_FILE="$HUBI" bash -c '
+        source "$HUBI_FILE"; resolve_repo "$REPO_NAME"
+        HUBI_AGENT_INSTANCE="$INSTANCE" ensure_agent_session "$AGENT" \
+            "$RESOLVED_REPO_KEY" "$RESOLVED_REPO_DIR" "$HUBI_CODEX_BIN" "$INSTANCE"
+    ' >/dev/null 2>&1 || return 1
+    tmux -L "$SOCKET" has-session -t "=$collision_session" 2>/dev/null || return 1
+    systemctl --user is-active --quiet "$collision_scope" || return 1
+
+    # Now start PRIMARY for the first time. Before the exact-target fix,
+    # tmux's prefix matching made Hubi believe the sibling *was* a stale
+    # "primary" bootstrap session and kill it outright, while its scope kept
+    # running untouched (a silent cross-instance kill).
+    hubi_env AGENT=codex INSTANCE=primary REPO_NAME="$repo" HUBI_FILE="$HUBI" bash -c '
+        source "$HUBI_FILE"; resolve_repo "$REPO_NAME"
+        HUBI_AGENT_INSTANCE="$INSTANCE" ensure_agent_session "$AGENT" \
+            "$RESOLVED_REPO_KEY" "$RESOLVED_REPO_DIR" "$HUBI_CODEX_BIN" "$INSTANCE"
+    ' >/dev/null 2>&1 || return 1
+
+    tmux -L "$SOCKET" has-session -t "=$primary_session" 2>/dev/null || return 1
+    tmux -L "$SOCKET" has-session -t "=$collision_session" 2>/dev/null || return 1
+    systemctl --user is-active --quiet "$collision_scope" || return 1
+    systemctl --user is-active --quiet "$primary_scope" || return 1
+
+    # Explicitly stopping the exact primary instance must target only that
+    # session/scope, never the prefix-colliding sibling.
+    hubi_env REPO_NAME="$repo" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; stop_agent_now codex "$REPO_NAME" primary' >/dev/null 2>&1 || return 1
+
+    ! tmux -L "$SOCKET" has-session -t "=$primary_session" 2>/dev/null || return 1
+    ! systemctl --user is-active --quiet "$primary_scope" || return 1
+    tmux -L "$SOCKET" has-session -t "=$collision_session" 2>/dev/null || return 1
+    systemctl --user is-active --quiet "$collision_scope" || return 1
+
+    systemctl --user kill --kill-whom=all --signal=KILL "$collision_scope" >/dev/null 2>&1 || true
+    rm -f -- "${XDG_RUNTIME_DIR:-/tmp}/hubi-locks-$UID/$(hubi_env REPO="$repo" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; name_hash "codex:$REPO"').lock" \
+        "${XDG_RUNTIME_DIR:-/tmp}/hubi-locks-$UID/codex-$(hubi_env REPO="$repo" INSTANCE="$collision_instance" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; instance_name_hash "$REPO" "$INSTANCE"').lock" 2>/dev/null || true
+    return 0
+}
+check "exact tmux targets survive a prefix-collision shape without cross-killing the sibling" test_exact_target_prefix_collision
+
+test_orphan_secondary_discovery() {
+    local instance="orphan-check-$$" session scope status entries
+
+    # A real agent process routinely outlives a hung-up controlling
+    # terminal; simulate that here so killing the tmux session detaches the
+    # scope's process tree instead of tearing it down along with the pane.
+    cat >"$TEST_ROOT/orphan-agent" <<'EOF'
+#!/usr/bin/env bash
+trap '' HUP
+trap 'exit 0' INT TERM
+printf 'READY:%s\n' "${1:-none}"
+while :; do sleep 1; done
+EOF
+    chmod +x "$TEST_ROOT/orphan-agent"
+
+    hubi_env AGENT=codex INSTANCE="$instance" REPO_NAME="$REPO_NAME" HUBI_FILE="$HUBI" \
+        ORPHAN_AGENT="$TEST_ROOT/orphan-agent" bash -c '
+        source "$HUBI_FILE"; resolve_repo "$REPO_NAME"
+        HUBI_AGENT_INSTANCE="$INSTANCE" ensure_agent_session codex \
+            "$RESOLVED_REPO_KEY" "$RESOLVED_REPO_DIR" "$ORPHAN_AGENT" "$INSTANCE"
+    ' >/dev/null 2>&1 || return 1
+
+    session="$(session_name codex "$instance")"
+    scope="$(scope_name codex "$instance")"
+    session_exists codex "$instance" || return 1
+    scope_active codex "$instance" || return 1
+
+    # Remove only the tmux session; the systemd scope (and the process tree
+    # it holds) is left running, exactly like a crashed/killed multiplexer
+    # that never touched the supervised agent.
+    tmux -L "$SOCKET" kill-session -t "=$session" || return 1
+    ! session_exists codex "$instance" || return 1
+    scope_active codex "$instance" || return 1
+
+    status="$(hubi_env AGENT=codex INSTANCE="$instance" REPO_NAME="$REPO_NAME" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; agent_status "$AGENT" "$REPO_NAME" "$INSTANCE"')"
+    [[ "$status" == *ORPHANED* ]] || return 1
+
+    # The Instances menu is sourced from instance_list(); the orphan must
+    # still be enumerated even though no tmux session carries its metadata.
+    entries="$(hubi_env REPO_NAME="$REPO_NAME" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; instance_list "$REPO_NAME"')"
+    [[ "$entries" == *"codex|$instance"* ]] || return 1
+
+    # Explicit user stop (the same kill_agent() path instance_menu's [x]
+    # calls) must remove the exact orphaned scope on confirmation.
+    printf 'y\n' | hubi_env REPO_NAME="$REPO_NAME" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; kill_agent codex "$REPO_NAME" "'"$instance"'"' >/dev/null 2>&1
+    ! scope_active codex "$instance" || return 1
+
+    # Siblings started earlier in this suite must remain untouched.
+    session_exists codex primary && scope_active codex primary \
+        && session_exists codex upstream && scope_active codex upstream \
+        && session_exists claude review && scope_active claude review
+}
+check "orphaned secondary (tmux gone, scope alive) is discoverable and explicitly stoppable without touching siblings" \
+    test_orphan_secondary_discovery
+
 test_new_resume_argv() {
     local spec agent instance mode expected file content executable
     cat >"$TEST_ROOT/argv-agent" <<EOF
@@ -309,7 +433,9 @@ test_attach_and_launcher_disappearance() {
     env -u HUBI_ACTIVE -u TMUX HUBI_REPOS="$REPOS" HUBI_TMUX_SOCKET="$SOCKET" \
         HUBI_TMUX_BIN="$TEST_ROOT/tmux-attach-log" HUBI_CODEX_BIN="$TEST_ROOT/live-agent" \
         "$HUBI" codex "$REPO_NAME" review </dev/null >/dev/null 2>&1 || true
-    [[ -f "$TEST_ROOT/attach-target" && "$(<"$TEST_ROOT/attach-target")" == "$expected" ]] || return 1
+    # Hubi now targets tmux with the exact-match "=" form so a sibling
+    # session cannot prefix-match; see the exact-target regressions below.
+    [[ -f "$TEST_ROOT/attach-target" && "$(<"$TEST_ROOT/attach-target")" == "=$expected" ]] || return 1
     python3 "$ROOT/tests/tmux_client.py" readonly "$SOCKET" "$expected" DISCONNECTED >/dev/null 2>&1 || return 1
     session_exists codex review && scope_active codex review \
         && session_exists codex primary && scope_active codex primary \
