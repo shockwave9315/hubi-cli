@@ -5,15 +5,17 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HUBI="$ROOT/hubi"
 TEST_ROOT="$(mktemp -d)"
 REPOS="$TEST_ROOT/repos"
+RUNTIME="$TEST_ROOT/runtime"
 SOCKET="hubi-v4-tests-$$"
 PREFIX="hubiv4test$$"
 PASS_COUNT=0
 FAIL_COUNT=0
 
 mkdir -p "$REPOS"
+mkdir -m 700 "$RUNTIME"
 
 cleanup() {
-    local scope agent repo digest lock_dir
+    local scope
     if command -v systemctl >/dev/null; then
         while IFS= read -r scope; do
             [[ "$scope" == hubi-*.scope ]] || continue
@@ -24,15 +26,9 @@ cleanup() {
     if [[ -d "/tmp/tmux-$UID" ]]; then
         find "/tmp/tmux-$UID" -maxdepth 1 -type s -name "$SOCKET" -delete
     fi
-    lock_dir="${XDG_RUNTIME_DIR:-/tmp}/hubi-locks-$UID"
-    if [[ -d "$lock_dir" ]]; then
-        for agent in codex claude; do
-            for repo in "$PREFIX-repo-01" "$PREFIX-repo-02" "$PREFIX-repo-03"; do
-                digest="$(printf '%s' "$agent:$repo" | sha256sum | cut -c1-12)"
-                find "$lock_dir" -maxdepth 1 -type f -name "$digest.lock" -delete
-            done
-        done
-    fi
+    # Every startup lock and trusted-state record lives under RUNTIME
+    # (HUBI_RUNTIME_DIR), a private disposable root, never the caller's real
+    # lock/state directory (P3-02) — so tearing down TEST_ROOT is sufficient.
     if [[ -n "$TEST_ROOT" && "$TEST_ROOT" == /tmp/* && -d "$TEST_ROOT" ]]; then
         find "$TEST_ROOT" -depth -delete
     fi
@@ -52,6 +48,7 @@ hubi_env() {
     env -u HUBI_ACTIVE -u TMUX \
         HUBI_REPOS="$REPOS" \
         HUBI_TMUX_SOCKET="$SOCKET" \
+        HUBI_RUNTIME_DIR="$RUNTIME" \
         HUBI_CODEX_BIN="$TEST_ROOT/fake-agent" \
         HUBI_CLAUDE_BIN="$TEST_ROOT/fake-agent" \
         "$@"
@@ -69,7 +66,7 @@ EOF
 chmod +x "$TEST_ROOT/fake-agent"
 
 test_eof() {
-    timeout 2 env -u HUBI_ACTIVE -u TMUX HUBI_REPOS="$REPOS" HUBI_TMUX_SOCKET="$SOCKET" \
+    timeout 2 env -u HUBI_ACTIVE -u TMUX HUBI_REPOS="$REPOS" HUBI_TMUX_SOCKET="$SOCKET" HUBI_RUNTIME_DIR="$RUNTIME" \
         "$HUBI" </dev/null >/dev/null 2>&1
 }
 check "EOF exits without a loop" test_eof
@@ -130,19 +127,19 @@ test_concurrent_start() {
     # shellcheck disable=SC2016
     hubi_env REPO_NAME="$repo" HUBI_FILE="$HUBI" bash -c '
         source "$HUBI_FILE"; resolve_repo "$REPO_NAME"
-        ensure_agent_session codex "$RESOLVED_REPO_KEY" "$RESOLVED_REPO_DIR" "$CODEX_BIN"
+        ensure_agent_session codex "$RESOLVED_REPO_DIR" "$CODEX_BIN"
     ' >"$TEST_ROOT/start-1.log" 2>&1 & local pid1=$!
     # Environment variables intentionally expand in child Bash.
     # shellcheck disable=SC2016
     hubi_env REPO_NAME="$repo" HUBI_FILE="$HUBI" bash -c '
         source "$HUBI_FILE"; resolve_repo "$REPO_NAME"
-        ensure_agent_session codex "$RESOLVED_REPO_KEY" "$RESOLVED_REPO_DIR" "$CODEX_BIN"
+        ensure_agent_session codex "$RESOLVED_REPO_DIR" "$CODEX_BIN"
     ' >"$TEST_ROOT/start-2.log" 2>&1 & local pid2=$!
     wait "$pid1"; rc1=$?
     wait "$pid2"; rc2=$?
     # Environment variables intentionally expand in child Bash.
     # shellcheck disable=SC2016
-    session="$(hubi_env REPO_NAME="$repo" HUBI_FILE="$HUBI" bash -c 'source "$HUBI_FILE"; agent_session_name codex "$REPO_NAME"')"
+    session="$(hubi_env REPO_NAME="$repo" HUBI_FILE="$HUBI" bash -c 'source "$HUBI_FILE"; resolve_repo "$REPO_NAME"; agent_session_name codex "$RESOLVED_REPO_DIR"')"
     count="$(tmux -L "$SOCKET" list-sessions -F '#S' | grep -Fxc "$session")"
     [[ $rc1 -eq 0 && $rc2 -eq 0 && $count -eq 1 ]]
 }
@@ -160,8 +157,8 @@ EOF
     # shellcheck disable=SC2016
     output="$(hubi_env REPO_NAME="$repo" CRASH="$TEST_ROOT/crash-agent" HUBI_FILE="$HUBI" bash -c '
         source "$HUBI_FILE"; resolve_repo "$REPO_NAME"
-        ensure_agent_session claude "$RESOLVED_REPO_KEY" "$RESOLVED_REPO_DIR" "$CRASH" || true
-        session=$(agent_session_name claude "$RESOLVED_REPO_KEY")
+        ensure_agent_session claude "$RESOLVED_REPO_DIR" "$CRASH" || true
+        session=$(agent_session_name claude "$RESOLVED_REPO_DIR")
         printf "STATE=%s\n" "$(session_status "$session")"
         capture_session_output "$session"
     ' 2>&1)"
@@ -223,7 +220,7 @@ EOF
     # shellcheck disable=SC2016
     hubi_env REPO_NAME="$repo" PIDFILE="$pidfile" TREE_AGENT="$TEST_ROOT/tree-agent" HUBI_FILE="$HUBI" bash -c '
         source "$HUBI_FILE"; resolve_repo "$REPO_NAME"
-        ensure_agent_session claude "$RESOLVED_REPO_KEY" "$RESOLVED_REPO_DIR" "$TREE_AGENT" "$PIDFILE"
+        ensure_agent_session claude "$RESOLVED_REPO_DIR" "$TREE_AGENT" "$PIDFILE"
     ' || return 1
     for _ in {1..30}; do [[ -s "$pidfile" ]] && break; sleep 0.1; done
     [[ -s "$pidfile" ]] || return 1
@@ -232,7 +229,7 @@ EOF
     # Environment variables intentionally expand in child Bash.
     # shellcheck disable=SC2016
     hubi_env REPO_NAME="$repo" HUBI_FILE="$HUBI" bash -c '
-        source "$HUBI_FILE"; stop_agent_now claude "$REPO_NAME"
+        source "$HUBI_FILE"; resolve_repo "$REPO_NAME"; stop_agent_now claude "$RESOLVED_REPO_DIR"
     ' || return 1
     ! kill -0 "$child" 2>/dev/null
 }
@@ -254,11 +251,104 @@ EOF
 }
 check "read-only tmux client cannot inject input" test_readonly_client
 
+# --- P1-01: two different canonical roots sharing the same relative repo key
+# must never collide on session, scope, lock, or trusted-state identity. ---
+test_repo_root_collision() {
+    local root_a="$TEST_ROOT/roots/alpha" root_b="$TEST_ROOT/roots/beta" name="shared-name"
+    mkdir -p "$root_a" "$root_b"
+    git init -q "$root_a/$name"
+    git init -q "$root_b/$name"
+    local session_a session_b
+    # shellcheck disable=SC2016
+    session_a="$(env -u HUBI_ACTIVE -u TMUX HUBI_REPOS="$root_a" HUBI_RUNTIME_DIR="$RUNTIME" HUBI_FILE="$HUBI" \
+        bash -c 'source "$HUBI_FILE"; resolve_repo "$1"; agent_session_name codex "$RESOLVED_REPO_DIR"' _ "$name")"
+    # shellcheck disable=SC2016
+    session_b="$(env -u HUBI_ACTIVE -u TMUX HUBI_REPOS="$root_b" HUBI_RUNTIME_DIR="$RUNTIME" HUBI_FILE="$HUBI" \
+        bash -c 'source "$HUBI_FILE"; resolve_repo "$1"; agent_session_name codex "$RESOLVED_REPO_DIR"' _ "$name")"
+    [[ -n "$session_a" && -n "$session_b" && "$session_a" != "$session_b" ]]
+}
+check "same relative repo name under different canonical roots never collides" test_repo_root_collision
+
+# --- P2-07: a repo path containing ':' must not hash the same as a
+# different (repo, instance) split of the same characters. ---
+test_tuple_ambiguity() {
+    local repo="$PREFIX-repo-colon" hash_a hash_b
+    mkdir -p "$REPOS/$repo"
+    git init -q "$REPOS/$repo"
+    # shellcheck disable=SC2016
+    hash_a="$(hubi_env HUBI_FILE="$HUBI" bash -c 'source "$HUBI_FILE"; compute_identity_hash "$1" codex primary' _ "$REPOS/team:review")"
+    # shellcheck disable=SC2016
+    hash_b="$(hubi_env HUBI_FILE="$HUBI" bash -c 'source "$HUBI_FILE"; compute_identity_hash "$1" codex review' _ "$REPOS/team")"
+    [[ -n "$hash_a" && -n "$hash_b" && "$hash_a" != "$hash_b" ]]
+}
+check "structurally distinct identities never collide on hash" test_tuple_ambiguity
+
+# --- P1-03: a systemctl that cannot answer must never be read as inactive,
+# and stop must never claim success while the scope's state is unknown. ---
+test_systemctl_error_fails_closed() {
+    cat >"$TEST_ROOT/systemctl-broken" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1" == kill && "$2" == --help ]]; then
+    echo "--kill-whom=WHOM --signal=SIGNAL"
+    exit 0
+fi
+exit 17
+EOF
+    chmod +x "$TEST_ROOT/systemctl-broken"
+    local output rc
+    # shellcheck disable=SC2016
+    output="$(hubi_env HUBI_SYSTEMCTL_BIN="$TEST_ROOT/systemctl-broken" HUBI_FILE="$HUBI" bash -c '
+        source "$HUBI_FILE"; scope_state some-scope.scope; echo "rc=$?"
+    ' 2>&1)"; rc=$?
+    [[ $rc -eq 0 && "$output" == *"rc=2"* ]]
+}
+check "an unanswerable systemctl query is reported as error, not inactive" test_systemctl_error_fails_closed
+
+test_terminate_scope_fails_closed_on_error() {
+    cat >"$TEST_ROOT/systemctl-broken2" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1" == kill && "$2" == --help ]]; then
+    echo "--kill-whom=WHOM --signal=SIGNAL"
+    exit 0
+fi
+exit 17
+EOF
+    chmod +x "$TEST_ROOT/systemctl-broken2"
+    local output rc
+    # shellcheck disable=SC2016
+    output="$(hubi_env HUBI_SYSTEMCTL_BIN="$TEST_ROOT/systemctl-broken2" HUBI_FILE="$HUBI" bash -c '
+        source "$HUBI_FILE"; terminate_scope some-scope.scope; echo "rc=$?"
+    ' 2>&1)"; rc=$?
+    [[ $rc -eq 0 && "$output" == *"rc=2"* && "$output" == *"fail-closed"* ]]
+}
+check "terminate_scope never claims success when scope state is unknown" test_terminate_scope_fails_closed_on_error
+
+# --- P2-03: a tmux lookalike (predictable name, even with a managed marker
+# and matching-looking metadata) must never be destroyed by name alone. ---
+test_tmux_lookalike_survives_start() {
+    local repo="$PREFIX-repo-lookalike" session
+    mkdir -p "$REPOS/$repo"
+    git init -q "$REPOS/$repo"
+    # shellcheck disable=SC2016
+    session="$(hubi_env HUBI_FILE="$HUBI" bash -c 'source "$HUBI_FILE"; resolve_repo "$1"; agent_session_name codex "$RESOLVED_REPO_DIR"' _ "$repo")"
+    tmux -L "$SOCKET" new-session -d -s "$session" -- sleep 30
+    tmux -L "$SOCKET" set-option -t "$session" @hubi-managed v4
+    tmux -L "$SOCKET" set-option -t "$session" @hubi-agent codex
+    local output rc
+    # shellcheck disable=SC2016
+    output="$(hubi_env REPO_NAME="$repo" HUBI_FILE="$HUBI" bash -c '
+        source "$HUBI_FILE"; resolve_repo "$REPO_NAME"
+        ensure_agent_session codex "$RESOLVED_REPO_DIR" "$CODEX_BIN"
+    ' 2>&1)"; rc=$?
+    [[ $rc -ne 0 ]] && tmux -L "$SOCKET" has-session -t "$session" 2>/dev/null
+}
+check "a predictable-name lookalike with partial metadata is never destroyed" test_tmux_lookalike_survives_start
+
 # Stop the agent created by the startup race without touching any other socket.
 # Environment variables intentionally expand in child Bash.
 # shellcheck disable=SC2016
 hubi_env REPO_NAME="$PREFIX-repo-01" HUBI_FILE="$HUBI" bash -c \
-    'source "$HUBI_FILE"; stop_agent_now codex "$REPO_NAME"' >/dev/null 2>&1 || true
+    'source "$HUBI_FILE"; resolve_repo "$REPO_NAME"; stop_agent_now codex "$RESOLVED_REPO_DIR"' >/dev/null 2>&1 || true
 
 printf '\n%d passed, %d failed\n' "$PASS_COUNT" "$FAIL_COUNT"
 (( FAIL_COUNT == 0 ))

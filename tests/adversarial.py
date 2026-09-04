@@ -9,7 +9,6 @@ server.
 from __future__ import annotations
 
 import fcntl
-import hashlib
 import os
 import pty
 import select
@@ -155,9 +154,14 @@ class HubiAdversarialTests(unittest.TestCase):
                 "HUBI_FILE": str(HUBI),
                 "AGENT_INPUT_LOG": str(self.input_log),
                 "TERM": "xterm-256color",
+                # A private, disposable root for locks and trusted state,
+                # never the caller's real one (P3-02).
+                "HUBI_RUNTIME_DIR": str(self.runtime),
             }
         )
         self.ptys: list[PtyProcess] = []
+        self._session_name_cache: dict[str, str] = {}
+        self._scope_name_cache: dict[str, str] = {}
 
     def tearDown(self) -> None:
         for process in reversed(self.ptys):
@@ -226,22 +230,39 @@ class HubiAdversarialTests(unittest.TestCase):
             check=check,
         )
 
+    def bash_value(self, script: str, env: dict[str, str] | None = None) -> str:
+        return self.bash(script, env=env).stdout.strip()
+
+    # Session/scope names and the lock path are computed by sourcing hubi
+    # itself, never reimplemented here, so these tests can never silently
+    # drift from the real structured identity encoding (P1-01/P2-07).
     def scope_name(self, agent: str = "codex") -> str:
-        digest = hashlib.sha256(self.repo_name.encode()).hexdigest()[:12]
-        return f"hubi-{agent}-{digest}.scope"
+        key = f"scope:{agent}"
+        if key not in self._scope_name_cache:
+            self._scope_name_cache[key] = self.bash_value(
+                'source "$HUBI_FILE"; agent_scope_name "$AGENT" "$REPO_DIR" primary',
+                {**self.env, "AGENT": agent, "REPO_DIR": str(self.repo)},
+            )
+        return self._scope_name_cache[key]
 
     def lock_path(self, agent: str = "codex") -> Path:
-        runtime = Path(
-            os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+        lock_dir = Path(
+            self.bash_value('source "$HUBI_FILE"; lock_root', self.env)
         )
-        lock_dir = runtime / f"hubi-locks-{os.getuid()}"
-        digest = hashlib.sha256(f"{agent}:{self.repo_name}".encode()).hexdigest()[:12]
-        return lock_dir / f"{digest}.lock"
+        hash_value = self.bash_value(
+            'source "$HUBI_FILE"; compute_identity_hash "$REPO_DIR" "$AGENT" primary',
+            {**self.env, "AGENT": agent, "REPO_DIR": str(self.repo)},
+        )
+        return lock_dir / f"{hash_value}.lock"
 
     def session_name(self, agent: str = "codex") -> str:
-        digest = hashlib.sha256(self.repo_name.encode()).hexdigest()[:12]
-        slug = self.repo_name[:28]
-        return f"hubi-{agent}-{slug}-{digest}"
+        key = f"session:{agent}"
+        if key not in self._session_name_cache:
+            self._session_name_cache[key] = self.bash_value(
+                'source "$HUBI_FILE"; agent_session_name "$AGENT" "$REPO_DIR" primary',
+                {**self.env, "AGENT": agent, "REPO_DIR": str(self.repo)},
+            )
+        return self._session_name_cache[key]
 
     def render_sync_wrapper(self) -> Path:
         wrapper = self.temp / "tmux-render-sync"
@@ -333,7 +354,7 @@ class HubiAdversarialTests(unittest.TestCase):
     def start_agent(self, agent: str = "codex") -> None:
         result = self.bash(
             'source "$HUBI_FILE"; resolve_repo "$REPO_NAME"; '
-            'ensure_agent_session "$AGENT" "$RESOLVED_REPO_KEY" '
+            'ensure_agent_session "$AGENT" '
             '"$RESOLVED_REPO_DIR" "$FAKE_AGENT"',
             check=False,
             env={
@@ -499,12 +520,23 @@ class HubiAdversarialTests(unittest.TestCase):
         if process.stdout is not None:
             process.stdout.close()
         self.assertFalse(self.tmux_server_holds_lock(), "tmux server inherited startup lock")
-        # A retry must never wait forever on a lock left by the dead launcher.
+        # A retry must never wait forever on a lock left by the dead launcher
+        # (subprocess.run's own timeout would raise TimeoutExpired instead of
+        # returning if it somehow did). The interruption here lands while the
+        # worker is still blocked inside the tmux new-session call itself —
+        # before it can have written any trusted STARTING record — so the
+        # placeholder session left behind is, by design (P2-03), unrecorded
+        # and therefore indistinguishable from an unrelated lookalike: Hubi
+        # must not silently reclaim it by name/command alone. The retry may
+        # legitimately report CONFLICT rather than recover automatically, but
+        # it must do so promptly and explicitly, never hang and never claim
+        # false success.
+        started = time.monotonic()
         retry = self.bash(
             'source "$HUBI_FILE"; resolve_repo "$REPO_NAME"; '
-            'ensure_agent_session codex "$RESOLVED_REPO_KEY" '
+            'ensure_agent_session codex '
             '"$RESOLVED_REPO_DIR" "$FAKE_AGENT"',
-            timeout=4,
+            timeout=6,
             check=False,
             env={
                 **self.env,
@@ -513,7 +545,10 @@ class HubiAdversarialTests(unittest.TestCase):
                 "FAKE_AGENT": str(self.fake_agent),
             },
         )
-        self.assertEqual(retry.returncode, 0, retry.stderr)
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 5, "retry after an interrupted cold start was not bounded")
+        if retry.returncode != 0:
+            self.assertIn("CONFLICT", retry.stdout + retry.stderr)
 
     def test_cold_start_term_does_not_wedge_lock(self) -> None:
         self.run_interrupted_cold_start(signal.SIGTERM)
@@ -563,7 +598,7 @@ class HubiAdversarialTests(unittest.TestCase):
             try:
                 result = self.bash(
                     'source "$HUBI_FILE"; resolve_repo "$REPO_NAME"; '
-                    'ensure_agent_session codex "$RESOLVED_REPO_KEY" '
+                    'ensure_agent_session codex '
                     '"$RESOLVED_REPO_DIR" "$FAKE_AGENT"',
                     timeout=4,
                     check=False,
@@ -609,7 +644,7 @@ class HubiAdversarialTests(unittest.TestCase):
         unsupported.chmod(0o755)
         result = self.bash(
             'source "$HUBI_FILE"; resolve_repo "$REPO_NAME"; '
-            'ensure_agent_session codex "$RESOLVED_REPO_KEY" '
+            'ensure_agent_session codex '
             '"$RESOLVED_REPO_DIR" "$FAKE_AGENT"',
             check=False,
             env={
@@ -632,7 +667,7 @@ class HubiAdversarialTests(unittest.TestCase):
         result = self.bash(
             'source "$HUBI_FILE"; resolve_repo "$REPO_NAME"; '
             'mv -- "$RESOLVED_REPO_DIR" "$MOVED_REPO"; '
-            'ensure_agent_session codex "$RESOLVED_REPO_KEY" '
+            'ensure_agent_session codex '
             '"$RESOLVED_REPO_DIR" "$FAKE_AGENT"',
             check=False,
             env={
@@ -677,8 +712,8 @@ class HubiAdversarialTests(unittest.TestCase):
         self.tmux("kill-session", "-t", self.session_name())
         self.assertTrue(self.scope_active(), "test precondition: scope should survive tmux loss")
         result = self.bash(
-            'source "$HUBI_FILE"; printf "STATUS=%s\\n" '
-            '"$(agent_status codex "$REPO_NAME")"; stop_agent_now codex "$REPO_NAME"',
+            'source "$HUBI_FILE"; resolve_repo "$REPO_NAME"; printf "STATUS=%s\\n" '
+            '"$(agent_status codex "$RESOLVED_REPO_DIR")"; stop_agent_now codex "$RESOLVED_REPO_DIR"',
             check=False,
             env={**self.env, "REPO_NAME": self.repo_name},
         )
@@ -1048,8 +1083,8 @@ class HubiAdversarialTests(unittest.TestCase):
         process.send(b"\x02d")
         self.assertEqual(process.wait(), 0)
         result = self.bash(
-            'source "$HUBI_FILE"; printf "STATUS=%s\\n" '
-            '"$(agent_status codex "$REPO_NAME")"; stop_agent_now codex "$REPO_NAME"',
+            'source "$HUBI_FILE"; resolve_repo "$REPO_NAME"; printf "STATUS=%s\\n" '
+            '"$(agent_status codex "$RESOLVED_REPO_DIR")"; stop_agent_now codex "$RESOLVED_REPO_DIR"',
             check=False,
             env={**self.env, "REPO_NAME": self.repo_name},
         )
@@ -1139,25 +1174,27 @@ class HubiAdversarialTests(unittest.TestCase):
         }
         first = self.bash(
             'source "$HUBI_FILE"; resolve_repo "$REPO_NAME"; '
-            'ensure_agent_session codex "$RESOLVED_REPO_KEY" "$RESOLVED_REPO_DIR" "$FAKE_AGENT"',
+            'ensure_agent_session codex "$RESOLVED_REPO_DIR" "$FAKE_AGENT"',
             check=False,
             env=env,
         )
         self.assertNotEqual(first.returncode, 0)
         state = self.bash(
-            'source "$HUBI_FILE"; printf "%s" "$(agent_status codex "$REPO_NAME")"',
+            'source "$HUBI_FILE"; resolve_repo "$REPO_NAME"; '
+            'printf "%s" "$(agent_status codex "$RESOLVED_REPO_DIR")"',
             env=env,
         ).stdout
         self.assertIn("EXITED", state)
         self.assertEqual(
             self.bash(
-                'source "$HUBI_FILE"; stop_agent_now codex "$REPO_NAME"', env=env, check=False
+                'source "$HUBI_FILE"; resolve_repo "$REPO_NAME"; stop_agent_now codex "$RESOLVED_REPO_DIR"',
+                env=env, check=False
             ).returncode,
             0,
         )
         second = self.bash(
             'source "$HUBI_FILE"; resolve_repo "$REPO_NAME"; '
-            'ensure_agent_session codex "$RESOLVED_REPO_KEY" "$RESOLVED_REPO_DIR" "$FAKE_AGENT"',
+            'ensure_agent_session codex "$RESOLVED_REPO_DIR" "$FAKE_AGENT"',
             env=env,
             check=False,
         )
@@ -1165,14 +1202,15 @@ class HubiAdversarialTests(unittest.TestCase):
         self.assertIn(
             "RUNNING",
             self.bash(
-                'source "$HUBI_FILE"; agent_status codex "$REPO_NAME"', env=env
+                'source "$HUBI_FILE"; resolve_repo "$REPO_NAME"; agent_status codex "$RESOLVED_REPO_DIR"',
+                env=env
             ).stdout,
         )
 
     def test_five_concurrent_starters_converge(self) -> None:
         script = (
             'source "$HUBI_FILE"; resolve_repo "$REPO_NAME"; '
-            'ensure_agent_session codex "$RESOLVED_REPO_KEY" "$RESOLVED_REPO_DIR" "$FAKE_AGENT"'
+            'ensure_agent_session codex "$RESOLVED_REPO_DIR" "$FAKE_AGENT"'
         )
         env = {
             **self.env,

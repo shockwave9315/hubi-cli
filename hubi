@@ -2,6 +2,8 @@
 set -uo pipefail
 
 HUBI_VERSION=4
+HUBI_IDENTITY_VERSION=1
+HUBI_STATE_SCHEMA=1
 HUBI_SCRIPT_PATH="$(realpath -e -- "${BASH_SOURCE[0]}")"
 REPOS_ROOT="${HUBI_REPOS:-$HOME/repos}"
 TMUX_BIN="${HUBI_TMUX_BIN:-tmux}"
@@ -27,6 +29,10 @@ CHOSEN_LAUNCH_MODE=""
 RENDER_CRITICAL=0
 PENDING_SIGNAL=""
 PENDING_SIGNAL_RC=0
+STARTUP_WORKER_PID=""
+STARTUP_IDENTITY_HASH=""
+HUBI_LOCKFD=""
+declare -gA REC=()
 HUBI_LOCK_TIMEOUT="${HUBI_LOCK_TIMEOUT:-3}"
 HUBI_PASTE_TIMEOUT="${HUBI_PASTE_TIMEOUT:-5}"
 
@@ -92,8 +98,42 @@ on_signal() {
     exit "$rc"
 }
 
+# Cancellation of an in-flight managed startup. Runs entirely inside the
+# signal handler so a caught INT/HUP/TERM never lets the launcher exit while a
+# detached worker keeps mutating tmux/systemd state on its own (P2-05).
+#
+# Killing the flock supervisor itself (not a process group — the worker
+# stays in the launcher's own group, so a group-wide signal already reaches
+# it directly) releases the identity lock immediately: the locked fd lives
+# in flock's own descriptor table, never inherited by the --close'd worker
+# command, so the lock is gone as soon as that one process dies — bounding
+# cancellation without needing to reach into whatever tmux/systemd-run
+# subprocess it may currently be blocked on. Any grandchild orphaned by this
+# is reconciled afterward through the persisted STARTING record, which is
+# the actual rollback mechanism (session/scope killed by verified token),
+# not process-tree chasing.
+cancel_startup_worker() {
+    local signal="$1" rc="$2" pid="$STARTUP_WORKER_PID" hash="$STARTUP_IDENTITY_HASH" waited=0
+    trap - INT HUP TERM
+    STARTUP_WORKER_PID=""
+    STARTUP_IDENTITY_HASH=""
+    printf '\nHubi: odebrano %s podczas startu; anulowanie i wycofywanie zmian.\n' "$signal" >&2
+    kill -TERM "$pid" 2>/dev/null || true
+    while (( waited < 20 )) && kill -0 "$pid" 2>/dev/null; do sleep 0.1; ((waited += 1)); done
+    if kill -0 "$pid" 2>/dev/null; then
+        kill -KILL "$pid" 2>/dev/null || true
+        sleep 0.2
+    fi
+    wait "$pid" 2>/dev/null || true
+    [[ -z "$hash" ]] || rollback_starting_record "$hash"
+    exit "$rc"
+}
+
 handle_signal() {
     local signal="$1" rc="$2"
+    if [[ -n "$STARTUP_WORKER_PID" ]]; then
+        cancel_startup_worker "$signal" "$rc"
+    fi
     if (( RENDER_CRITICAL )); then
         if [[ -z "$PENDING_SIGNAL" ]]; then
             PENDING_SIGNAL="$signal"
@@ -227,18 +267,22 @@ resolve_repo() {
     }
 }
 
+# Revalidates that canonical_path still is the exact same Git repository root,
+# still under REPOS_ROOT, and still the same filesystem object as expected_id.
+# This is the P1-02 boundary: canonical_path defines the namespace, and
+# device/inode detects a replacement of whatever now lives at that path.
 revalidate_repo_for_start() {
-    local repo_key="$1" directory="$2" expected_id="$3" root candidate top actual_id
+    local canonical_path="$1" expected_repo_id="$2" root candidate top actual_id
     if ! root="$(realpath -e -- "$REPOS_ROOT" 2>/dev/null)" || [[ ! -d "$root" ]]; then
         repo_error "katalog repozytoriów zniknął przed startem: $REPOS_ROOT"
         return 1
     fi
-    if ! candidate="$(realpath -e -- "$directory" 2>/dev/null)" || [[ ! -d "$candidate" ]]; then
-        repo_error "repozytorium zniknęło przed startem: $directory"
+    if ! candidate="$(realpath -e -- "$canonical_path" 2>/dev/null)" || [[ ! -d "$candidate" ]]; then
+        repo_error "repozytorium zniknęło przed startem: $canonical_path"
         return 1
     fi
-    if [[ "$candidate" != "$directory" ]]; then
-        repo_error "ścieżka repozytorium zmieniła się przed startem: $directory"
+    if [[ "$candidate" != "$canonical_path" ]]; then
+        repo_error "ścieżka repozytorium zmieniła się przed startem: $canonical_path"
         return 1
     fi
     case "$candidate/" in
@@ -248,19 +292,15 @@ revalidate_repo_for_start() {
     if ! top="$(git -C "$candidate" rev-parse --show-toplevel 2>/dev/null)" \
         || ! top="$(realpath -e -- "$top" 2>/dev/null)" \
         || [[ "$top" != "$candidate" ]]; then
-        repo_error "katalog nie jest już tym samym repozytorium Git: $directory"
-        return 1
-    fi
-    if [[ "${candidate#"$root"/}" != "$repo_key" ]]; then
-        repo_error "klucz repozytorium zmienił się przed startem: $repo_key"
+        repo_error "katalog nie jest już tym samym repozytorium Git: $canonical_path"
         return 1
     fi
     actual_id="$(stat -Lc '%d:%i' -- "$candidate" 2>/dev/null)" || {
-        repo_error "nie można ponownie ustalić tożsamości repozytorium: $directory"
+        repo_error "nie można ponownie ustalić tożsamości repozytorium: $canonical_path"
         return 1
     }
-    if [[ -z "$expected_id" || "$actual_id" != "$expected_id" ]]; then
-        repo_error "tożsamość repozytorium zmieniła się przed startem: $directory"
+    if [[ -z "$expected_repo_id" || "$actual_id" != "$expected_repo_id" ]]; then
+        repo_error "tożsamość repozytorium zmieniła się przed startem (repozytorium zostało zastąpione): $canonical_path"
         return 1
     fi
 }
@@ -276,6 +316,35 @@ repo_list() {
         [[ "$resolved" == "$directory" ]] || continue
         printf '%s\n' "${directory#"$root"/}"
     done < <(find "$root" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null) | sort
+}
+
+# ---------------------------------------------------------------------------
+# Versioned identity encoding (P1-01, P2-07).
+#
+# Every managed identity is (identity_version, canonical_repo_path, agent,
+# instance). Fields are encoded with an explicit byte-length prefix, which is
+# a provably unambiguous (uniquely decodable) encoding: no delimiter
+# concatenation of the raw fields is used, so a repo key/path containing ':'
+# or any other character can never be reinterpreted as a different tuple.
+# ---------------------------------------------------------------------------
+identity_encode() {
+    local LC_ALL=C part
+    for part in "$@"; do
+        printf '%s:%s' "${#part}" "$part"
+    done
+}
+
+compute_identity_hash() {
+    # args: canonical_path agent instance
+    identity_encode "$HUBI_IDENTITY_VERSION" "$1" "$2" "$3" | sha256sum | cut -c1-16
+}
+
+random_token() {
+    if [[ -r /dev/urandom ]]; then
+        od -An -tx1 -N16 /dev/urandom 2>/dev/null | tr -d ' \n'
+    else
+        printf '%s-%s-%s' "$(date +%s%N)" "$RANDOM" "$RANDOM"
+    fi
 }
 
 name_hash() { printf '%s' "$1" | sha256sum | cut -c1-12; }
@@ -295,68 +364,327 @@ validate_instance_name() {
     fi
 }
 
+# Current (v4.1+) naming: cosmetic slug plus the full structured identity
+# hash. Uniqueness comes entirely from the hash; the slug never needs to be
+# unique and repo-root collisions (P1-01) cannot alias two identities because
+# canonical_path (not a REPOS_ROOT-relative key) feeds the hash.
 agent_session_name() {
-    local agent="$1" repo_key="$2" instance="${3:-primary}"
+    local agent="$1" canonical_path="$2" instance="${3:-primary}" hash
+    hash="$(compute_identity_hash "$canonical_path" "$agent" "$instance")"
     if [[ "$instance" == "primary" ]]; then
-        printf 'hubi-%s-%s-%s' "$agent" "$(safe_slug "${repo_key##*/}")" "$(name_hash "$repo_key")"
+        printf 'hubi-%s-%s-%s' "$agent" "$(safe_slug "${canonical_path##*/}")" "$hash"
     else
-        printf 'hubi-%s-%s-%s-%s' "$agent" "$instance" "$(safe_slug "${repo_key##*/}")" \
-            "$(name_hash "$agent:$repo_key:$instance")"
+        printf 'hubi-%s-%s-%s-%s' "$agent" "$(safe_slug "$instance")" "$(safe_slug "${canonical_path##*/}")" "$hash"
     fi
 }
 
 agent_scope_name() {
-    local agent="$1" repo_key="$2" instance="${3:-primary}"
+    local agent="$1" canonical_path="$2" instance="${3:-primary}" hash
+    hash="$(compute_identity_hash "$canonical_path" "$agent" "$instance")"
     if [[ "$instance" == "primary" ]]; then
-        printf 'hubi-%s-%s.scope' "$agent" "$(name_hash "$repo_key")"
+        printf 'hubi-%s-%s.scope' "$agent" "$hash"
     else
-        printf 'hubi-%s-%s-%s-%s.scope' "$agent" "$(name_hash "$repo_key")" "$instance" \
-            "$(name_hash "$agent:$repo_key:$instance")"
+        printf 'hubi-%s-%s-%s.scope' "$agent" "$(safe_slug "$instance")" "$hash"
     fi
 }
 
-legacy_session_name() {
-    if [[ "$2" != */* && "$2" =~ ^[[:alnum:]_.-]+$ ]]; then printf '%s-%s' "$1" "$2"; fi
+# Pre-identity-fix v4 naming (repo-key based, 12-hex sha256, no @hubi-token).
+# Used ONLY to detect and safely adopt sessions created before this revision;
+# never to compute the identity used for anything created from now on.
+legacy_v4_session_name() {
+    local agent="$1" repo_key="$2"
+    printf 'hubi-%s-%s-%s' "$agent" "$(safe_slug "${repo_key##*/}")" "$(name_hash "$repo_key")"
+}
+legacy_v4_scope_name() {
+    local agent="$1" repo_key="$2"
+    printf 'hubi-%s-%s.scope' "$agent" "$(name_hash "$repo_key")"
 }
 
+# tmux replaces ':' and '.' with '_' in a session name at creation time
+# (verified empirically), which is the "dot/colon canonicalization" the v3
+# legacy-naming audit finding refers to. Reconstructing the name a v3 session
+# would actually have requires applying the same substitution.
+tmux_canonicalize_session_name() {
+    local name="$1"
+    name="${name//:/_}"
+    name="${name//./_}"
+    printf '%s' "$name"
+}
+
+# v3 passed the accepted repo directory name straight to tmux as "<agent>-<repo>"
+# with no character restriction beyond being a single path segment (v3's
+# repo_list only ever considered direct children of $HOME/repos).
+legacy_session_name() {
+    local agent="$1" repo_key="$2"
+    [[ "$repo_key" != */* && -n "$repo_key" ]] || return 1
+    tmux_canonicalize_session_name "$agent-$repo_key"
+}
+
+# v3 session names are unmanaged and may collide after tmux's own
+# canonicalization (P2-01); only offer attach when the pane's actual working
+# directory still matches the canonical repository being requested.
+legacy_session_cwd_matches() {
+    local session="$1" canonical_path="$2" cwd
+    cwd="$(tmux_cmd display-message -p -t "=$session:" '#{pane_current_path}' 2>/dev/null || true)"
+    [[ -n "$cwd" && "$cwd" == "$canonical_path" ]]
+}
+
+# ---------------------------------------------------------------------------
+# Private runtime directories (P3-01): the same secure-directory validation
+# applies uniformly to every Hubi runtime root, not only the /tmp fallback.
+# Never silently repairs a pre-existing unsafe object; fails closed.
+# ---------------------------------------------------------------------------
+secure_fallback_lock_root() {
+    local root="$1" metadata
+    if [[ -L "$root" ]]; then return 1; fi
+    if [[ ! -e "$root" ]]; then
+        # A concurrent caller may win this race and create it first; that is
+        # fine as long as what exists afterward is still a valid secure
+        # directory, which the checks below verify regardless of who made it.
+        mkdir -m 700 -- "$root" 2>/dev/null || true
+    fi
+    [[ -d "$root" && ! -L "$root" ]] || return 1
+    metadata="$(stat -c '%u:%a' -- "$root")" || return 1
+    [[ "$metadata" == "$UID:700" ]] || return 1
+    printf '%s' "$root"
+}
+
+hubi_runtime_base() {
+    local base
+    if [[ -n "${HUBI_RUNTIME_DIR:-}" ]]; then
+        base="$HUBI_RUNTIME_DIR"
+    elif [[ -n "${XDG_RUNTIME_DIR:-}" ]]; then
+        base="$XDG_RUNTIME_DIR/hubi-${UID}"
+    else
+        base="/tmp/hubi-${UID}"
+    fi
+    secure_fallback_lock_root "$base"
+}
+
+lock_root() {
+    local base
+    base="$(hubi_runtime_base)" || return 1
+    secure_fallback_lock_root "$base/locks"
+}
+
+state_root() {
+    local base
+    base="$(hubi_runtime_base)" || return 1
+    secure_fallback_lock_root "$base/state"
+}
+
+# ---------------------------------------------------------------------------
+# Trusted ownership record (P2-03, P2-04, P2-07, P2-08).
+#
+# One record per identity hash, stored as strict key=value lines under the
+# private state root (owner-only 600, no symlinks, atomic rename-into-place).
+# This file — not a predictable tmux/systemd name, and not a token embedded
+# only in tmux's own (equally predictable/forgeable) metadata — is what
+# authorizes destructive lifecycle operations.
+# ---------------------------------------------------------------------------
+write_state_record() {
+    local hash="$1" dir tmp kv
+    shift
+    dir="$(state_root)" || return 1
+    tmp="$dir/.tmp-$hash-$$-$RANDOM"
+    {
+        printf 'schema=%s\n' "$HUBI_STATE_SCHEMA"
+        for kv in "$@"; do
+            [[ "$kv" != *$'\n'* ]] || return 1
+            printf '%s\n' "$kv"
+        done
+    } >"$tmp" 2>/dev/null || { rm -f -- "$tmp"; return 1; }
+    chmod 600 -- "$tmp" 2>/dev/null || { rm -f -- "$tmp"; return 1; }
+    mv -f -- "$tmp" "$dir/$hash.rec" 2>/dev/null || { rm -f -- "$tmp"; return 1; }
+}
+
+# Sets REC[...] and returns: 0 valid/trusted, 1 absent, 2 malformed/untrusted
+# (bad permissions, a symlink, or content that fails strict parsing). A
+# malformed record must never be treated as ownership proof.
+load_state_record() {
+    local hash="$1" dir file line key value metadata
+    REC=()
+    dir="$(state_root)" || return 2
+    file="$dir/$hash.rec"
+    if [[ -L "$file" ]]; then return 2; fi
+    [[ -e "$file" ]] || return 1
+    [[ -f "$file" ]] || return 2
+    metadata="$(stat -c '%u:%a' -- "$file" 2>/dev/null)" || return 2
+    [[ "$metadata" == "$UID:600" ]] || return 2
+    while IFS= read -r line; do
+        [[ "$line" =~ ^([a-z_]+)=(.*)$ ]] || return 2
+        key="${BASH_REMATCH[1]}"
+        value="${BASH_REMATCH[2]}"
+        REC["$key"]="$value"
+    done < "$file"
+    [[ "${REC[schema]:-}" == "$HUBI_STATE_SCHEMA" ]] || return 2
+    [[ -n "${REC[session]:-}" && -n "${REC[scope]:-}" && -n "${REC[token]:-}" && -n "${REC[state]:-}" ]] || return 2
+    return 0
+}
+
+delete_state_record() {
+    local hash="$1" dir
+    dir="$(state_root)" 2>/dev/null || return 0
+    rm -f -- "$dir/$hash.rec" 2>/dev/null || true
+}
+
+verify_record_matches_repo() {
+    local canonical_path="$1" current_id
+    [[ "${REC[canonical_path]:-}" == "$canonical_path" ]] || return 1
+    if current_id="$(stat -Lc '%d:%i' -- "$canonical_path" 2>/dev/null)"; then
+        [[ "${REC[repo_dev_inode]:-}" == "$current_id" ]] || return 1
+    fi
+    return 0
+}
+
+# Cross-checks the live tmux session/pane against a loaded trusted record.
+verify_record_live_session() {
+    local agent="$1" instance="$2" session="${REC[session]}" pane="${REC[pane]}" pane_session
+    tmux_cmd has-session -t "$session" 2>/dev/null || return 1
+    [[ "$(tmux_cmd show-option -qv -t "$session" @hubi-managed 2>/dev/null || true)" == v4 ]] || return 1
+    [[ "$(tmux_cmd show-option -qv -t "$session" @hubi-token 2>/dev/null || true)" == "${REC[token]}" ]] || return 1
+    [[ "$(tmux_cmd show-option -qv -t "$session" @hubi-agent 2>/dev/null || true)" == "$agent" ]] || return 1
+    [[ "$(tmux_cmd show-option -qv -t "$session" @hubi-instance 2>/dev/null || true)" == "$instance" ]] || return 1
+    pane_session="$(tmux_cmd display-message -p -t "$pane" '#S' 2>/dev/null || true)"
+    [[ "$pane_session" == "$session" ]] || return 1
+}
+
+# Best-effort OS-level cross-check: a scope Hubi creates now carries a
+# systemd unit Description tying it to the record's token. Old (pre-fix)
+# scopes never had this, so its absence alone is not disqualifying — callers
+# only require it when the record itself already vouches for the object.
+verify_scope_description_token() {
+    local scope="$1" token="$2" desc
+    [[ -n "$token" ]] || return 1
+    desc="$("$SYSTEMCTL_BIN" --user show -p Description --value -- "$scope" 2>/dev/null)" || return 1
+    [[ "$desc" == "hubi-owned:$token" ]]
+}
+
+validate_legacy_v4_session() {
+    local agent="$1" canonical_path="$2" repo_key="$3" session="$4" stored_instance pane_path expected_scope stored_scope
+    [[ "$(tmux_cmd show-option -qv -t "$session" @hubi-managed 2>/dev/null || true)" == v4 ]] || return 1
+    [[ "$(tmux_cmd show-option -qv -t "$session" @hubi-agent 2>/dev/null || true)" == "$agent" ]] || return 1
+    [[ "$(tmux_cmd show-option -qv -t "$session" @hubi-repo 2>/dev/null || true)" == "$repo_key" ]] || return 1
+    stored_instance="$(tmux_cmd show-option -qv -t "$session" @hubi-instance 2>/dev/null || true)"
+    [[ -z "$stored_instance" ]] || return 1
+    agent_pane "$session" || return 1
+    pane_path="$(tmux_cmd display-message -p -t "$FOUND_PANE" '#{pane_current_path}' 2>/dev/null || true)"
+    [[ "$pane_path" == "$canonical_path" ]] || return 1
+    expected_scope="$(legacy_v4_scope_name "$agent" "$repo_key")"
+    stored_scope="$(tmux_cmd show-option -qv -t "$session" @hubi-scope 2>/dev/null || true)"
+    [[ "$stored_scope" == "$expected_scope" ]] || return 1
+}
+
+# Opportunistic, safe adoption of a validated pre-fix v4 primary: enriches its
+# metadata (token, canonical path) and creates a trusted record under the NEW
+# identity hash without renaming or otherwise mutating anything the running
+# agent depends on. Only ever called after validate_legacy_v4_session passed.
+adopt_legacy_v4_session() {
+    local agent="$1" canonical_path="$2" instance="$3" session="$4" hash="$5" token repo_id scope
+    token="$(random_token)"
+    repo_id="$(stat -Lc '%d:%i' -- "$canonical_path" 2>/dev/null || true)"
+    scope="$(tmux_cmd show-option -qv -t "$session" @hubi-scope 2>/dev/null || true)"
+    agent_pane "$session" || return 0
+    tmux_cmd set-option -t "$session" @hubi-token "$token" >/dev/null 2>&1 || true
+    tmux_cmd set-option -t "$session" @hubi-identity-version "$HUBI_IDENTITY_VERSION" >/dev/null 2>&1 || true
+    tmux_cmd set-option -t "$session" @hubi-repo-canon "$canonical_path" >/dev/null 2>&1 || true
+    write_state_record "$hash" \
+        "identity_version=$HUBI_IDENTITY_VERSION" "agent=$agent" "instance=$instance" \
+        "canonical_path=$canonical_path" "repo_dev_inode=$repo_id" \
+        "session=$session" "pane=$FOUND_PANE" "scope=$scope" \
+        "token=$token" "state=COMMITTED" \
+        "created=$(date +%s)" "committed=$(date +%s)" || true
+}
+
+# ---------------------------------------------------------------------------
+# Discovery (P1-01, P1-02, P2-03, P2-08, P3-03).
+#
+# Returns via FOUND_SESSION/FOUND_SESSION_KIND and exit status:
+#   0  found, FOUND_SESSION_KIND is "managed" (new-scheme or adopted v4) or
+#      "legacy" (v3, unmanaged, attach-only)
+#   1  not found (absent)
+#   3  CONFLICT: a session at the exact expected name exists but does not
+#      verify — never treated as managed, never destroyed by name alone
+#   4  STARTING: our own bootstrap is verifiably in progress
+# ---------------------------------------------------------------------------
 find_agent_session() {
-    local agent="$1" repo_key="$2" instance="${3:-primary}"
-    local session legacy managed stored_agent stored_repo stored_instance
+    local agent="$1" canonical_path="$2" instance="${3:-primary}"
+    local session hash record_rc root repo_key legacy_v4_session legacy live_token
     FOUND_SESSION=""
     FOUND_SESSION_KIND=""
     validate_instance_name "$instance" || return 2
-    session="$(agent_session_name "$agent" "$repo_key" "$instance")"
+
+    hash="$(compute_identity_hash "$canonical_path" "$agent" "$instance")"
+    session="$(agent_session_name "$agent" "$canonical_path" "$instance")"
+
+    load_state_record "$hash"; record_rc=$?
+    if (( record_rc == 0 )) && [[ "${REC[state]}" == COMMITTED ]]; then
+        if verify_record_matches_repo "$canonical_path" && verify_record_live_session "$agent" "$instance" \
+            && [[ "${REC[session]}" == "$session" ]]; then
+            FOUND_SESSION="${REC[session]}"
+            FOUND_SESSION_KIND="managed"
+            return 0
+        fi
+        if ! tmux_cmd has-session -t "${REC[session]}" 2>/dev/null; then
+            return 1
+        fi
+        FOUND_SESSION="${REC[session]}"
+        FOUND_SESSION_KIND="conflict"
+        return 3
+    fi
+
     if tmux_cmd has-session -t "$session" 2>/dev/null; then
-        managed="$(tmux_cmd show-option -qv -t "$session" @hubi-managed 2>/dev/null || true)"
-        stored_agent="$(tmux_cmd show-option -qv -t "$session" @hubi-agent 2>/dev/null || true)"
-        stored_repo="$(tmux_cmd show-option -qv -t "$session" @hubi-repo 2>/dev/null || true)"
-        stored_instance="$(tmux_cmd show-option -qv -t "$session" @hubi-instance 2>/dev/null || true)"
-        if [[ "$managed" == "v4" && "$stored_agent" == "$agent" && "$stored_repo" == "$repo_key" \
-            && ( "$stored_instance" == "$instance" || ( "$instance" == "primary" && -z "$stored_instance" ) ) ]]; then
-            FOUND_SESSION="$session"
+        if (( record_rc == 0 )) && [[ "${REC[state]}" == STARTING && "${REC[session]}" == "$session" ]]; then
+            live_token="$(tmux_cmd show-option -qv -t "$session" @hubi-token 2>/dev/null || true)"
+            if [[ "$live_token" == "${REC[token]}" ]]; then
+                FOUND_SESSION="$session"
+                FOUND_SESSION_KIND="starting"
+                    return 4
+            fi
+        fi
+        FOUND_SESSION="$session"
+        FOUND_SESSION_KIND="conflict"
+        return 3
+    fi
+
+    [[ "$instance" == "primary" ]] || return 1
+
+    root="$(realpath -e -- "$REPOS_ROOT" 2>/dev/null)" || return 1
+    repo_key="${canonical_path#"$root"/}"
+
+    legacy_v4_session="$(legacy_v4_session_name "$agent" "$repo_key")"
+    if [[ -n "$legacy_v4_session" ]] && tmux_cmd has-session -t "$legacy_v4_session" 2>/dev/null; then
+        if validate_legacy_v4_session "$agent" "$canonical_path" "$repo_key" "$legacy_v4_session"; then
+            adopt_legacy_v4_session "$agent" "$canonical_path" "$instance" "$legacy_v4_session" "$hash"
+            FOUND_SESSION="$legacy_v4_session"
             FOUND_SESSION_KIND="managed"
             return 0
         fi
     fi
-    [[ "$instance" == "primary" ]] || return 1
-    legacy="$(legacy_session_name "$agent" "$repo_key")"
-    if [[ -n "$legacy" ]] && tmux_cmd has-session -t "$legacy" 2>/dev/null; then
-        FOUND_SESSION="$legacy"
-        FOUND_SESSION_KIND="legacy"
-        return 0
+
+    legacy="$(legacy_session_name "$agent" "$repo_key" 2>/dev/null || true)"
+    if [[ -n "$legacy" ]] && tmux_cmd has-session -t "=$legacy" 2>/dev/null; then
+        if legacy_session_cwd_matches "$legacy" "$canonical_path"; then
+            FOUND_SESSION="$legacy"
+            FOUND_SESSION_KIND="legacy"
+            return 0
+        fi
     fi
     return 1
 }
 
 agent_instance_list() {
     local LC_ALL=C
-    local agent="$1" repo_key="$2" record field_length session managed stored_agent stored_repo instance unit prefix body
+    local agent="$1" canonical_path="$2" root repo_key record field_length
     local -a fields=()
+    local session managed stored_agent stored_repo stored_repo_canon instance dir rec_file rec_hash
+    root="$(realpath -e -- "$REPOS_ROOT" 2>/dev/null || true)"
+    if [[ -n "$root" ]]; then repo_key="${canonical_path#"$root"/}"; else repo_key=""; fi
     {
         printf 'primary\n'
         while IFS= read -r record; do
             fields=()
-            for _ in {1..5}; do
+            for _ in {1..6}; do
                 if [[ "$record" =~ ^([0-9]+):(.*)$ ]]; then
                     field_length="${BASH_REMATCH[1]}"
                     record="${BASH_REMATCH[2]}"
@@ -371,29 +699,41 @@ agent_instance_list() {
                 fields+=("${record:0:field_length}")
                 record="${record:field_length}"
             done
-            (( ${#fields[@]} == 5 )) || continue
+            (( ${#fields[@]} == 6 )) || continue
             session="${fields[0]}"
             managed="${fields[1]}"
             stored_agent="${fields[2]}"
             stored_repo="${fields[3]}"
-            instance="${fields[4]}"
-            [[ "$managed" == "v4" && "$stored_agent" == "$agent" && "$stored_repo" == "$repo_key" ]] || continue
+            stored_repo_canon="${fields[4]}"
+            instance="${fields[5]}"
+            [[ "$managed" == "v4" && "$stored_agent" == "$agent" ]] || continue
+            if [[ -n "$stored_repo_canon" ]]; then
+                [[ "$stored_repo_canon" == "$canonical_path" ]] || continue
+            else
+                [[ -n "$repo_key" && "$stored_repo" == "$repo_key" ]] || continue
+            fi
             [[ -n "$instance" ]] || instance="primary"
             validate_instance_name "$instance" >/dev/null 2>&1 || continue
             printf '%s\n' "$instance"
         done < <(tmux_cmd list-sessions -F \
-            '#{n:session_name}:#{session_name}#{n:@hubi-managed}:#{@hubi-managed}#{n:@hubi-agent}:#{@hubi-agent}#{n:@hubi-repo}:#{@hubi-repo}#{n:@hubi-instance}:#{@hubi-instance}' \
+            '#{n:session_name}:#{session_name}#{n:@hubi-managed}:#{@hubi-managed}#{n:@hubi-agent}:#{@hubi-agent}#{n:@hubi-repo}:#{@hubi-repo}#{n:@hubi-repo-canon}:#{@hubi-repo-canon}#{n:@hubi-instance}:#{@hubi-instance}' \
             2>/dev/null || true)
 
-        prefix="hubi-$agent-$(name_hash "$repo_key")-"
-        while read -r unit _; do
-            [[ "$unit" == "$prefix"*.scope ]] || continue
-            body="${unit#"$prefix"}"
-            instance="${body%-????????????.scope}"
-            validate_instance_name "$instance" >/dev/null 2>&1 || continue
-            [[ "$unit" == "$(agent_scope_name "$agent" "$repo_key" "$instance")" ]] || continue
-            printf '%s\n' "$instance"
-        done < <("$SYSTEMCTL_BIN" --user list-units --type=scope --state=active --no-legend --plain 'hubi-*.scope' 2>/dev/null || true)
+        # Trusted records are the authoritative source for instances whose
+        # tmux session is gone but whose scope may still be alive (P2-08):
+        # exact instance names, no fragile reverse-parsing of a hashed name.
+        dir="$(state_root)" 2>/dev/null || dir=""
+        if [[ -n "$dir" && -d "$dir" ]]; then
+            for rec_file in "$dir"/*.rec; do
+                [[ -e "$rec_file" ]] || continue
+                rec_hash="${rec_file##*/}"; rec_hash="${rec_hash%.rec}"
+                load_state_record "$rec_hash" || continue
+                [[ "${REC[state]}" == COMMITTED ]] || continue
+                [[ "${REC[agent]}" == "$agent" && "${REC[canonical_path]}" == "$canonical_path" ]] || continue
+                validate_instance_name "${REC[instance]}" >/dev/null 2>&1 || continue
+                printf '%s\n' "${REC[instance]}"
+            done
+        fi
     } | awk '!seen[$0]++'
 }
 
@@ -445,25 +785,51 @@ session_status() {
     fi
 }
 
+# agent_status surfaces explicit CONFLICT/STARTING/UNKNOWN states instead of
+# silently downgrading an unresolved ownership question to STOPPED (P3-03).
 agent_status() {
-    local agent="$1" repo_key="$2" instance="${3:-primary}" scope
+    local agent="$1" canonical_path="$2" instance="${3:-primary}" scope hash find_rc st
     validate_instance_name "$instance" || return 2
-    scope="$(agent_scope_name "$agent" "$repo_key" "$instance")"
-    if find_agent_session "$agent" "$repo_key" "$instance"; then
-        if [[ "$FOUND_SESSION_KIND" == "legacy" ]]; then
-            printf '⚠ LEGACY/UNMANAGED'
-        elif session_is_dead "$FOUND_SESSION" && scope_is_active "$scope"; then
-            printf '⚠ EXITED / STALE SCOPE'
-        elif ! session_is_dead "$FOUND_SESSION" && ! scope_is_active "$scope"; then
-            printf '⚠ STALE SESSION'
-        else
-            session_status "$FOUND_SESSION"
-        fi
-    elif scope_is_active "$scope"; then
-        printf '⚠ ORPHANED'
-    else
-        printf '○ STOPPED'
-    fi
+    find_agent_session "$agent" "$canonical_path" "$instance"; find_rc=$?
+    hash="$(compute_identity_hash "$canonical_path" "$agent" "$instance")"
+    case "$find_rc" in
+        0)
+            if [[ "$FOUND_SESSION_KIND" == "legacy" ]]; then
+                printf '⚠ LEGACY/UNMANAGED'
+                return
+            fi
+            scope="$(agent_scope_name "$agent" "$canonical_path" "$instance")"
+            load_state_record "$hash" && scope="${REC[scope]}"
+            scope_state "$scope"; st=$?
+            if session_is_dead "$FOUND_SESSION"; then
+                case "$st" in
+                    0) printf '⚠ EXITED / STALE SCOPE' ;;
+                    2) printf '⚠ EXITED / UNKNOWN SCOPE' ;;
+                    *) printf '⚠ EXITED' ;;
+                esac
+            else
+                case "$st" in
+                    1) printf '⚠ STALE SESSION' ;;
+                    2) printf '⚠ RUNNING / UNKNOWN SCOPE' ;;
+                    *) session_status "$FOUND_SESSION" ;;
+                esac
+            fi
+            ;;
+        3) printf '⚠ CONFLICT' ;;
+        4) printf '… STARTING' ;;
+        *)
+            if load_state_record "$hash" && [[ "${REC[state]}" == COMMITTED ]]; then
+                scope_state "${REC[scope]}"; st=$?
+                case "$st" in
+                    0) printf '⚠ ORPHANED' ;;
+                    2) printf '⚠ UNKNOWN' ;;
+                    *) printf '○ STOPPED' ;;
+                esac
+            else
+                printf '○ STOPPED'
+            fi
+            ;;
+    esac
 }
 
 git_summary() {
@@ -539,162 +905,273 @@ attach_session() {
     clear_screen
 }
 
-secure_fallback_lock_root() {
-    local root="$1" metadata
-    if [[ -L "$root" ]]; then return 1; fi
-    if [[ ! -e "$root" ]]; then
-        mkdir -m 700 -- "$root" || return 1
+# ---------------------------------------------------------------------------
+# Per-identity mutation lock (P2-06): start, stop and orphan reconciliation
+# for the same identity all serialize through the exact same lock file, keyed
+# by the structured identity hash. Independent identities never block on
+# each other.
+# ---------------------------------------------------------------------------
+run_under_identity_lock() {
+    local hash="$1" timeout="$2" locks lock_file
+    HUBI_LOCKFD=""
+    locks="$(lock_root)" || return 1
+    lock_file="$locks/$hash.lock"
+    exec {HUBI_LOCKFD}<>"$lock_file" || { HUBI_LOCKFD=""; return 1; }
+    if ! "$FLOCK_BIN" --wait "$timeout" "$HUBI_LOCKFD"; then
+        exec {HUBI_LOCKFD}<&-
+        HUBI_LOCKFD=""
+        return 75
     fi
-    [[ -d "$root" && ! -L "$root" ]] || return 1
-    metadata="$(stat -c '%u:%a' -- "$root")" || return 1
-    [[ "$metadata" == "$UID:700" ]] || return 1
-    printf '%s' "$root"
 }
 
-lock_root() {
-    local root
-    if [[ -n "${XDG_RUNTIME_DIR:-}" ]]; then
-        root="$XDG_RUNTIME_DIR/hubi-locks-${UID}"
-        if [[ ! -d "$root" ]]; then install -d -m 700 -- "$root" || return 1; fi
-        printf '%s' "$root"
-        return
-    fi
-    root="/tmp/hubi-locks-${UID}"
-    secure_fallback_lock_root "$root" || return 1
+release_identity_lock() {
+    [[ -n "$HUBI_LOCKFD" ]] || return 0
+    "$FLOCK_BIN" --unlock "$HUBI_LOCKFD" 2>/dev/null || true
+    exec {HUBI_LOCKFD}<&- 2>/dev/null || true
+    HUBI_LOCKFD=""
 }
 
 ensure_agent_session() {
-    local agent="$1" repo_key="$2" directory="$3" executable="$4"
-    shift 4
-    ensure_agent_instance_session "$agent" "$repo_key" "$directory" primary "$executable" "$@"
+    local agent="$1" canonical_path="$2" executable="$3"
+    shift 3
+    ensure_agent_instance_session "$agent" "$canonical_path" primary "$executable" "$@"
 }
 
+# Orchestrates one managed startup: acquires the identity lock, then runs the
+# actual bootstrap in a supervised worker of its own session/process group
+# (P2-05) so a caught INT/HUP/TERM here can forward cancellation to the whole
+# startup subtree instead of leaving it to finish unsupervised.
 ensure_agent_instance_session() {
-    local agent="$1" repo_key="$2" directory="$3" instance="$4" executable="$5"
-    shift 5
+    local agent="$1" canonical_path="$2" instance="$3" executable="$4"
+    shift 4
     local -a arguments=("$@")
-    local session locks lock_file output rc expected_repo_id
+    local hash locks lock_file rc output tmp_out worker_pid expected_repo_id
     ENSURED_SESSION=""
     validate_instance_name "$instance" || return 2
-    session="$(agent_session_name "$agent" "$repo_key" "$instance")"
     expected_repo_id="$RESOLVED_REPO_ID"
     require_scope_kill_capability || return 1
-    revalidate_repo_for_start "$repo_key" "$directory" "$expected_repo_id" || return 1
+    revalidate_repo_for_start "$canonical_path" "$expected_repo_id" || return 1
+    hash="$(compute_identity_hash "$canonical_path" "$agent" "$instance")"
     locks="$(lock_root)" || { printf 'Hubi: nie można utworzyć katalogu blokad startowych.\n' >&2; return 1; }
-    if [[ "$instance" == "primary" ]]; then
-        lock_file="$locks/$(name_hash "$agent:$repo_key").lock"
-    else
-        lock_file="$locks/$(name_hash "$agent:$repo_key:$instance").lock"
-    fi
+    lock_file="$locks/$hash.lock"
     if [[ ! "$HUBI_LOCK_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
         printf 'Hubi: nieprawidłowy limit oczekiwania na blokadę: %s\n' "$HUBI_LOCK_TIMEOUT" >&2
         return 1
     fi
 
+    tmp_out="$(mktemp "${TMPDIR:-/tmp}/hubi-start.XXXXXX" 2>/dev/null)" || {
+        printf 'Hubi: nie można utworzyć pliku tymczasowego startu.\n' >&2
+        return 1
+    }
+
     # flock owns the descriptor in a supervisor. --close guarantees that the
-    # worker, tmux server, agent and every descendant start without that fd.
-    output="$("$FLOCK_BIN" --exclusive --close --wait "$HUBI_LOCK_TIMEOUT" \
+    # worker, tmux server, agent and every descendant start without that fd,
+    # so killing the flock supervisor process alone (see
+    # cancel_startup_worker) releases the lock immediately regardless of
+    # what its child is currently doing. The worker stays in the launcher's
+    # own process group deliberately: a group-wide signal (e.g. the whole
+    # session being torn down) already reaches it directly with no trap
+    # needed, same as before this revision. A parent-only SIGKILL cannot run
+    # any trap at all, which is why the persisted STARTING record — not
+    # process supervision — is what makes that case recoverable afterward.
+    "$FLOCK_BIN" --exclusive --close --wait "$HUBI_LOCK_TIMEOUT" \
         --conflict-exit-code 75 "$lock_file" \
         env -u HUBI_ACTIVE bash "$HUBI_SCRIPT_PATH" __start-locked \
-        "$agent" "$repo_key" "$directory" "$expected_repo_id" "$instance" \
-        "$executable" "${arguments[@]}" 2>&1)"
+        "$agent" "$canonical_path" "$expected_repo_id" "$instance" "$hash" \
+        "$executable" "${arguments[@]}" >"$tmp_out" 2>&1 &
+    worker_pid=$!
+    STARTUP_WORKER_PID="$worker_pid"
+    STARTUP_IDENTITY_HASH="$hash"
+    wait "$worker_pid"
     rc=$?
+    STARTUP_WORKER_PID=""
+    STARTUP_IDENTITY_HASH=""
+    output="$(cat -- "$tmp_out" 2>/dev/null)"
+    rm -f -- "$tmp_out"
+
     if (( rc == 75 )); then
         printf 'Hubi: limit %ss oczekiwania na blokadę startu (startup lock) %s/%s został przekroczony.\n' \
-            "$HUBI_LOCK_TIMEOUT" "$agent/$instance" "$repo_key" >&2
+            "$HUBI_LOCK_TIMEOUT" "$agent/$instance" "$canonical_path" >&2
         return 1
     fi
     if (( rc != 0 )); then
-        printf 'Hubi: start %s/%s/%s pod blokadą nie powiódł się (rc=%d).\n' "$agent" "$instance" "$repo_key" "$rc" >&2
+        printf 'Hubi: start %s/%s/%s pod blokadą nie powiódł się (rc=%d).\n' "$agent" "$instance" "$canonical_path" "$rc" >&2
         [[ -z "$output" ]] || printf '%s\n' "$output" >&2
         return "$rc"
     fi
-    ENSURED_SESSION="$session"
+    ENSURED_SESSION="$(agent_session_name "$agent" "$canonical_path" "$instance")"
 }
 
+# Rolls a STARTING record all the way back to ABSENT: kills the bootstrap
+# tmux session (only if its live @hubi-token matches, never by name alone),
+# terminates any scope it created the same way, then removes the record.
+# Used both by cancellation and by self-healing at the top of a fresh start.
+rollback_starting_record() {
+    local hash="$1" session scope token live_token
+    load_state_record "$hash" || return 0
+    [[ "${REC[state]}" == STARTING ]] || return 0
+    session="${REC[session]}"
+    scope="${REC[scope]}"
+    token="${REC[token]}"
+    if tmux_cmd has-session -t "$session" 2>/dev/null; then
+        live_token="$(tmux_cmd show-option -qv -t "$session" @hubi-token 2>/dev/null || true)"
+        if [[ "$live_token" == "$token" ]]; then
+            tmux_cmd kill-session -t "$session" >/dev/null 2>&1 || true
+        fi
+    fi
+    if [[ -n "$scope" ]]; then
+        terminate_scope "$scope" "$token" >/dev/null 2>&1 || true
+    fi
+    delete_state_record "$hash"
+}
+
+reconcile_leftover_starting() { rollback_starting_record "$1"; }
+
+rollback_bootstrap() {
+    local hash="$1" session="$2" scope="$3" token="$4"
+    [[ -z "$session" ]] || tmux_cmd kill-session -t "$session" >/dev/null 2>&1 || true
+    if [[ -n "$scope" ]]; then
+        terminate_scope "$scope" "$token" >/dev/null 2>&1 || true
+    fi
+    delete_state_record "$hash"
+}
+
+# The actual bootstrap (runs as the supervised worker, under the identity
+# flock). Transactional: from the moment the tmux bootstrap object exists,
+# every failure path either fully rolls back to ABSENT or reaches a single
+# COMMIT point. The one intentional exception is a fast-crashing agent after
+# respawn-pane succeeds — that is a legitimate EXITED object, not a failed
+# transaction, and is committed before the crash is even detected.
 ensure_agent_session_locked() {
-    local agent="$1" repo_key="$2" directory="$3" expected_repo_id="$4" instance="$5" executable="$6"
+    local agent="$1" canonical_path="$2" expected_repo_id="$3" instance="$4" identity_hash="$5" executable="$6"
     shift 6
     local -a arguments=("$@")
-    local session scope output pane start_command stored_agent stored_repo stored_instance
+    local hash session scope pane output token created_ts st
+
     validate_instance_name "$instance" || return 2
-    session="$(agent_session_name "$agent" "$repo_key" "$instance")"
-    scope="$(agent_scope_name "$agent" "$repo_key" "$instance")"
+    hash="$(compute_identity_hash "$canonical_path" "$agent" "$instance")"
+    if [[ "$hash" != "$identity_hash" ]]; then
+        printf 'Hubi: niezgodność skrótu tożsamości; odmowa startu.\n' >&2
+        return 1
+    fi
+    session="$(agent_session_name "$agent" "$canonical_path" "$instance")"
+    scope="$(agent_scope_name "$agent" "$canonical_path" "$instance")"
+
+    reconcile_leftover_starting "$hash"
 
     if tmux_cmd has-session -t "$session" 2>/dev/null; then
-        stored_agent="$(tmux_cmd show-option -qv -t "$session" @hubi-agent 2>/dev/null || true)"
-        stored_repo="$(tmux_cmd show-option -qv -t "$session" @hubi-repo 2>/dev/null || true)"
-        stored_instance="$(tmux_cmd show-option -qv -t "$session" @hubi-instance 2>/dev/null || true)"
-        if session_is_managed "$session" && [[ "$stored_agent" == "$agent" && "$stored_repo" == "$repo_key" \
-            && ( "$stored_instance" == "$instance" || ( "$instance" == "primary" && -z "$stored_instance" ) ) ]] \
-            && agent_pane "$session"; then
+        if load_state_record "$hash" && [[ "${REC[state]}" == COMMITTED ]] \
+            && verify_record_live_session "$agent" "$instance" && [[ "${REC[session]}" == "$session" ]]; then
             return 0
         fi
-
-        # Recover only the exact bootstrap shape created by Hubi before it had
-        # a chance to persist metadata. Never claim an arbitrary lookalike.
-        start_command="$(tmux_cmd display-message -p -t "$session:" '#{pane_start_command}' 2>/dev/null || true)"
-        if [[ "$start_command" == "sleep 30" || "$(tmux_cmd show-option -qv -t "$session" @hubi-managed 2>/dev/null || true)" == "v4" ]]; then
-            terminate_scope "$scope" || return 1
-            tmux_cmd kill-session -t "$session" || return 1
-        else
-            printf 'Hubi: sesja %s istnieje bez zweryfikowanych metadanych v4; odmowa przejęcia.\n' "$session" >&2
-            return 1
-        fi
-    elif scope_is_active "$scope"; then
-        printf 'Hubi: znaleziono osierocony scope %s; bezpieczne czyszczenie przed restartem.\n' "$scope" >&2
-        terminate_scope "$scope" || return 1
+        printf 'Hubi: sesja %s istnieje bez zweryfikowanej własności v4; odmowa przejęcia (CONFLICT).\n' "$session" >&2
+        return 1
     fi
 
-    # This is the last check before tmux receives -c and before systemd creates
-    # a scope. It also detects replacement of a repository at the same path.
-    revalidate_repo_for_start "$repo_key" "$directory" "$expected_repo_id" || return 1
+    scope_state "$scope"; st=$?
+    if (( st == 0 )); then
+        if load_state_record "$hash" && verify_scope_description_token "$scope" "${REC[token]}"; then
+            printf 'Hubi: znaleziono zweryfikowany osierocony scope %s; bezpieczne czyszczenie przed restartem.\n' "$scope" >&2
+            terminate_scope "$scope" "${REC[token]}" || return 1
+            delete_state_record "$hash"
+        else
+            printf 'Hubi: scope %s jest aktywny bez zweryfikowanej własności; odmowa przejęcia (CONFLICT).\n' "$scope" >&2
+            return 1
+        fi
+    elif (( st == 2 )); then
+        printf 'Hubi: nie można ustalić stanu scope %s (błąd systemctl); odmowa startu (fail-closed).\n' "$scope" >&2
+        return 1
+    fi
 
-    if ! output="$(tmux_cmd new-session -d -P -F '#{pane_id}' -s "$session" -c "$directory" -- sleep 30 2>&1)"; then
+    revalidate_repo_for_start "$canonical_path" "$expected_repo_id" || return 1
+
+    token="$(random_token)"
+    if ! output="$(tmux_cmd new-session -d -P -F '#{pane_id}' -s "$session" -c "$canonical_path" -- sleep 30 2>&1)"; then
         printf 'Hubi: tmux nie utworzył sesji %s:\n%s\n' "$session" "$output" >&2
         return 1
     fi
     pane="$output"
     if [[ "$pane" != %* ]]; then
         printf 'Hubi: tmux nie zwrócił identyfikatora panelu agenta: %s\n' "$pane" >&2
-        return 1
-    fi
-
-    if [[ "$(tmux_cmd display-message -p -t "$pane" '#{pane_current_path}' 2>/dev/null || true)" != "$directory" ]]; then
-        printf 'Hubi: tmux nie zachował katalogu repozytorium %s; start został przerwany.\n' "$directory" >&2
         tmux_cmd kill-session -t "$session" >/dev/null 2>&1 || true
         return 1
     fi
 
+    created_ts="$(date +%s)"
+    if ! write_state_record "$hash" \
+        "identity_version=$HUBI_IDENTITY_VERSION" "agent=$agent" "instance=$instance" \
+        "canonical_path=$canonical_path" "repo_dev_inode=$expected_repo_id" \
+        "session=$session" "pane=$pane" "scope=$scope" "token=$token" \
+        "state=STARTING" "created=$created_ts" "committed=0"; then
+        printf 'Hubi: nie można utworzyć zaufanego rekordu startu; wycofywanie.\n' >&2
+        tmux_cmd kill-session -t "$session" >/dev/null 2>&1 || true
+        return 1
+    fi
+
+    if [[ "$(tmux_cmd display-message -p -t "$pane" '#{pane_current_path}' 2>/dev/null || true)" != "$canonical_path" ]]; then
+        printf 'Hubi: tmux nie zachował katalogu repozytorium %s; start został przerwany.\n' "$canonical_path" >&2
+        rollback_bootstrap "$hash" "$session" "" "$token"
+        return 1
+    fi
+
     sanitize_tmux_environment
+    if [[ "$(tmux_cmd show-environment -g HUBI_ACTIVE 2>/dev/null || true)" == HUBI_ACTIVE=* ]]; then
+        printf 'Hubi: nie udało się usunąć HUBI_ACTIVE ze środowiska tmux; wycofywanie.\n' >&2
+        rollback_bootstrap "$hash" "$session" "" "$token"
+        return 1
+    fi
+
     if ! tmux_cmd set-option -t "$session" @hubi-managed v4 \
+        || ! tmux_cmd set-option -t "$session" @hubi-identity-version "$HUBI_IDENTITY_VERSION" \
         || ! tmux_cmd set-option -t "$session" @hubi-agent "$agent" \
-        || ! tmux_cmd set-option -t "$session" @hubi-repo "$repo_key" \
+        || ! tmux_cmd set-option -t "$session" @hubi-repo-canon "$canonical_path" \
         || ! tmux_cmd set-option -t "$session" @hubi-instance "$instance" \
         || ! tmux_cmd set-option -t "$session" @hubi-scope "$scope" \
         || ! tmux_cmd set-option -t "$session" @hubi-pane "$pane" \
+        || ! tmux_cmd set-option -t "$session" @hubi-token "$token" \
         || ! tmux_cmd set-window-option -t "$pane" remain-on-exit on \
         || ! tmux_cmd set-window-option -t "$pane" window-size largest; then
         printf 'Hubi: nie udało się utrwalić metadanych/ustawień sesji %s.\n' "$session" >&2
+        rollback_bootstrap "$hash" "$session" "" "$token"
         return 1
     fi
     if ! tmux_cmd set-hook -t "$session" after-new-window \
         'set-window-option remain-on-exit on; set-window-option window-size largest'; then
         printf 'Hubi: nie udało się ustawić polityki nowych okien sesji %s.\n' "$session" >&2
+        rollback_bootstrap "$hash" "$session" "" "$token"
         return 1
     fi
 
-    if ! revalidate_repo_for_start "$repo_key" "$directory" "$expected_repo_id"; then
-        printf 'Hubi: repozytorium zmieniło się przed utworzeniem scope; usuwanie sesji startowej %s.\n' "$session" >&2
-        tmux_cmd kill-session -t "$session" >/dev/null 2>&1 || true
+    if ! revalidate_repo_for_start "$canonical_path" "$expected_repo_id"; then
+        printf 'Hubi: repozytorium zmieniło się przed utworzeniem scope; wycofywanie sesji startowej %s.\n' "$session" >&2
+        rollback_bootstrap "$hash" "$session" "" "$token"
         return 1
     fi
+
     if ! output="$(tmux_cmd respawn-pane -k -t "$pane" -- \
-        "$SYSTEMD_RUN_BIN" --user --scope --quiet --collect --unit="$scope" -- \
+        "$SYSTEMD_RUN_BIN" --user --scope --quiet --collect --unit="$scope" \
+        --description="hubi-owned:$token" -- \
         "$executable" "${arguments[@]}" 2>&1)"; then
         printf 'Hubi: nie można uruchomić agenta w sesji %s:\n%s\n' "$session" "$output" >&2
+        rollback_bootstrap "$hash" "$session" "$scope" "$token"
         return 1
     fi
+
+    # respawn-pane succeeded: the agent has been handed off into its scope.
+    # From here the object is fully valid even if it exits immediately, so it
+    # is committed before the quick-crash poll below (P2-02: a failed
+    # respawn-pane above is a startup failure and rolls back; an agent that
+    # started and then exited is a legitimate EXITED object, not a rollback).
+    if ! write_state_record "$hash" \
+        "identity_version=$HUBI_IDENTITY_VERSION" "agent=$agent" "instance=$instance" \
+        "canonical_path=$canonical_path" "repo_dev_inode=$expected_repo_id" \
+        "session=$session" "pane=$pane" "scope=$scope" "token=$token" \
+        "state=COMMITTED" "created=$created_ts" "committed=$(date +%s)"; then
+        printf 'Hubi: nie można zatwierdzić zaufanego rekordu; wycofywanie.\n' >&2
+        rollback_bootstrap "$hash" "$session" "$scope" "$token"
+        return 1
+    fi
+
     for _ in {1..10}; do
         if session_is_dead "$session"; then
             printf 'Hubi: agent zakończył się podczas startu. Ostatnie wyjście:\n' >&2
@@ -717,7 +1194,20 @@ start_agent() {
 
     # Existing RUNNING/ATTACHED/EXITED sessions remain inspectable even if the
     # agent executable was subsequently moved or removed.
-    if find_agent_session "$agent" "$RESOLVED_REPO_KEY" "$instance"; then
+    local find_rc
+    find_agent_session "$agent" "$RESOLVED_REPO_DIR" "$instance"; find_rc=$?
+    if (( find_rc == 3 )); then
+        printf '\n  UWAGA: %s wygląda na sesję %s bez zweryfikowanej własności (CONFLICT).\n' "$FOUND_SESSION" "$agent" >&2
+        printf '  Hubi nie podłącza się do niej automatycznie ani jej nie modyfikuje.\n' >&2
+        pause_for_ack
+        return 1
+    fi
+    if (( find_rc == 4 )); then
+        printf '\n  Start tej instancji jest już w toku (STARTING); spróbuj ponownie za chwilę.\n' >&2
+        pause_for_ack
+        return 1
+    fi
+    if (( find_rc == 0 )); then
         if [[ "$FOUND_SESSION_KIND" == "legacy" ]]; then
             printf '\n  Uwaga: %s jest sesją legacy/unmanaged; dostępna jest tylko bezpieczna funkcja attach.\n' "$FOUND_SESSION" >&2
             printf '  [a] Podłącz legacy/unmanaged\n  [b] Anuluj\n  > '
@@ -743,7 +1233,7 @@ start_agent() {
         pause_for_ack
         return 1
     fi
-    if ! ensure_agent_instance_session "$agent" "$RESOLVED_REPO_KEY" "$RESOLVED_REPO_DIR" \
+    if ! ensure_agent_instance_session "$agent" "$RESOLVED_REPO_DIR" \
         "$instance" "$executable" "${arguments[@]}"; then
         printf '\n  Start agenta nie powiódł się; sesja EXITED zachowuje diagnostykę, jeśli powstała.\n' >&2
         pause_for_ack
@@ -752,7 +1242,30 @@ start_agent() {
     attach_session "$ENSURED_SESSION"
 }
 
-scope_is_active() { "$SYSTEMCTL_BIN" --user is-active --quiet "$1" 2>/dev/null; }
+# ---------------------------------------------------------------------------
+# Tri-state systemctl (P1-03): scope_state never conflates "confirmed
+# inactive" with "the query itself failed." Callers that mutate or claim
+# success on the strength of scope state must fail closed on state 2.
+#   returns/sets via $? : 0 active, 1 inactive (confirmed), 2 error/unknown
+# ---------------------------------------------------------------------------
+scope_state() {
+    local scope="$1" out
+    out="$("$SYSTEMCTL_BIN" --user is-active -- "$scope" 2>/dev/null)"
+    if [[ "$out" == "active" ]]; then
+        return 0
+    fi
+    case "$out" in
+        inactive|failed|activating|deactivating|unknown|"")
+            if "$SYSTEMCTL_BIN" --user show -p LoadState --value -- "$scope" >/dev/null 2>&1; then
+                return 1
+            fi
+            return 2
+            ;;
+        *) return 2 ;;
+    esac
+}
+
+scope_is_active() { scope_state "$1"; }
 
 require_scope_kill_capability() {
     local help
@@ -764,90 +1277,174 @@ require_scope_kill_capability() {
 }
 
 signal_scope() {
-    local scope="$1" signal="$2" output
+    local scope="$1" signal="$2" output st
     require_scope_kill_capability || return 1
-    if ! output="$("$SYSTEMCTL_BIN" --user kill --kill-whom=all --signal="$signal" "$scope" 2>&1)"; then
-        if scope_is_active "$scope"; then
+    if ! output="$("$SYSTEMCTL_BIN" --user kill --kill-whom=all --signal="$signal" -- "$scope" 2>&1)"; then
+        scope_state "$scope"; st=$?
+        if (( st == 0 )); then
             printf 'Hubi: systemctl nie wysłał %s do pełnego scope %s:\n%s\n' "$signal" "$scope" "$output" >&2
+            return 1
+        elif (( st == 2 )); then
+            printf 'Hubi: nie można potwierdzić wysłania %s do scope %s (błąd systemctl):\n%s\n' "$signal" "$scope" "$output" >&2
             return 1
         fi
     fi
 }
 
+# 0 confirmed inactive, 1 timed out (still active), 2 error/unknown.
 wait_scope_inactive() {
-    local scope="$1" attempts="$2" i
-    for ((i = 0; i < attempts; i++)); do scope_is_active "$scope" || return 0; sleep 0.1; done
+    local scope="$1" attempts="$2" i st
+    for ((i = 0; i < attempts; i++)); do
+        scope_state "$scope"; st=$?
+        (( st == 1 )) && return 0
+        (( st == 2 )) && return 2
+        sleep 0.1
+    done
     return 1
 }
 
+# Terminates a scope, never claiming success on an ambiguous systemctl
+# result (P1-03). When a token is supplied, the scope's own Description must
+# vouch for it before Hubi will touch it at all (P2-04); pass "" to fall back
+# to caller-established ownership (e.g. an already-validated legacy adoption).
+# Returns: 0 confirmed terminated, 1 still active (failed), 2 unknown/error.
 terminate_scope() {
-    local scope="$1"
-    scope_is_active "$scope" || return 0
+    local scope="$1" token="${2:-}" st
+    scope_state "$scope"; st=$?
+    (( st == 1 )) && return 0
+    if (( st == 2 )); then
+        printf 'Hubi: nie można ustalić stanu scope %s (błąd systemctl); odmowa działania (fail-closed).\n' "$scope" >&2
+        return 2
+    fi
+    if [[ -n "$token" ]] && ! verify_scope_description_token "$scope" "$token"; then
+        printf 'Hubi: scope %s nie ma zweryfikowanego znacznika własności; odmowa zakończenia.\n' "$scope" >&2
+        return 2
+    fi
     signal_scope "$scope" TERM || return 1
-    wait_scope_inactive "$scope" 20 || true
-    if scope_is_active "$scope"; then
-        signal_scope "$scope" KILL || return 1
-        wait_scope_inactive "$scope" 20 || true
+    wait_scope_inactive "$scope" 20; st=$?
+    (( st == 0 )) && return 0
+    if (( st == 2 )); then
+        printf 'Hubi: stan scope %s po TERM jest nieznany (błąd systemctl); zachowuję diagnostykę.\n' "$scope" >&2
+        return 2
     fi
-    if scope_is_active "$scope"; then
-        printf 'Hubi: scope %s nadal jest aktywny po TERM/KILL.\n' "$scope" >&2
-        return 1
-    fi
+    signal_scope "$scope" KILL || return 1
+    wait_scope_inactive "$scope" 20; st=$?
+    case "$st" in
+        0) return 0 ;;
+        2) printf 'Hubi: stan scope %s po KILL jest nieznany (błąd systemctl); zachowuję diagnostykę.\n' "$scope" >&2; return 2 ;;
+        *) printf 'Hubi: scope %s nadal jest aktywny po TERM/KILL.\n' "$scope" >&2; return 1 ;;
+    esac
 }
 
 stop_agent_now() {
-    local agent="$1" repo_key="$2" instance="${3:-primary}" session="" scope configured_scope
+    local agent="$1" canonical_path="$2" instance="${3:-primary}" hash rc
     validate_instance_name "$instance" || return 2
-    scope="$(agent_scope_name "$agent" "$repo_key" "$instance")"
-    if ! find_agent_session "$agent" "$repo_key" "$instance"; then
-        if scope_is_active "$scope"; then
-            printf 'Hubi: czyszczenie osieroconego scope %s (brak sesji tmux).\n' "$scope" >&2
-            terminate_scope "$scope"
-            return $?
-        fi
-        printf 'Hubi: %s dla %s nie działa.\n' "$agent" "$repo_key" >&2
+    hash="$(compute_identity_hash "$canonical_path" "$agent" "$instance")"
+    run_under_identity_lock "$hash" "$HUBI_LOCK_TIMEOUT"; rc=$?
+    if (( rc == 75 )); then
+        printf 'Hubi: limit %ss oczekiwania na blokadę cyklu życia (stop) został przekroczony.\n' "$HUBI_LOCK_TIMEOUT" >&2
+        return 1
+    elif (( rc != 0 )); then
+        printf 'Hubi: nie można otworzyć blokady cyklu życia.\n' >&2
         return 1
     fi
+    stop_agent_now_body "$agent" "$canonical_path" "$instance"
+    rc=$?
+    release_identity_lock
+    return "$rc"
+}
+
+stop_agent_now_body() {
+    local agent="$1" canonical_path="$2" instance="$3" hash scope session token find_rc st rc
+    hash="$(compute_identity_hash "$canonical_path" "$agent" "$instance")"
+
+    find_agent_session "$agent" "$canonical_path" "$instance"; find_rc=$?
+    if (( find_rc == 3 )); then
+        printf 'Hubi: %s wygląda na sesję %s bez zweryfikowanej własności (CONFLICT); odmowa działania.\n' "$FOUND_SESSION" "$agent" >&2
+        return 1
+    fi
+    if (( find_rc == 4 )); then
+        printf 'Hubi: start jest w toku (STARTING); poczekaj na jego zakończenie przed zatrzymaniem.\n' >&2
+        return 1
+    fi
+    if (( find_rc != 0 )); then
+        if load_state_record "$hash" && [[ "${REC[state]}" == COMMITTED ]]; then
+            scope="${REC[scope]}"
+            scope_state "$scope"; st=$?
+            if (( st == 0 )); then
+                printf 'Hubi: czyszczenie zweryfikowanego osieroconego scope %s (brak sesji tmux).\n' "$scope" >&2
+                terminate_scope "$scope" "${REC[token]}"; rc=$?
+                (( rc == 0 )) && delete_state_record "$hash"
+                return "$rc"
+            elif (( st == 2 )); then
+                printf 'Hubi: nie można ustalić stanu scope %s (błąd systemctl); odmowa działania (fail-closed).\n' "$scope" >&2
+                return 1
+            fi
+            delete_state_record "$hash"
+        fi
+        printf 'Hubi: %s dla %s nie działa.\n' "$agent" "$canonical_path" >&2
+        return 1
+    fi
+
     session="$FOUND_SESSION"
-    if [[ "$FOUND_SESSION_KIND" != "managed" ]]; then
+    if [[ "$FOUND_SESSION_KIND" == "legacy" ]]; then
         printf 'Hubi: sesja %s jest legacy/unmanaged i nie ma bezpiecznej granicy cgroup.\n' "$session" >&2
         printf 'Hubi: odmowa automatycznego zatrzymania; sesja i jej procesy pozostają bez zmian.\n' >&2
         return 1
     fi
-    configured_scope="$(tmux_cmd show-option -qv -t "$session" @hubi-scope 2>/dev/null || true)"
-    if [[ -n "$configured_scope" && "$configured_scope" == "$scope" ]]; then
-        if ! session_is_dead "$session"; then
-            if agent_pane "$session"; then
-                tmux_cmd send-keys -t "$FOUND_PANE" C-c >/dev/null 2>&1 || true
-            fi
-            wait_scope_inactive "$scope" 30 || true
+
+    token=""
+    scope="$(agent_scope_name "$agent" "$canonical_path" "$instance")"
+    if load_state_record "$hash"; then
+        token="${REC[token]}"
+        scope="${REC[scope]}"
+    fi
+    if ! session_is_dead "$session"; then
+        if agent_pane "$session"; then
+            tmux_cmd send-keys -t "$FOUND_PANE" C-c >/dev/null 2>&1 || true
         fi
-        terminate_scope "$scope" || return 1
-    else
-        printf 'Hubi: sesja %s pochodzi sprzed v4 i nie ma bezpiecznej granicy cgroup.\n' "$session" >&2
-        printf 'Hubi: odmowa automatycznego zatrzymania; sesja i jej procesy pozostają bez zmian.\n' >&2
+        wait_scope_inactive "$scope" 30 || true
+    fi
+    terminate_scope "$scope" "$token"; rc=$?
+    if (( rc != 0 )); then
         return 1
     fi
     if ! tmux_cmd kill-session -t "$session"; then
         printf 'Hubi: agent zatrzymany, ale nie udało się usunąć sesji tmux %s.\n' "$session" >&2
         return 1
     fi
+    delete_state_record "$hash"
 }
 
 kill_agent() {
-    local agent="$1" repo_key="$2" instance="${3:-primary}" choice
+    local agent="$1" canonical_path="$2" instance="${3:-primary}" choice find_rc hash
     validate_instance_name "$instance" || return 2
-    if ! find_agent_session "$agent" "$repo_key" "$instance"; then
-        if ! scope_is_active "$(agent_scope_name "$agent" "$repo_key" "$instance")"; then
-            printf '\n  %s dla %s nie działa.\n' "$agent" "$repo_key"; pause_for_ack; return 0
-        fi
-        printf '\n  Wykryto ORPHANED scope bez sesji tmux.\n'
+    find_agent_session "$agent" "$canonical_path" "$instance"; find_rc=$?
+    if (( find_rc == 3 )); then
+        printf '\n  UWAGA: znaleziono obiekt o pasującej nazwie bez zweryfikowanej własności (CONFLICT).\n'
+        printf '  Hubi nie modyfikuje go automatycznie.\n'
+        pause_for_ack
+        return 1
     fi
-    printf '\n  Zakończyć %s/%s dla %s i cały jego scope procesów?\n' "$agent" "$instance" "$repo_key"
+    if (( find_rc == 4 )); then
+        printf '\n  Start jest w toku (STARTING); spróbuj ponownie po jego zakończeniu.\n'
+        pause_for_ack
+        return 1
+    fi
+    if (( find_rc != 0 )); then
+        hash="$(compute_identity_hash "$canonical_path" "$agent" "$instance")"
+        if ! load_state_record "$hash" || [[ "${REC[state]:-}" != COMMITTED ]]; then
+            printf '\n  %s dla %s nie działa.\n' "$agent" "$canonical_path"
+            pause_for_ack
+            return 0
+        fi
+        printf '\n  Wykryto zweryfikowany ORPHANED scope bez sesji tmux.\n'
+    fi
+    printf '\n  Zakończyć %s/%s i cały jego scope procesów?\n' "$agent" "$instance"
     printf '  [y] Tak\n  [n] Nie\n  > '
     if ! read_choice choice; then return 0; fi
     case "$choice" in
-        y|Y) if ! stop_agent_now "$agent" "$repo_key" "$instance"; then pause_for_ack; return 1; fi ;;
+        y|Y) if ! stop_agent_now "$agent" "$canonical_path" "$instance"; then pause_for_ack; return 1; fi ;;
         n|N) ;;
         *) printf '  Anulowano: nieznany wybór.\n'; pause_for_ack ;;
     esac
@@ -939,11 +1536,11 @@ choose_launch_mode() {
 }
 
 instance_actions_menu() {
-    local agent="$1" repo_key="$2" instance="$3" choice state mode session
+    local agent="$1" directory="$2" instance="$3" choice state mode session root repo_argument
     while true; do
         clear_screen
         begin_render_critical
-        state="$(agent_status "$agent" "$repo_key" "$instance")"
+        state="$(agent_status "$agent" "$directory" "$instance")"
         end_render_critical
         printf '\n  %s / %s — %s\n  ──────────────────────────────────\n\n' "${agent^}" "$instance" "$state"
         printf '  [a] Uruchom / podłącz / zobacz EXITED\n'
@@ -951,16 +1548,18 @@ instance_actions_menu() {
         if ! read_choice choice; then return; fi
         case "$choice" in
             a|A)
-                if find_agent_session "$agent" "$repo_key" "$instance"; then
+                if find_agent_session "$agent" "$directory" "$instance"; then
                     attach_session "$FOUND_SESSION" || true
                 else
                     choose_launch_mode "$agent" || { enable_safe_input; continue; }
                     mode="$CHOSEN_LAUNCH_MODE"
-                    start_agent "$agent" "$repo_key" "$instance" "$mode" || true
+                    root="$(realpath -e -- "$REPOS_ROOT" 2>/dev/null || true)"
+                    repo_argument="${directory#"$root"/}"
+                    start_agent "$agent" "$repo_argument" "$instance" "$mode" || true
                 fi
                 ;;
             v|V)
-                if find_agent_session "$agent" "$repo_key" "$instance"; then
+                if find_agent_session "$agent" "$directory" "$instance"; then
                     session="$FOUND_SESSION"
                     clear_screen
                     printf '\n  Ostatnie wyjście — %s / %s\n  ──────────────────────────────────\n\n' "${agent^}" "$instance"
@@ -970,7 +1569,7 @@ instance_actions_menu() {
                 fi
                 pause_for_ack
                 ;;
-            k|K) kill_agent "$agent" "$repo_key" "$instance" || true ;;
+            k|K) kill_agent "$agent" "$directory" "$instance" || true ;;
             b|B) return ;;
             *) unknown_key ;;
         esac
@@ -978,11 +1577,11 @@ instance_actions_menu() {
 }
 
 agent_instances_menu() {
-    local agent="$1" repo_key="$2" page=0 page_size=9 pages start end i index choice instance state
+    local agent="$1" directory="$2" page=0 page_size=9 pages start end i index choice instance state
     local -a instances=()
     while true; do
         clear_screen
-        mapfile -t instances < <(agent_instance_list "$agent" "$repo_key")
+        mapfile -t instances < <(agent_instance_list "$agent" "$directory")
         pages=$(( (${#instances[@]} + page_size - 1) / page_size )); (( pages == 0 )) && pages=1
         (( page >= pages )) && page=$((pages - 1))
         start=$((page * page_size)); end=$((start + page_size)); (( end > ${#instances[@]} )) && end=${#instances[@]}
@@ -992,7 +1591,7 @@ agent_instances_menu() {
         for ((i = start; i < end; i++)); do
             instance="${instances[$i]}"
             begin_render_critical
-            state="$(agent_status "$agent" "$repo_key" "$instance")"
+            state="$(agent_status "$agent" "$directory" "$instance")"
             end_render_critical
             printf '  [%d] %-20s %s\n' "$((i - start + 1))" "$instance" "$state"
         done
@@ -1003,7 +1602,7 @@ agent_instances_menu() {
                 printf '\n  Nazwa instancji: '
                 if ! read_text_value instance; then return; fi
                 if validate_instance_name "$instance"; then
-                    instance_actions_menu "$agent" "$repo_key" "$instance"
+                    instance_actions_menu "$agent" "$directory" "$instance"
                 else
                     pause_for_ack
                 fi
@@ -1013,7 +1612,7 @@ agent_instances_menu() {
             b|B) return ;;
             [1-9])
                 index=$((start + choice - 1))
-                if (( index < end )); then instance_actions_menu "$agent" "$repo_key" "${instances[$index]}"; else unknown_key; fi
+                if (( index < end )); then instance_actions_menu "$agent" "$directory" "${instances[$index]}"; else unknown_key; fi
                 ;;
             *) unknown_key ;;
         esac
@@ -1021,28 +1620,165 @@ agent_instances_menu() {
 }
 
 manage_instances_menu() {
-    local repo_key="$1" choice
+    local directory="$1" choice
     clear_screen
     printf '\n  ZARZĄDZANIE INSTANCJAMI\n  ──────────────────────────────────\n\n'
     printf '  [1] Codex\n  [2] Claude\n  [b] Powrót\n  > '
     if ! read_choice choice; then return; fi
     case "$choice" in
-        1) agent_instances_menu codex "$repo_key" ;;
-        2) agent_instances_menu claude "$repo_key" ;;
+        1) agent_instances_menu codex "$directory" ;;
+        2) agent_instances_menu claude "$directory" ;;
         b|B) ;;
         *) unknown_key ;;
     esac
 }
 
 print_project_instances() {
-    local agent="$1" repo_key="$2" instance state
+    local agent="$1" directory="$2" instance state
     printf '  %s\n' "${agent^}:"
     while IFS= read -r instance; do
         begin_render_critical
-        state="$(agent_status "$agent" "$repo_key" "$instance")"
+        state="$(agent_status "$agent" "$directory" "$instance")"
         end_render_critical
         printf '    %-20s %s\n' "$instance" "$state"
-    done < <(agent_instance_list "$agent" "$repo_key")
+    done < <(agent_instance_list "$agent" "$directory")
+}
+
+# ---------------------------------------------------------------------------
+# Stale/unverified managed-object reconciliation (P2-08, P3-03).
+#
+# Trusted records are kept independently of current repo discovery, so a
+# repository that has been deleted, renamed, or moved outside HUBI_REPOS
+# still has an inspectable, safely-stoppable record here — without ever
+# weakening the ownership checks that gate the actual stop.
+# ---------------------------------------------------------------------------
+list_trusted_records() {
+    local dir rec_file hash
+    dir="$(state_root)" 2>/dev/null || return 0
+    [[ -d "$dir" ]] || return 0
+    for rec_file in "$dir"/*.rec; do
+        [[ -e "$rec_file" ]] || continue
+        hash="${rec_file##*/}"; hash="${hash%.rec}"
+        printf '%s\n' "$hash"
+    done
+}
+
+trusted_record_diagnosis() {
+    local hash="$1" root repo_ok=1 session_state scope_st
+    if ! load_state_record "$hash"; then
+        printf 'MALFORMED'
+        return
+    fi
+    root="$(realpath -e -- "$REPOS_ROOT" 2>/dev/null || true)"
+    if [[ ! -d "${REC[canonical_path]}" ]]; then
+        repo_ok=0
+    elif [[ -n "$root" && "${REC[canonical_path]}"/ != "$root"/* ]]; then
+        repo_ok=0
+    fi
+    if [[ "${REC[state]}" == STARTING ]]; then
+        printf 'STARTING'
+        return
+    fi
+    if tmux_cmd has-session -t "${REC[session]}" 2>/dev/null; then
+        session_state="present"
+    else
+        session_state="absent"
+    fi
+    scope_state "${REC[scope]}"; scope_st=$?
+    if (( repo_ok == 0 )); then
+        if [[ "$session_state" == present || $scope_st -eq 0 ]]; then printf 'STALE-REPO'; else printf 'STALE-EMPTY'; fi
+        return
+    fi
+    if (( scope_st == 2 )); then printf 'UNKNOWN'; return; fi
+    if [[ "$session_state" == present && $scope_st -eq 0 ]]; then printf 'OK'; return; fi
+    if [[ "$session_state" == present && $scope_st -ne 0 ]]; then printf 'STALE SESSION'; return; fi
+    if [[ "$session_state" == absent && $scope_st -eq 0 ]]; then printf 'ORPHANED'; return; fi
+    printf 'STOPPED'
+}
+
+stop_trusted_record() {
+    local hash="$1" rc session scope token
+    run_under_identity_lock "$hash" "$HUBI_LOCK_TIMEOUT"; rc=$?
+    if (( rc != 0 )); then
+        printf 'Hubi: nie można uzyskać blokady cyklu życia.\n' >&2
+        return 1
+    fi
+    if ! load_state_record "$hash"; then
+        release_identity_lock
+        printf 'Hubi: rekord zniknął lub jest uszkodzony.\n' >&2
+        return 1
+    fi
+    session="${REC[session]}"
+    scope="${REC[scope]}"
+    token="${REC[token]}"
+    if [[ "${REC[state]}" == STARTING ]]; then
+        rollback_starting_record "$hash"
+        release_identity_lock
+        return 0
+    fi
+    if tmux_cmd has-session -t "$session" 2>/dev/null; then
+        local live_token
+        live_token="$(tmux_cmd show-option -qv -t "$session" @hubi-token 2>/dev/null || true)"
+        if [[ "$live_token" != "$token" ]]; then
+            release_identity_lock
+            printf 'Hubi: sesja %s nie ma zweryfikowanego tokenu; odmowa (CONFLICT).\n' "$session" >&2
+            return 1
+        fi
+        if ! session_is_dead "$session"; then
+            if agent_pane "$session"; then
+                tmux_cmd send-keys -t "$FOUND_PANE" C-c >/dev/null 2>&1 || true
+            fi
+            wait_scope_inactive "$scope" 30 || true
+        fi
+    fi
+    terminate_scope "$scope" "$token"; rc=$?
+    if (( rc == 0 )); then
+        [[ -z "$session" ]] || tmux_cmd kill-session -t "$session" >/dev/null 2>&1 || true
+        delete_state_record "$hash"
+    fi
+    release_identity_lock
+    return "$rc"
+}
+
+stale_objects_menu() {
+    local -a hashes=()
+    local hash choice index diagnosis
+    while true; do
+        clear_screen
+        mapfile -t hashes < <(list_trusted_records)
+        printf '\n  OSIEROCONE / NIEZNANE OBIEKTY\n  ──────────────────────────────────\n\n'
+        if (( ${#hashes[@]} == 0 )); then
+            printf '  Brak zaufanych rekordów.\n'
+        else
+            index=0
+            for hash in "${hashes[@]}"; do
+                ((index += 1))
+                load_state_record "$hash" || { printf '  [%d] %s  <uszkodzony rekord>\n' "$index" "$hash"; continue; }
+                diagnosis="$(trusted_record_diagnosis "$hash")"
+                printf '  [%d] %s/%s  %s\n      %s  [%s]\n' \
+                    "$index" "${REC[agent]}" "${REC[instance]}" "${REC[canonical_path]}" "${REC[session]}" "$diagnosis"
+            done
+        fi
+        printf '\n  [numer] Zatrzymaj wybrany obiekt  [b] Powrót\n  > '
+        if ! read_choice choice; then return; fi
+        case "$choice" in
+            b|B) return ;;
+            [1-9]|[1-9][0-9])
+                index=$((choice - 1))
+                if (( index >= 0 && index < ${#hashes[@]} )); then
+                    if stop_trusted_record "${hashes[$index]}"; then
+                        MENU_HINT="Zatrzymano."
+                    else
+                        MENU_HINT="Nie udało się zatrzymać (patrz diagnostyka powyżej)."
+                    fi
+                    pause_for_ack
+                else
+                    unknown_key
+                fi
+                ;;
+            *) unknown_key ;;
+        esac
+    done
 }
 
 project_menu() {
@@ -1052,8 +1788,8 @@ project_menu() {
         git_state="$(git_summary "$directory")"
         printf '\n  ╭────────────────────────────────────────╮\n  │          HUBINET DEVBOX — v%s          │\n  ╰────────────────────────────────────────╯\n\n' "$HUBI_VERSION"
         printf '  Projekt: %s\n  Git:     %s\n' "$repo_key" "$git_state"
-        print_project_instances claude "$repo_key"
-        print_project_instances codex "$repo_key"
+        print_project_instances claude "$directory"
+        print_project_instances codex "$directory"
         printf '\n'
         show_hint
         printf '  [1] Codex primary — uruchom / podłącz / zobacz EXITED\n'
@@ -1067,9 +1803,9 @@ project_menu() {
             2) start_agent claude "$repo_key" || true ;;
             3) project_shell "$repo_key" || true ;;
             g|G) show_git_status "$directory" "$repo_key" ;;
-            i|I) manage_instances_menu "$repo_key" ;;
-            c|C) kill_agent codex "$repo_key" || true ;;
-            a|A) kill_agent claude "$repo_key" || true ;;
+            i|I) manage_instances_menu "$directory" ;;
+            c|C) kill_agent codex "$directory" || true ;;
+            a|A) kill_agent claude "$directory" || true ;;
             b|B) return ;;
             *) unknown_key ;;
         esac
@@ -1077,7 +1813,7 @@ project_menu() {
 }
 
 main_menu() {
-    local page=0 page_size=9 pages start end i index choice repo
+    local page=0 page_size=9 pages start end i index choice repo root
     local host_name user_name session_total codex_state claude_state
     local -a repos=()
     if [[ -n "${TMUX:-}" ]]; then
@@ -1087,6 +1823,7 @@ main_menu() {
     while true; do
         clear_screen
         mapfile -t repos < <(repo_list)
+        root="$(realpath -e -- "$REPOS_ROOT" 2>/dev/null || true)"
         pages=$(( (${#repos[@]} + page_size - 1) / page_size )); (( pages == 0 )) && pages=1
         (( page >= pages )) && page=$((pages - 1))
         start=$((page * page_size)); end=$((start + page_size)); (( end > ${#repos[@]} )) && end=${#repos[@]}
@@ -1100,19 +1837,21 @@ main_menu() {
         for ((i = start; i < end; i++)); do
             repo="${repos[$i]}"
             begin_render_critical
-            codex_state="$(agent_status codex "$repo")"
+            codex_state="$(agent_status codex "$root/$repo")"
             end_render_critical
             begin_render_critical
-            claude_state="$(agent_status claude "$repo")"
+            claude_state="$(agent_status claude "$root/$repo")"
             end_render_critical
             printf '  [%d] %-20s C:%-18s A:%s\n' "$((i - start + 1))" "$repo" \
                 "$codex_state" "$claude_state"
         done
         if (( ${#repos[@]} == 0 )); then printf '  Nie znaleziono repozytoriów Git pod %s.\n' "$REPOS_ROOT"; fi
-        printf '\n  [n] Następna  [p] Poprzednia  [s] Sesje\n  [h] Shell  [q] Zwykły prompt  [x] Wyloguj\n  > '
+        printf '\n  [n] Następna  [p] Poprzednia  [s] Sesje\n  [o] Osierocone/nieznane obiekty\n'
+        printf '  [h] Shell  [q] Zwykły prompt  [x] Wyloguj\n  > '
         if ! read_choice choice; then return 0; fi
         case "$choice" in
             s|S) sessions_menu ;;
+            o|O) stale_objects_menu ;;
             h|H) normal_shell ;;
             q|Q) clear_screen; return 98 ;;
             x|X) clear_screen; return 99 ;;

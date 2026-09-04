@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import os
 import shutil
 import subprocess
@@ -23,9 +22,11 @@ class MultiInstanceTests(unittest.TestCase):
         self.temp = Path(tempfile.mkdtemp(prefix="hubi-multi-"))
         self.repos = self.temp / "repos"
         self.runtime = self.temp / "runtime"
+        self.hubi_runtime = self.temp / "hubi-runtime"
         self.repos.mkdir()
         self.runtime.mkdir()
         self.runtime.chmod(0o700)
+        self.hubi_runtime.mkdir(mode=0o700)
         real_runtime = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
         (self.runtime / "systemd").symlink_to(Path(real_runtime) / "systemd", target_is_directory=True)
         unique = f"multi{os.getpid()}-{time.time_ns() % 1_000_000_000}"
@@ -54,11 +55,17 @@ class MultiInstanceTests(unittest.TestCase):
             "HUBI_CLAUDE_BIN": str(self.agent),
             "HUBI_FILE": str(HUBI),
             "XDG_RUNTIME_DIR": str(self.runtime),
+            # A dedicated, private runtime root for locks/trusted state,
+            # independent of XDG_RUNTIME_DIR (which here only exists to give
+            # systemd-run/systemctl a path to the real user bus) (P3-02).
+            "HUBI_RUNTIME_DIR": str(self.hubi_runtime),
             "TERM": "xterm-256color",
         }
         self.env.pop("TMUX", None)
         self.env.pop("HUBI_ACTIVE", None)
         self.identities: set[tuple[str, str, str]] = set()
+        self._session_cache: dict[tuple[str, str, str], str] = {}
+        self._scope_cache: dict[tuple[str, str, str], str] = {}
 
     def tearDown(self) -> None:
         result = self.tmux("list-sessions", "-F", "#{@hubi-scope}", check=False)
@@ -71,21 +78,11 @@ class MultiInstanceTests(unittest.TestCase):
                 stderr=subprocess.DEVNULL,
             )
         self.tmux("kill-server", check=False)
+        try:
+            (Path(f"/tmp/tmux-{os.getuid()}") / self.socket).unlink()
+        except FileNotFoundError:
+            pass
         shutil.rmtree(self.temp, ignore_errors=True)
-
-    @staticmethod
-    def digest(value: str) -> str:
-        return hashlib.sha256(value.encode()).hexdigest()[:12]
-
-    def session(self, agent: str, repo: str, instance: str = "primary") -> str:
-        if instance == "primary":
-            return f"hubi-{agent}-{repo[:28]}-{self.digest(repo)}"
-        return f"hubi-{agent}-{instance}-{repo[:28]}-{self.digest(f'{agent}:{repo}:{instance}')}"
-
-    def scope(self, agent: str, repo: str, instance: str = "primary") -> str:
-        if instance == "primary":
-            return f"hubi-{agent}-{self.digest(repo)}.scope"
-        return f"hubi-{agent}-{self.digest(repo)}-{instance}-{self.digest(f'{agent}:{repo}:{instance}')}.scope"
 
     def tmux(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -103,6 +100,45 @@ class MultiInstanceTests(unittest.TestCase):
             capture_output=True, timeout=timeout,
         )
 
+    def bash_value(self, script: str, env: dict[str, str] | None = None) -> str:
+        return self.bash(script, env=env).stdout.strip()
+
+    def canonical(self, repo: str) -> str:
+        return str(self.repos / repo)
+
+    # Session/scope names are computed by sourcing hubi itself, never
+    # reimplemented in Python, so the test can never silently drift from the
+    # real structured identity encoding (P1-01/P2-07).
+    def session(self, agent: str, repo: str, instance: str = "primary") -> str:
+        key = (agent, repo, instance)
+        if key not in self._session_cache:
+            self._session_cache[key] = self.bash_value(
+                'source "$HUBI_FILE"; agent_session_name "$AGENT" "$CANON" "$INSTANCE"',
+                {**self.env, "AGENT": agent, "CANON": self.canonical(repo), "INSTANCE": instance},
+            )
+        return self._session_cache[key]
+
+    def scope(self, agent: str, repo: str, instance: str = "primary") -> str:
+        key = (agent, repo, instance)
+        if key not in self._scope_cache:
+            self._scope_cache[key] = self.bash_value(
+                'source "$HUBI_FILE"; agent_scope_name "$AGENT" "$CANON" "$INSTANCE"',
+                {**self.env, "AGENT": agent, "CANON": self.canonical(repo), "INSTANCE": instance},
+            )
+        return self._scope_cache[key]
+
+    def legacy_v4_session(self, agent: str, repo: str) -> str:
+        return self.bash_value(
+            'source "$HUBI_FILE"; legacy_v4_session_name "$AGENT" "$REPO"',
+            {**self.env, "AGENT": agent, "REPO": repo},
+        )
+
+    def legacy_v4_scope(self, agent: str, repo: str) -> str:
+        return self.bash_value(
+            'source "$HUBI_FILE"; legacy_v4_scope_name "$AGENT" "$REPO"',
+            {**self.env, "AGENT": agent, "REPO": repo},
+        )
+
     def active(self, identity: tuple[str, str, str]) -> bool:
         return subprocess.run(
             ["systemctl", "--user", "is-active", "--quiet", self.scope(*identity)]
@@ -116,8 +152,8 @@ class MultiInstanceTests(unittest.TestCase):
         self.identities.add(identity)
         return self.bash(
             'source "$HUBI_FILE"; resolve_repo "$REPO"; '
-            'ensure_agent_instance_session "$AGENT" "$RESOLVED_REPO_KEY" '
-            '"$RESOLVED_REPO_DIR" "$INSTANCE" "$EXECUTABLE"',
+            'ensure_agent_instance_session "$AGENT" "$RESOLVED_REPO_DIR" '
+            '"$INSTANCE" "$EXECUTABLE"',
             {
                 **self.env, **(extra_env or {}), "AGENT": agent, "REPO": repo,
                 "INSTANCE": instance, "EXECUTABLE": str(executable or self.agent),
@@ -127,14 +163,16 @@ class MultiInstanceTests(unittest.TestCase):
     def stop(self, identity: tuple[str, str, str]) -> subprocess.CompletedProcess[str]:
         agent, repo, instance = identity
         return self.bash(
-            'source "$HUBI_FILE"; stop_agent_now "$AGENT" "$REPO" "$INSTANCE"',
+            'source "$HUBI_FILE"; resolve_repo "$REPO"; '
+            'stop_agent_now "$AGENT" "$RESOLVED_REPO_DIR" "$INSTANCE"',
             {**self.env, "AGENT": agent, "REPO": repo, "INSTANCE": instance},
         )
 
     def status(self, identity: tuple[str, str, str]) -> str:
         agent, repo, instance = identity
         return self.bash(
-            'source "$HUBI_FILE"; agent_status "$AGENT" "$REPO" "$INSTANCE"',
+            'source "$HUBI_FILE"; resolve_repo "$REPO"; '
+            'agent_status "$AGENT" "$RESOLVED_REPO_DIR" "$INSTANCE"',
             {**self.env, "AGENT": agent, "REPO": repo, "INSTANCE": instance},
         ).stdout
 
@@ -180,30 +218,74 @@ class MultiInstanceTests(unittest.TestCase):
             )
             self.assertTrue(self.active(identity))
 
-    def test_legacy_v4_primary_is_unchanged_by_secondary(self) -> None:
-        identity = ("claude", self.repo_x, "primary")
-        session = self.session(*identity)
+    def test_legacy_v4_primary_is_safely_adopted_and_unchanged_by_secondary(self) -> None:
+        # A session created by Hubi before this revision's identity fix: old
+        # naming, old (relative-key) @hubi-repo, no @hubi-token/@hubi-instance.
+        session = self.legacy_v4_session("claude", self.repo_x)
+        scope = self.legacy_v4_scope("claude", self.repo_x)
         pane = self.tmux(
             "new-session", "-d", "-P", "-F", "#{pane_id}", "-s", session,
             "-c", str(self.repos / self.repo_x), "--", "sleep", "30",
         ).stdout.strip()
         for option, value in (
             ("@hubi-managed", "v4"), ("@hubi-agent", "claude"),
-            ("@hubi-repo", self.repo_x), ("@hubi-scope", self.scope(*identity)),
+            ("@hubi-repo", self.repo_x), ("@hubi-scope", scope),
             ("@hubi-pane", pane),
         ):
             self.tmux("set-option", "-t", session, option, value)
-        before = self.tmux("show-options", "-t", session).stdout
+        original = dict(
+            line.split(" ", 1) for line in self.tmux("show-options", "-t", session).stdout.splitlines()
+        )
+
         found = self.bash(
-            'source "$HUBI_FILE"; find_agent_session claude "$REPO" primary; '
+            'source "$HUBI_FILE"; resolve_repo "$REPO"; '
+            'find_agent_session claude "$RESOLVED_REPO_DIR" primary; '
             'printf "%s|%s" "$FOUND_SESSION" "$FOUND_SESSION_KIND"',
             {**self.env, "REPO": self.repo_x},
         )
         self.assertEqual(found.stdout, f"{session}|managed")
+
+        # Adoption is additive-only: every pre-existing field keeps its
+        # original value; nothing is renamed, removed, or mutated (req #7).
+        after_adoption = dict(
+            line.split(" ", 1) for line in self.tmux("show-options", "-t", session).stdout.splitlines()
+        )
+        for key, line in original.items():
+            self.assertEqual(after_adoption.get(key), line, key)
+        self.assertIn("@hubi-token", after_adoption)
+
+        before = self.tmux("show-options", "-t", session).stdout
         secondary = ("claude", self.repo_x, "review")
         self.assert_started(secondary)
         self.assertEqual(self.tmux("show-options", "-t", session).stdout, before)
         self.assertEqual(self.tmux("show-option", "-qv", "-t", session, "@hubi-instance").stdout, "")
+
+    def test_legacy_v4_wrong_cwd_is_not_adopted(self) -> None:
+        # A same-named old-v4-looking session whose pane cwd does not match
+        # the repository being requested must never be treated as ours,
+        # even though every tmux option matches (req #7 / P1-02 adjacent).
+        session = self.legacy_v4_session("claude", self.repo_x)
+        scope = self.legacy_v4_scope("claude", self.repo_x)
+        pane = self.tmux(
+            "new-session", "-d", "-P", "-F", "#{pane_id}", "-s", session,
+            "-c", str(self.repos / self.repo_y), "--", "sleep", "30",
+        ).stdout.strip()
+        for option, value in (
+            ("@hubi-managed", "v4"), ("@hubi-agent", "claude"),
+            ("@hubi-repo", self.repo_x), ("@hubi-scope", scope),
+            ("@hubi-pane", pane),
+        ):
+            self.tmux("set-option", "-t", session, option, value)
+        found = self.bash(
+            'source "$HUBI_FILE"; resolve_repo "$REPO"; '
+            'find_agent_session claude "$RESOLVED_REPO_DIR" primary',
+            {**self.env, "REPO": self.repo_x},
+            timeout=10,
+        )
+        self.assertNotEqual(found.returncode, 0)
+        self.assertTrue(
+            self.tmux("show-option", "-qv", "-t", session, "@hubi-token").stdout.strip() == ""
+        )
 
     def test_stop_and_orphan_reconciliation_are_isolated(self) -> None:
         primary = ("claude", self.repo_x, "primary")
@@ -249,7 +331,8 @@ class MultiInstanceTests(unittest.TestCase):
         while self.active(review) and time.monotonic() < deadline:
             time.sleep(0.05)
         captured = self.bash(
-            'source "$HUBI_FILE"; find_agent_session codex "$REPO" review; '
+            'source "$HUBI_FILE"; resolve_repo "$REPO"; '
+            'find_agent_session codex "$RESOLVED_REPO_DIR" review; '
             'printf "STATUS=%s\\n" "$(session_status "$FOUND_SESSION")"; '
             'capture_session_output "$FOUND_SESSION"',
             {**self.env, "REPO": self.repo_x},
@@ -263,7 +346,7 @@ class MultiInstanceTests(unittest.TestCase):
     def test_same_instance_serializes_while_different_instances_start(self) -> None:
         script = (
             'source "$HUBI_FILE"; resolve_repo "$REPO"; '
-            'ensure_agent_instance_session codex "$RESOLVED_REPO_KEY" "$RESOLVED_REPO_DIR" '
+            'ensure_agent_instance_session codex "$RESOLVED_REPO_DIR" '
             '"$INSTANCE" "$HUBI_CODEX_BIN"'
         )
         instances = ["review"] * 5 + ["implementation", "upstream"]
@@ -282,6 +365,41 @@ class MultiInstanceTests(unittest.TestCase):
         for instance in set(instances):
             self.assertEqual(sessions.count(self.session("codex", self.repo_x, instance)), 1)
 
+    def test_start_stop_race_never_leaves_a_running_agent_reported_absent(self) -> None:
+        # P2-06: a stop issued while startup is still resolving must never
+        # both report "not running" and leave a live agent behind.
+        identity = ("codex", self.repo_x, "review")
+        self.identities.add(identity)
+        start_proc = subprocess.Popen(
+            ["bash", "-c", (
+                'source "$HUBI_FILE"; resolve_repo "$REPO"; '
+                'ensure_agent_instance_session codex "$RESOLVED_REPO_DIR" review "$HUBI_CODEX_BIN"'
+            )],
+            env={**self.env, "REPO": self.repo_x},
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        stop_proc = subprocess.Popen(
+            ["bash", "-c", (
+                'source "$HUBI_FILE"; resolve_repo "$REPO"; '
+                'stop_agent_now codex "$RESOLVED_REPO_DIR" review'
+            )],
+            env={**self.env, "REPO": self.repo_x},
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        start_out = start_proc.communicate(timeout=12)
+        stop_out = stop_proc.communicate(timeout=12)
+        session = self.session(*identity)
+        live_session = self.tmux("has-session", "-t", session, check=False).returncode == 0
+        live_scope = self.active(identity)
+        if start_proc.returncode == 0:
+            # Start won the race (whether stop ran before, during, or after):
+            # the agent must be verifiably present, never silently vanished.
+            self.assertTrue(live_session or live_scope, (start_out, stop_out))
+        else:
+            # Stop won decisively: nothing must be left running.
+            self.assertFalse(live_session, (start_out, stop_out))
+            self.assertFalse(live_scope, (start_out, stop_out))
+
     def test_instance_discovery_batches_tmux_metadata_without_show_option(self) -> None:
         call_log = self.temp / "discovery-tmux-calls"
         tmux_batch = self.temp / "tmux-batch"
@@ -291,11 +409,11 @@ class MultiInstanceTests(unittest.TestCase):
             return "".join(f"{len(field.encode())}:{field}" for field in fields)
 
         records = [
-            record("managed-review", "v4", "codex", self.repo_x, "review"),
-            record("legacy-primary", "v4", "codex", self.repo_x, ""),
-            record("unmanaged", "", "", "", ""),
-            record("wrong-agent", "v4", "claude", self.repo_x, "review"),
-            record("wrong-repo", "v4", "codex", self.repo_y, "review"),
+            record("managed-review", "v4", "codex", self.repo_x, "", "review"),
+            record("legacy-primary", "v4", "codex", self.repo_x, "", ""),
+            record("unmanaged", "", "", "", "", ""),
+            record("wrong-agent", "v4", "claude", self.repo_x, "", "review"),
+            record("wrong-repo", "v4", "codex", self.repo_y, "", "review"),
         ]
         tmux_batch.write_text(
             "#!/usr/bin/env bash\n"
@@ -313,7 +431,7 @@ class MultiInstanceTests(unittest.TestCase):
             'source "$HUBI_FILE"; agent_instance_list codex "$REPO"',
             {
                 **self.env,
-                "REPO": self.repo_x,
+                "REPO": self.canonical(self.repo_x),
                 "CALL_LOG": str(call_log),
                 "HUBI_TMUX_BIN": str(tmux_batch),
                 "HUBI_SYSTEMCTL_BIN": str(no_scopes),
@@ -325,7 +443,7 @@ class MultiInstanceTests(unittest.TestCase):
         self.assertEqual(len(calls), 1, calls)
         self.assertIn("list-sessions", calls[0])
         self.assertNotIn("show-option", calls[0])
-        for field in ("session_name", "@hubi-managed", "@hubi-agent", "@hubi-repo", "@hubi-instance"):
+        for field in ("session_name", "@hubi-managed", "@hubi-agent", "@hubi-repo", "@hubi-repo-canon", "@hubi-instance"):
             self.assertIn(field, calls[0])
 
     def test_unsafe_names_and_unmanaged_lookalike_are_never_claimed(self) -> None:
@@ -338,7 +456,7 @@ class MultiInstanceTests(unittest.TestCase):
         lookalike = self.session("claude", self.repo_x, "review")
         self.tmux("new-session", "-d", "-s", lookalike, "--", "sleep", "30")
         result = self.bash(
-            'source "$HUBI_FILE"; find_agent_session claude "$REPO" review',
+            'source "$HUBI_FILE"; resolve_repo "$REPO"; find_agent_session claude "$RESOLVED_REPO_DIR" review',
             {**self.env, "REPO": self.repo_x},
         )
         self.assertNotEqual(result.returncode, 0)
@@ -350,7 +468,7 @@ class MultiInstanceTests(unittest.TestCase):
         self.assert_started(identity)
         listed = self.bash(
             'source "$HUBI_FILE"; agent_instance_list codex "$REPO"',
-            {**self.env, "REPO": special_repo},
+            {**self.env, "REPO": self.canonical(special_repo)},
         )
         self.assertEqual(listed.stdout.splitlines(), ["primary", "review"])
 
