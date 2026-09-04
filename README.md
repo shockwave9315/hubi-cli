@@ -25,8 +25,8 @@ bracketed-paste markers.
 
 ```text
 hubi
-hubi codex REPO
-hubi claude REPO
+hubi codex REPO [INSTANCE [new|resume]]
+hubi claude REPO [INSTANCE [new|resume]]
 hubi shell REPO
 hubi sessions
 ```
@@ -51,6 +51,14 @@ Agent states are:
 Selecting an `EXITED` agent opens the retained terminal output. Use the
 project's stop action to discard that retained session before starting it
 again.
+
+Each project has a `primary` Codex instance and a `primary` Claude instance,
+which keep the exact v4 tmux session and systemd scope names. The project's
+Instances menu can create additional names matching
+`^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$`, list the instances whose tmux sessions
+exist, and start, attach, inspect, or stop one instance without affecting its
+siblings. A stopped secondary instance can start a new conversation or ask the
+installed agent CLI to resume one; Hubi does not store conversation history.
 
 When a live session already has a client, Hubi asks whether to attach in one of
 three modes:
@@ -113,15 +121,21 @@ Both programs and their arguments are passed as separate argv elements. Hubi
 checks full-cgroup kill support before creating a managed agent and fails
 closed if the local systemd interface cannot provide it.
 
+New conversations invoke `codex` or
+`claude --permission-mode bypassPermissions`. Resume invokes `codex resume` or
+`claude --permission-mode bypassPermissions --resume`.
+
 Run the isolated test suite with:
 
 ```bash
 ./tests/run.sh
 python3 tests/adversarial.py
+./tests/multi_instance.sh
 ```
 
 At this revision the functional harness reports 16 tests and the adversarial
-suite contains 31 tests; both totals must be fully green for release review.
+suite contains 31 tests. The focused multi-instance harness reports 9 tests;
+all three totals must be fully green for release review.
 
 The harness uses a unique tmux socket, disposable Git repositories, fake agent
 processes, and unique systemd scopes. It never attaches to or stops the default

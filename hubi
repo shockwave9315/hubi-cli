@@ -246,33 +246,60 @@ safe_slug() {
     [[ -n "$slug" ]] || slug="repo"
     printf '%s' "$slug"
 }
-agent_session_name() { printf 'hubi-%s-%s-%s' "$1" "$(safe_slug "${2##*/}")" "$(name_hash "$2")"; }
-agent_scope_name() { printf 'hubi-%s-%s.scope' "$1" "$(name_hash "$2")"; }
+validate_instance_name() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$ ]]; }
+
+agent_session_name() {
+    local agent="$1" repo_key="$2" instance="${3:-primary}"
+    validate_instance_name "$instance" || return 2
+    if [[ "$instance" == "primary" ]]; then
+        printf 'hubi-%s-%s-%s' "$agent" "$(safe_slug "${repo_key##*/}")" "$(name_hash "$repo_key")"
+    else
+        printf 'hubi-%s-%s-%s-%s' "$agent" "$(safe_slug "${repo_key##*/}")" \
+            "$(safe_slug "$instance")" "$(name_hash "$repo_key:$instance")"
+    fi
+}
+
+agent_scope_name() {
+    local agent="$1" repo_key="$2" instance="${3:-primary}"
+    validate_instance_name "$instance" || return 2
+    if [[ "$instance" == "primary" ]]; then
+        printf 'hubi-%s-%s.scope' "$agent" "$(name_hash "$repo_key")"
+    else
+        printf 'hubi-%s-%s.scope' "$agent" "$(name_hash "$repo_key:$instance")"
+    fi
+}
 
 legacy_session_name() {
     if [[ "$2" != */* && "$2" =~ ^[[:alnum:]_.-]+$ ]]; then printf '%s-%s' "$1" "$2"; fi
 }
 
 find_agent_session() {
-    local agent="$1" repo_key="$2" session legacy managed stored_agent stored_repo
+    local agent="$1" repo_key="$2" instance="${3:-primary}"
+    local session legacy managed stored_agent stored_repo stored_instance
     FOUND_SESSION=""
     FOUND_SESSION_KIND=""
-    session="$(agent_session_name "$agent" "$repo_key")"
+    validate_instance_name "$instance" || return 2
+    session="$(agent_session_name "$agent" "$repo_key" "$instance")"
     if tmux_cmd has-session -t "$session" 2>/dev/null; then
         managed="$(tmux_cmd show-option -qv -t "$session" @hubi-managed 2>/dev/null || true)"
         stored_agent="$(tmux_cmd show-option -qv -t "$session" @hubi-agent 2>/dev/null || true)"
         stored_repo="$(tmux_cmd show-option -qv -t "$session" @hubi-repo 2>/dev/null || true)"
-        if [[ "$managed" == "v4" && "$stored_agent" == "$agent" && "$stored_repo" == "$repo_key" ]]; then
+        stored_instance="$(tmux_cmd show-option -qv -t "$session" @hubi-instance 2>/dev/null || true)"
+        [[ -n "$stored_instance" ]] || stored_instance="primary"
+        if [[ "$managed" == "v4" && "$stored_agent" == "$agent" && "$stored_repo" == "$repo_key" \
+            && "$stored_instance" == "$instance" ]]; then
             FOUND_SESSION="$session"
             FOUND_SESSION_KIND="managed"
             return 0
         fi
     fi
-    legacy="$(legacy_session_name "$agent" "$repo_key")"
-    if [[ -n "$legacy" ]] && tmux_cmd has-session -t "$legacy" 2>/dev/null; then
-        FOUND_SESSION="$legacy"
-        FOUND_SESSION_KIND="legacy"
-        return 0
+    if [[ "$instance" == "primary" ]]; then
+        legacy="$(legacy_session_name "$agent" "$repo_key")"
+        if [[ -n "$legacy" ]] && tmux_cmd has-session -t "$legacy" 2>/dev/null; then
+            FOUND_SESSION="$legacy"
+            FOUND_SESSION_KIND="legacy"
+            return 0
+        fi
     fi
     return 1
 }
@@ -326,9 +353,9 @@ session_status() {
 }
 
 agent_status() {
-    local agent="$1" repo_key="$2" scope
-    scope="$(agent_scope_name "$agent" "$repo_key")"
-    if find_agent_session "$agent" "$repo_key"; then
+    local agent="$1" repo_key="$2" instance="${3:-primary}" scope
+    scope="$(agent_scope_name "$agent" "$repo_key" "$instance")" || return 2
+    if find_agent_session "$agent" "$repo_key" "$instance"; then
         if [[ "$FOUND_SESSION_KIND" == "legacy" ]]; then
             printf '⚠ LEGACY/UNMANAGED'
         elif session_is_dead "$FOUND_SESSION" && scope_is_active "$scope"; then
@@ -428,14 +455,20 @@ ensure_agent_session() {
     local agent="$1" repo_key="$2" directory="$3" executable="$4"
     shift 4
     local -a arguments=("$@")
-    local session locks lock_file output rc expected_repo_id
+    local instance="${HUBI_AGENT_INSTANCE:-primary}" session locks lock_file lock_identity output rc expected_repo_id
     ENSURED_SESSION=""
-    session="$(agent_session_name "$agent" "$repo_key")"
+    if ! validate_instance_name "$instance"; then
+        printf 'Hubi: nieprawidłowa nazwa instancji: %s\n' "$instance" >&2
+        return 2
+    fi
+    session="$(agent_session_name "$agent" "$repo_key" "$instance")"
     expected_repo_id="$RESOLVED_REPO_ID"
     require_scope_kill_capability || return 1
     revalidate_repo_for_start "$repo_key" "$directory" "$expected_repo_id" || return 1
     locks="$(lock_root)" || { printf 'Hubi: nie można utworzyć katalogu blokad startowych.\n' >&2; return 1; }
-    lock_file="$locks/$(name_hash "$agent:$repo_key").lock"
+    lock_identity="$agent:$repo_key"
+    [[ "$instance" == "primary" ]] || lock_identity+=":$instance"
+    lock_file="$locks/$(name_hash "$lock_identity").lock"
     if [[ ! "$HUBI_LOCK_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
         printf 'Hubi: nieprawidłowy limit oczekiwania na blokadę: %s\n' "$HUBI_LOCK_TIMEOUT" >&2
         return 1
@@ -446,7 +479,7 @@ ensure_agent_session() {
     output="$("$FLOCK_BIN" --exclusive --close --wait "$HUBI_LOCK_TIMEOUT" \
         --conflict-exit-code 75 "$lock_file" \
         env -u HUBI_ACTIVE bash "$HUBI_SCRIPT_PATH" __start-locked \
-        "$agent" "$repo_key" "$directory" "$expected_repo_id" \
+        "$agent" "$repo_key" "$instance" "$directory" "$expected_repo_id" \
         "$executable" "${arguments[@]}" 2>&1)"
     rc=$?
     if (( rc == 75 )); then
@@ -463,17 +496,21 @@ ensure_agent_session() {
 }
 
 ensure_agent_session_locked() {
-    local agent="$1" repo_key="$2" directory="$3" expected_repo_id="$4" executable="$5"
-    shift 5
+    local agent="$1" repo_key="$2" instance="$3" directory="$4" expected_repo_id="$5" executable="$6"
+    shift 6
     local -a arguments=("$@")
-    local session scope output pane start_command stored_agent stored_repo
-    session="$(agent_session_name "$agent" "$repo_key")"
-    scope="$(agent_scope_name "$agent" "$repo_key")"
+    local session scope output pane start_command stored_agent stored_repo stored_instance
+    validate_instance_name "$instance" || return 2
+    session="$(agent_session_name "$agent" "$repo_key" "$instance")"
+    scope="$(agent_scope_name "$agent" "$repo_key" "$instance")"
 
     if tmux_cmd has-session -t "$session" 2>/dev/null; then
         stored_agent="$(tmux_cmd show-option -qv -t "$session" @hubi-agent 2>/dev/null || true)"
         stored_repo="$(tmux_cmd show-option -qv -t "$session" @hubi-repo 2>/dev/null || true)"
-        if session_is_managed "$session" && [[ "$stored_agent" == "$agent" && "$stored_repo" == "$repo_key" ]] && agent_pane "$session"; then
+        stored_instance="$(tmux_cmd show-option -qv -t "$session" @hubi-instance 2>/dev/null || true)"
+        [[ -n "$stored_instance" ]] || stored_instance="primary"
+        if session_is_managed "$session" && [[ "$stored_agent" == "$agent" && "$stored_repo" == "$repo_key" \
+            && "$stored_instance" == "$instance" ]] && agent_pane "$session"; then
             return 0
         fi
 
@@ -516,6 +553,7 @@ ensure_agent_session_locked() {
     if ! tmux_cmd set-option -t "$session" @hubi-managed v4 \
         || ! tmux_cmd set-option -t "$session" @hubi-agent "$agent" \
         || ! tmux_cmd set-option -t "$session" @hubi-repo "$repo_key" \
+        || ! tmux_cmd set-option -t "$session" @hubi-instance "$instance" \
         || ! tmux_cmd set-option -t "$session" @hubi-scope "$scope" \
         || ! tmux_cmd set-option -t "$session" @hubi-pane "$pane" \
         || ! tmux_cmd set-window-option -t "$pane" remain-on-exit on \
@@ -551,13 +589,21 @@ ensure_agent_session_locked() {
 }
 
 start_agent() {
-    local agent="$1" repo_argument="$2" executable
+    local agent="$1" repo_argument="$2" instance="${3:-primary}" mode="${4:-new}" executable
     local -a arguments=()
+    if ! validate_instance_name "$instance"; then
+        printf 'Hubi: nieprawidłowa nazwa instancji: %s\n' "$instance" >&2
+        return 2
+    fi
+    if [[ "$mode" != "new" && "$mode" != "resume" ]]; then
+        printf 'Hubi: nieprawidłowy tryb startu: %s\n' "$mode" >&2
+        return 2
+    fi
     resolve_repo "$repo_argument" || { pause_for_ack; return 2; }
 
     # Existing RUNNING/ATTACHED/EXITED sessions remain inspectable even if the
     # agent executable was subsequently moved or removed.
-    if find_agent_session "$agent" "$RESOLVED_REPO_KEY"; then
+    if find_agent_session "$agent" "$RESOLVED_REPO_KEY" "$instance"; then
         if [[ "$FOUND_SESSION_KIND" == "legacy" ]]; then
             printf '\n  Uwaga: %s jest sesją legacy/unmanaged; dostępna jest tylko bezpieczna funkcja attach.\n' "$FOUND_SESSION" >&2
             printf '  [a] Podłącz legacy/unmanaged\n  [b] Anuluj\n  > '
@@ -571,8 +617,15 @@ start_agent() {
     fi
 
     case "$agent" in
-        codex) executable="$CODEX_BIN" ;;
-        claude) executable="$CLAUDE_BIN"; arguments=(--permission-mode bypassPermissions) ;;
+        codex)
+            executable="$CODEX_BIN"
+            [[ "$mode" == "resume" ]] && arguments=(resume)
+            ;;
+        claude)
+            executable="$CLAUDE_BIN"
+            arguments=(--permission-mode bypassPermissions)
+            [[ "$mode" == "resume" ]] && arguments+=(--resume)
+            ;;
         *) printf 'Hubi: nieznany agent: %s\n' "$agent" >&2; return 2 ;;
     esac
     if [[ -z "$executable" || ! -x "$executable" ]]; then
@@ -580,7 +633,7 @@ start_agent() {
         pause_for_ack
         return 1
     fi
-    if ! ensure_agent_session "$agent" "$RESOLVED_REPO_KEY" "$RESOLVED_REPO_DIR" \
+    if ! HUBI_AGENT_INSTANCE="$instance" ensure_agent_session "$agent" "$RESOLVED_REPO_KEY" "$RESOLVED_REPO_DIR" \
         "$executable" "${arguments[@]}"; then
         printf '\n  Start agenta nie powiódł się; sesja EXITED zachowuje diagnostykę, jeśli powstała.\n' >&2
         pause_for_ack
@@ -633,9 +686,13 @@ terminate_scope() {
 }
 
 stop_agent_now() {
-    local agent="$1" repo_key="$2" session="" scope configured_scope
-    scope="$(agent_scope_name "$agent" "$repo_key")"
-    if ! find_agent_session "$agent" "$repo_key"; then
+    local agent="$1" repo_key="$2" instance="${3:-primary}" session="" scope configured_scope
+    if ! validate_instance_name "$instance"; then
+        printf 'Hubi: nieprawidłowa nazwa instancji: %s\n' "$instance" >&2
+        return 2
+    fi
+    scope="$(agent_scope_name "$agent" "$repo_key" "$instance")"
+    if ! find_agent_session "$agent" "$repo_key" "$instance"; then
         if scope_is_active "$scope"; then
             printf 'Hubi: czyszczenie osieroconego scope %s (brak sesji tmux).\n' "$scope" >&2
             terminate_scope "$scope"
@@ -671,18 +728,22 @@ stop_agent_now() {
 }
 
 kill_agent() {
-    local agent="$1" repo_key="$2" choice
-    if ! find_agent_session "$agent" "$repo_key"; then
-        if ! scope_is_active "$(agent_scope_name "$agent" "$repo_key")"; then
-            printf '\n  %s dla %s nie działa.\n' "$agent" "$repo_key"; pause_for_ack; return 0
+    local agent="$1" repo_key="$2" instance="${3:-primary}" choice
+    if ! validate_instance_name "$instance"; then
+        printf 'Hubi: nieprawidłowa nazwa instancji: %s\n' "$instance" >&2
+        return 2
+    fi
+    if ! find_agent_session "$agent" "$repo_key" "$instance"; then
+        if ! scope_is_active "$(agent_scope_name "$agent" "$repo_key" "$instance")"; then
+            printf '\n  %s/%s dla %s nie działa.\n' "$agent" "$instance" "$repo_key"; pause_for_ack; return 0
         fi
         printf '\n  Wykryto ORPHANED scope bez sesji tmux.\n'
     fi
-    printf '\n  Zakończyć %s dla %s i cały jego scope procesów?\n' "$agent" "$repo_key"
+    printf '\n  Zakończyć %s/%s dla %s i cały jego scope procesów?\n' "$agent" "$instance" "$repo_key"
     printf '  [y] Tak\n  [n] Nie\n  > '
     if ! read_choice choice; then return 0; fi
     case "$choice" in
-        y|Y) if ! stop_agent_now "$agent" "$repo_key"; then pause_for_ack; return 1; fi ;;
+        y|Y) if ! stop_agent_now "$agent" "$repo_key" "$instance"; then pause_for_ack; return 1; fi ;;
         n|N) ;;
         *) printf '  Anulowano: nieznany wybór.\n'; pause_for_ack ;;
     esac
@@ -751,6 +812,103 @@ sessions_menu() {
     done
 }
 
+instance_list() {
+    local repo_key="$1" agent session managed stored_agent stored_repo instance
+    for agent in codex claude; do
+        printf '%s|primary\n' "$agent"
+        while IFS= read -r session; do
+            [[ -n "$session" ]] || continue
+            managed="$(tmux_cmd show-option -qv -t "$session" @hubi-managed 2>/dev/null || true)"
+            stored_agent="$(tmux_cmd show-option -qv -t "$session" @hubi-agent 2>/dev/null || true)"
+            stored_repo="$(tmux_cmd show-option -qv -t "$session" @hubi-repo 2>/dev/null || true)"
+            instance="$(tmux_cmd show-option -qv -t "$session" @hubi-instance 2>/dev/null || true)"
+            [[ -n "$instance" ]] || instance="primary"
+            if [[ "$managed" == "v4" && "$stored_agent" == "$agent" && "$stored_repo" == "$repo_key" \
+                && "$instance" != "primary" ]] && validate_instance_name "$instance"; then
+                printf '%s|%s\n' "$agent" "$instance"
+            fi
+        done < <(tmux_cmd list-sessions -F '#S' 2>/dev/null | sort || true)
+    done
+}
+
+instance_menu() {
+    local agent="$1" repo_key="$2" instance="$3" choice state label
+    case "$agent" in codex) label="Codex" ;; claude) label="Claude" ;; esac
+    while true; do
+        clear_screen
+        state="$(agent_status "$agent" "$repo_key" "$instance")"
+        printf '\n  INSTANCJA — %s / %s\n  ──────────────────────────────────\n\n' "$label" "$instance"
+        printf '  Projekt: %s\n  Status:  %s\n\n' "$repo_key" "$state"
+        show_hint
+        if find_agent_session "$agent" "$repo_key" "$instance"; then
+            printf '  [a] Podłącz / zobacz EXITED\n'
+            printf '  [x] Zakończ instancję (także EXITED)\n'
+        else
+            printf '  [n] Nowa rozmowa\n'
+            printf '  [r] Wznów istniejącą rozmowę\n'
+        fi
+        printf '  [b] Powrót\n  > '
+        if ! read_choice choice; then return; fi
+        case "$choice" in
+            a|A) if find_agent_session "$agent" "$repo_key" "$instance"; then start_agent "$agent" "$repo_key" "$instance" || true; else unknown_key; fi ;;
+            x|X) if find_agent_session "$agent" "$repo_key" "$instance"; then kill_agent "$agent" "$repo_key" "$instance" || true; else unknown_key; fi ;;
+            n|N) if ! find_agent_session "$agent" "$repo_key" "$instance"; then start_agent "$agent" "$repo_key" "$instance" new || true; else unknown_key; fi ;;
+            r|R) if ! find_agent_session "$agent" "$repo_key" "$instance"; then start_agent "$agent" "$repo_key" "$instance" resume || true; else unknown_key; fi ;;
+            b|B) return ;;
+            *) unknown_key ;;
+        esac
+    done
+}
+
+instances_menu() {
+    local repo_key="$1" page=0 page_size=9 pages start end i index choice entry agent instance label
+    local -a entries=()
+    while true; do
+        clear_screen
+        mapfile -t entries < <(instance_list "$repo_key")
+        pages=$(( (${#entries[@]} + page_size - 1) / page_size )); (( pages == 0 )) && pages=1
+        (( page >= pages )) && page=$((pages - 1))
+        start=$((page * page_size)); end=$((start + page_size)); (( end > ${#entries[@]} )) && end=${#entries[@]}
+        printf '\n  INSTANCJE — %s (strona %d/%d)\n  ──────────────────────────────────\n\n' \
+            "$repo_key" "$((page + 1))" "$pages"
+        show_hint
+        for ((i = start; i < end; i++)); do
+            entry="${entries[$i]}"; agent="${entry%%|*}"; instance="${entry#*|}"
+            case "$agent" in codex) label="Codex" ;; claude) label="Claude" ;; esac
+            printf '  [%d] %-7s %-32s %s\n' "$((i - start + 1))" "$label" "$instance" \
+                "$(agent_status "$agent" "$repo_key" "$instance")"
+        done
+        printf '\n  [c] Nowa instancja Codex  [a] Nowa instancja Claude\n'
+        printf '  [n] Następna  [p] Poprzednia  [b] Powrót\n  > '
+        if ! read_choice choice; then return; fi
+        case "$choice" in
+            b|B) return ;;
+            n|N) if (( page + 1 < pages )); then ((page += 1)); else MENU_HINT="To ostatnia strona."; fi ;;
+            p|P) if (( page > 0 )); then ((page -= 1)); else MENU_HINT="To pierwsza strona."; fi ;;
+            c|C|a|A)
+                if [[ "$choice" == "c" || "$choice" == "C" ]]; then agent="codex"; else agent="claude"; fi
+                printf '\n  Nazwa instancji (litery, cyfry, _ lub -, maks. 32): '
+                if ! read_choice instance; then return; fi
+                if validate_instance_name "$instance"; then
+                    instance_menu "$agent" "$repo_key" "$instance"
+                else
+                    MENU_HINT="Nieprawidłowa nazwa instancji."
+                fi
+                ;;
+            [1-9])
+                index=$((start + choice - 1))
+                if (( index < end )); then
+                    entry="${entries[$index]}"; agent="${entry%%|*}"; instance="${entry#*|}"
+                    instance_menu "$agent" "$repo_key" "$instance"
+                else
+                    unknown_key
+                fi
+                ;;
+            *) unknown_key ;;
+        esac
+    done
+}
+
 project_menu() {
     local repo_key="$1" directory="$2" choice git_state codex_state claude_state
     while true; do
@@ -762,14 +920,16 @@ project_menu() {
         printf '  Projekt: %s\n  Git:     %s\n' "$repo_key" "$git_state"
         printf '  Codex:   %s\n  Claude:  %s\n\n' "$codex_state" "$claude_state"
         show_hint
-        printf '  [1] Codex  — uruchom / podłącz / zobacz EXITED\n'
-        printf '  [2] Claude — uruchom / podłącz / zobacz EXITED\n'
+        printf '  [1] Codex primary  — uruchom / podłącz / zobacz EXITED\n'
+        printf '  [2] Claude primary — uruchom / podłącz / zobacz EXITED\n'
+        printf '  [i] Instancje\n'
         printf '  [3] Shell projektu\n  [g] Git status\n'
         printf '  [c] Zakończ Codexa (także EXITED)\n  [a] Zakończ Claude (także EXITED)\n  [b] Powrót\n  > '
         if ! read_choice choice; then return; fi
         case "$choice" in
             1) start_agent codex "$repo_key" || true ;;
             2) start_agent claude "$repo_key" || true ;;
+            i|I) instances_menu "$repo_key" ;;
             3) project_shell "$repo_key" || true ;;
             g|G) show_git_status "$directory" "$repo_key" ;;
             c|C) kill_agent codex "$repo_key" || true ;;
@@ -831,7 +991,8 @@ main_menu() {
 }
 
 usage() {
-    printf '%s\n' 'Użycie:' '  hubi' '  hubi codex REPO' '  hubi claude REPO' '  hubi shell REPO' '  hubi sessions'
+    printf '%s\n' 'Użycie:' '  hubi' '  hubi codex REPO [INSTANCE [new|resume]]' \
+        '  hubi claude REPO [INSTANCE [new|resume]]' '  hubi shell REPO' '  hubi sessions'
 }
 
 hubi_main() {
@@ -845,7 +1006,13 @@ hubi_main() {
     enable_safe_input
     case "$command_name" in
         menu) main_menu || rc=$? ;;
-        codex|claude) if (( $# != 2 )); then usage >&2; rc=2; else start_agent "$command_name" "$2" || rc=$?; fi ;;
+        codex|claude)
+            if (( $# < 2 || $# > 4 )); then
+                usage >&2; rc=2
+            else
+                start_agent "$command_name" "$2" "${3:-primary}" "${4:-new}" || rc=$?
+            fi
+            ;;
         shell) if (( $# != 2 )); then usage >&2; rc=2; else project_shell "$2" || rc=$?; fi ;;
         sessions) if (( $# != 1 )); then usage >&2; rc=2; else sessions_menu || rc=$?; fi ;;
         *) usage >&2; rc=2 ;;
@@ -855,7 +1022,7 @@ hubi_main() {
 
 if [[ "${BASH_SOURCE[0]}" == "$0" && "${1:-}" == "__start-locked" ]]; then
     shift
-    if (( $# < 5 )); then
+    if (( $# < 6 )); then
         printf 'Hubi: niepełne argumenty wewnętrznego startu.\n' >&2
         exit 2
     fi
