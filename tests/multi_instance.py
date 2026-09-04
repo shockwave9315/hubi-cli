@@ -276,6 +276,52 @@ class MultiInstanceTests(unittest.TestCase):
         for instance in set(instances):
             self.assertEqual(sessions.count(self.session("codex", self.repo_x, instance)), 1)
 
+    def test_instance_discovery_batches_tmux_metadata_without_show_option(self) -> None:
+        call_log = self.temp / "discovery-tmux-calls"
+        tmux_batch = self.temp / "tmux-batch"
+        no_scopes = self.temp / "systemctl-no-scopes"
+
+        def record(*fields: str) -> str:
+            return "".join(f"{len(field.encode())}:{field}" for field in fields)
+
+        records = [
+            record("managed-review", "v4", "codex", self.repo_x, "review"),
+            record("legacy-primary", "v4", "codex", self.repo_x, ""),
+            record("unmanaged", "", "", "", ""),
+            record("wrong-agent", "v4", "claude", self.repo_x, "review"),
+            record("wrong-repo", "v4", "codex", self.repo_y, "review"),
+        ]
+        tmux_batch.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf '%s\\n' \"$*\" >>\"$CALL_LOG\"\n"
+            "if [[ \" $* \" == *\" show-option \"* ]]; then exit 97; fi\n"
+            "if [[ \" $* \" == *\" list-sessions \"* ]]; then\n"
+            + "".join(f"  printf '%s\\n' '{value}'\n" for value in records)
+            + "fi\n"
+        )
+        tmux_batch.chmod(0o755)
+        no_scopes.write_text("#!/usr/bin/env bash\nexit 0\n")
+        no_scopes.chmod(0o755)
+
+        result = self.bash(
+            'source "$HUBI_FILE"; agent_instance_list codex "$REPO"',
+            {
+                **self.env,
+                "REPO": self.repo_x,
+                "CALL_LOG": str(call_log),
+                "HUBI_TMUX_BIN": str(tmux_batch),
+                "HUBI_SYSTEMCTL_BIN": str(no_scopes),
+            },
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["primary", "review"])
+        calls = call_log.read_text().splitlines()
+        self.assertEqual(len(calls), 1, calls)
+        self.assertIn("list-sessions", calls[0])
+        self.assertNotIn("show-option", calls[0])
+        for field in ("session_name", "@hubi-managed", "@hubi-agent", "@hubi-repo", "@hubi-instance"):
+            self.assertIn(field, calls[0])
+
     def test_unsafe_names_and_unmanaged_lookalike_are_never_claimed(self) -> None:
         for name in ("", ".", "..", "has space", "a/b", "line\nbreak", "$(touch nope)", "-bad", "żółw"):
             result = self.bash(
@@ -292,7 +338,7 @@ class MultiInstanceTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.tmux("has-session", "-t", lookalike, check=False).returncode, 0)
 
-        special_repo = f"{self.repo_x}|special"
+        special_repo = f"{self.repo_x}|żółw"
         subprocess.run(["git", "init", "-q", str(self.repos / special_repo)], check=True)
         identity = ("codex", special_repo, "review")
         self.assert_started(identity)

@@ -349,19 +349,41 @@ find_agent_session() {
 }
 
 agent_instance_list() {
-    local agent="$1" repo_key="$2" session managed stored_agent stored_repo instance unit prefix body
+    local LC_ALL=C
+    local agent="$1" repo_key="$2" record field_length session managed stored_agent stored_repo instance unit prefix body
+    local -a fields=()
     {
         printf 'primary\n'
-        while IFS= read -r session; do
-            managed="$(tmux_cmd show-option -qv -t "$session" @hubi-managed 2>/dev/null || true)"
-            stored_agent="$(tmux_cmd show-option -qv -t "$session" @hubi-agent 2>/dev/null || true)"
-            stored_repo="$(tmux_cmd show-option -qv -t "$session" @hubi-repo 2>/dev/null || true)"
-            instance="$(tmux_cmd show-option -qv -t "$session" @hubi-instance 2>/dev/null || true)"
+        while IFS= read -r record; do
+            fields=()
+            for _ in {1..5}; do
+                if [[ "$record" =~ ^([0-9]+):(.*)$ ]]; then
+                    field_length="${BASH_REMATCH[1]}"
+                    record="${BASH_REMATCH[2]}"
+                else
+                    fields=()
+                    break
+                fi
+                if (( ${#record} < field_length )); then
+                    fields=()
+                    break
+                fi
+                fields+=("${record:0:field_length}")
+                record="${record:field_length}"
+            done
+            (( ${#fields[@]} == 5 )) || continue
+            session="${fields[0]}"
+            managed="${fields[1]}"
+            stored_agent="${fields[2]}"
+            stored_repo="${fields[3]}"
+            instance="${fields[4]}"
             [[ "$managed" == "v4" && "$stored_agent" == "$agent" && "$stored_repo" == "$repo_key" ]] || continue
             [[ -n "$instance" ]] || instance="primary"
             validate_instance_name "$instance" >/dev/null 2>&1 || continue
             printf '%s\n' "$instance"
-        done < <(tmux_cmd list-sessions -F '#S' 2>/dev/null || true)
+        done < <(tmux_cmd list-sessions -F \
+            '#{n:session_name}:#{session_name}#{n:@hubi-managed}:#{@hubi-managed}#{n:@hubi-agent}:#{@hubi-agent}#{n:@hubi-repo}:#{@hubi-repo}#{n:@hubi-instance}:#{@hubi-instance}' \
+            2>/dev/null || true)
 
         prefix="hubi-$agent-$(name_hash "$repo_key")-"
         while read -r unit _; do
