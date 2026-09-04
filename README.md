@@ -145,7 +145,7 @@ python3 tests/multi_instance.py
 ```
 
 At this revision the functional harness reports 16 tests, the adversarial
-suite contains 32 tests, and the multi-instance suite contains 8 tests; all
+suite contains 32 tests, and the multi-instance suite contains 9 tests; all
 totals must be fully green for release review.
 
 The harness uses a unique tmux socket, disposable Git repositories, fake agent

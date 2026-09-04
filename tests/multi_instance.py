@@ -22,7 +22,12 @@ class MultiInstanceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = Path(tempfile.mkdtemp(prefix="hubi-multi-"))
         self.repos = self.temp / "repos"
+        self.runtime = self.temp / "runtime"
         self.repos.mkdir()
+        self.runtime.mkdir()
+        self.runtime.chmod(0o700)
+        real_runtime = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+        (self.runtime / "systemd").symlink_to(Path(real_runtime) / "systemd", target_is_directory=True)
         unique = f"multi{os.getpid()}-{time.time_ns() % 1_000_000_000}"
         self.socket = f"hubi-multi-{unique}"
         self.repo_x = f"{unique}-repo-x"
@@ -48,6 +53,7 @@ class MultiInstanceTests(unittest.TestCase):
             "HUBI_CODEX_BIN": str(self.agent),
             "HUBI_CLAUDE_BIN": str(self.agent),
             "HUBI_FILE": str(HUBI),
+            "XDG_RUNTIME_DIR": str(self.runtime),
             "TERM": "xterm-256color",
         }
         self.env.pop("TMUX", None)

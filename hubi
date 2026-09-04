@@ -539,10 +539,28 @@ attach_session() {
     clear_screen
 }
 
-lock_root() {
-    local root="${XDG_RUNTIME_DIR:-/tmp}/hubi-locks-${UID}"
-    if [[ ! -d "$root" ]]; then install -d -m 700 -- "$root" || return 1; fi
+secure_fallback_lock_root() {
+    local root="$1" metadata
+    if [[ -L "$root" ]]; then return 1; fi
+    if [[ ! -e "$root" ]]; then
+        mkdir -m 700 -- "$root" || return 1
+    fi
+    [[ -d "$root" && ! -L "$root" ]] || return 1
+    metadata="$(stat -c '%u:%a' -- "$root")" || return 1
+    [[ "$metadata" == "$UID:700" ]] || return 1
     printf '%s' "$root"
+}
+
+lock_root() {
+    local root
+    if [[ -n "${XDG_RUNTIME_DIR:-}" ]]; then
+        root="$XDG_RUNTIME_DIR/hubi-locks-${UID}"
+        if [[ ! -d "$root" ]]; then install -d -m 700 -- "$root" || return 1; fi
+        printf '%s' "$root"
+        return
+    fi
+    root="/tmp/hubi-locks-${UID}"
+    secure_fallback_lock_root "$root" || return 1
 }
 
 ensure_agent_session() {

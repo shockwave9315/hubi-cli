@@ -521,7 +521,37 @@ class HubiAdversarialTests(unittest.TestCase):
     def test_cold_start_sigkill_does_not_wedge_lock(self) -> None:
         self.run_interrupted_cold_start(signal.SIGKILL)
 
-    def test_lock_timeout_is_bounded_and_visible(self) -> None:
+    def test_lock_root_security_and_timeout_are_enforced(self) -> None:
+        secure_root = self.temp / "secure-lock-root"
+        secure_root.mkdir(mode=0o700)
+        secure_root.chmod(0o700)
+        unsafe_mode_root = self.temp / "unsafe-mode-lock-root"
+        unsafe_mode_root.mkdir(mode=0o755)
+        unsafe_mode_root.chmod(0o755)
+        symlink_root = self.temp / "symlink-lock-root"
+        symlink_root.symlink_to(secure_root, target_is_directory=True)
+        unacceptable_root = self.temp / "unacceptable-lock-root"
+        unacceptable_root.write_text("not a directory")
+
+        def validate_fallback(path: Path) -> subprocess.CompletedProcess[str]:
+            return self.bash(
+                'source "$HUBI_FILE"; secure_fallback_lock_root "$LOCK_ROOT"',
+                check=False,
+                env={**self.env, "LOCK_ROOT": str(path)},
+            )
+
+        for unsafe_root in (symlink_root, unacceptable_root, unsafe_mode_root):
+            result = validate_fallback(unsafe_root)
+            self.assertNotEqual(result.returncode, 0, unsafe_root)
+            self.assertEqual(result.stdout, "")
+        if os.stat("/tmp").st_uid != os.getuid():
+            result = validate_fallback(Path("/tmp"))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, "")
+        result = validate_fallback(secure_root)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, str(secure_root))
+
         sentinel = f"{self.unique}-sentinel"
         self.tmux("new-session", "-d", "-s", sentinel, "--", "sleep", "30")
         lock_dir = self.lock_path().parent
