@@ -148,16 +148,26 @@ attempts anything through to a committed agent:
   closure on process exit is unconditional kernel behavior, so it fires
   whether the launcher exited cleanly, via a caught signal, or via a
   `SIGKILL` no trap could ever see. On it firing, the watchdog stops the
-  worker and rolls back — through the trusted record if one exists by then,
-  or, only when none exists at all yet, by checking the exact deterministic
-  session/scope names directly (safe specifically because this only runs
-  while still holding the identity's exclusive lock, having already
-  confirmed nothing existed at those names when the attempt began).
+  worker so it cannot go on to create or commit anything further, then
+  rolls back *only* through a trusted STARTING record if one already
+  exists. If none exists yet, nothing is cleaned up by name: holding the
+  identity's own lock only serializes Hubi's own participants, it proves
+  nothing about an unrelated or manual process appearing at the same
+  deterministic name in the meantime — "no trusted record ⇒ no destructive
+  action" has no exception here. Setting this watchdog up successfully is a
+  required precondition for starting at all, not a best-effort extra: if it
+  cannot be established, startup fails before any bootstrap resource is
+  created.
 
 Together these mean an unsupervised worker is never left to finish creating
 a managed agent after its launcher is gone — for any reason, including an
-uncatchable `SIGKILL`, and including the moment before the tmux bootstrap
-object itself exists.
+uncatchable `SIGKILL` — while never authorizing a destructive action on the
+strength of a name alone. The one accepted trade-off: a `SIGKILL` (or a
+caught signal that cannot be delivered in time) landing while tmux is
+mid-`new-session`, before any record exists, can leave an inert, unrecorded
+placeholder session behind — Hubi will never destroy it without ownership
+evidence, so it is left for a human (or `[o]`, if it later happens to
+resolve to a stale record) rather than guessed at.
 
 ### Clean install — no migration, no adoption
 
@@ -298,7 +308,7 @@ At this revision `tests/run.sh` reports 22 checks, the adversarial suite
 contains 32 tests, the multi-instance suite contains 10 tests, and
 `lifecycle_hardening.py` (identity/ownership/lifecycle regression coverage for
 the P1–P3 hardening batch, including the clean-install and parent-death-
-watchdog cases) contains 20 tests; all totals must be fully green for release
+watchdog cases) contains 29 tests; all totals must be fully green for release
 review.
 
 Every suite uses a unique tmux socket, a private `HUBI_RUNTIME_DIR`,

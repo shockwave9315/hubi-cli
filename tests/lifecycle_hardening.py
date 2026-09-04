@@ -614,13 +614,13 @@ class LifecycleHardeningTests(unittest.TestCase):
         wrapper.chmod(0o755)
         return wrapper
 
-    def _assert_absent_after_parent_only_signal(self, canonical: str) -> None:
+    def _assert_no_agent_ever_ran_after_parent_only_signal(self, canonical: str, stage: str) -> None:
         session = self.session_name("codex", canonical)
         scope = self.scope_name("codex", canonical)
-        self.assertEqual(
-            self.tmux("has-session", "-t", session, check=False).returncode, 1,
-            "a bootstrap tmux session survived an unsupervised parent death",
-        )
+        # The agent itself must never actually have run: no scope is ever
+        # created without a trusted record backing it (respawn-pane, and the
+        # scope creation bundled into it, only happen after the STARTING
+        # record is written), so this holds regardless of stage.
         self.assertFalse(self.scope_active(scope), "a bootstrap scope survived an unsupervised parent death")
         hash_value = self.bash_value(
             'source "$HUBI_FILE"; compute_identity_hash "$CANON" codex primary',
@@ -632,6 +632,25 @@ class LifecycleHardeningTests(unittest.TestCase):
             {**self.env, "HASH": hash_value},
         )
         self.assertNotEqual(diagnosis, "COMMITTED", "a bogus COMMITTED record was left behind")
+        if stage == "early":
+            # Nothing was ever created before the worker was stopped.
+            self.assertEqual(
+                self.tmux("has-session", "-t", session, check=False).returncode, 1,
+                "a bootstrap tmux session survived an unsupervised parent death",
+            )
+        else:
+            # stage "mid": the tmux placeholder session may legitimately
+            # remain (P2-02 — no trusted record exists yet at this point, so
+            # the watchdog must not destroy it by name alone). It must never
+            # be surfaced as a live managed agent, though: with no record,
+            # find_agent_session reports CONFLICT, never RUNNING/ATTACHED.
+            status = self.bash(
+                'source "$HUBI_FILE"; agent_status codex "$CANON" primary',
+                {**self.env, "CANON": canonical},
+            ).stdout
+            self.assertNotIn("RUNNING", status)
+            self.assertNotIn("ATTACHED", status)
+            self.tmux("kill-session", "-t", session, check=False)
 
     def _run_parent_only_signal_case(self, sig: signal.Signals, stage: str) -> None:
         # stage "early": stalls right after the very first tmux call the
@@ -642,7 +661,6 @@ class LifecycleHardeningTests(unittest.TestCase):
         # written yet.
         canonical = str(self.repo)
         env = dict(self.env)
-        session = self.session_name("codex", canonical)
         match = "has-session" if stage == "early" else "new-session"
         marker = self.temp / f"stall-{sig.name}-{stage}"
         env["HUBI_TMUX_BIN"] = str(self._stalling_tmux_wrapper(marker, match))
@@ -670,7 +688,7 @@ class LifecycleHardeningTests(unittest.TestCase):
         # (the stalling wrapper itself keeps running for 3s after the
         # marker).
         time.sleep(4)
-        self._assert_absent_after_parent_only_signal(canonical)
+        self._assert_no_agent_ever_ran_after_parent_only_signal(canonical, stage)
 
     def test_parent_only_int_before_tmux_creation(self) -> None:
         self._run_parent_only_signal_case(signal.SIGINT, stage="early")
@@ -689,6 +707,300 @@ class LifecycleHardeningTests(unittest.TestCase):
 
     def test_parent_only_sigkill_while_tmux_new_session_is_delayed(self) -> None:
         self._run_parent_only_signal_case(signal.SIGKILL, stage="mid")
+
+    # -----------------------------------------------------------------
+    # P2-01: an already-absent resource is cleanup success, not failure.
+    # -----------------------------------------------------------------
+    def test_stop_trusted_record_orphaned_cleanup_succeeds_when_session_already_absent(self) -> None:
+        canonical = str(self.repo)
+        started = self.start(canonical)
+        self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
+        session = self.session_name("codex", canonical)
+        scope = self.scope_name("codex", canonical)
+        self.created_scopes.add(scope)
+        deadline = time.monotonic() + 3
+        while not self.scope_active(scope) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(self.scope_active(scope), "precondition: scope must be active")
+
+        # The tmux session vanishes on its own (e.g. server restart); the
+        # scope (and the COMMITTED record referencing both) stays behind —
+        # exactly the ORPHANED shape.
+        self.tmux("kill-session", "-t", session, check=False)
+
+        hash_value = self.bash_value(
+            'source "$HUBI_FILE"; compute_identity_hash "$CANON" codex primary',
+            {**self.env, "CANON": canonical},
+        )
+        result = self.bash(
+            'source "$HUBI_FILE"; stop_trusted_record "$HASH"',
+            {**self.env, "HASH": hash_value},
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(self.scope_active(scope))
+        listed = self.bash_value('source "$HUBI_FILE"; list_trusted_records', self.env)
+        self.assertNotIn(hash_value, listed.splitlines(), "record must be deleted after full cleanup")
+
+    def test_stop_trusted_record_preserves_record_when_session_removal_fails(self) -> None:
+        canonical = str(self.repo)
+        started = self.start(canonical)
+        self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
+        session = self.session_name("codex", canonical)
+        scope = self.scope_name("codex", canonical)
+        self.created_scopes.add(scope)
+        deadline = time.monotonic() + 3
+        while not self.scope_active(scope) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(self.scope_active(scope), "precondition: scope must be active")
+
+        wrapper = self.temp / "tmux-kill-session-fails"
+        wrapper.write_text(
+            "#!/usr/bin/env bash\n"
+            f"if [[ \" $* \" == *\" kill-session \"* && \" $* \" == *\" {session} \"* ]]; then\n"
+            "  echo 'simulated kill-session failure' >&2\n"
+            "  exit 1\n"
+            "fi\n"
+            f"exec {REAL_TMUX} -f /dev/null \"$@\"\n"
+        )
+        wrapper.chmod(0o755)
+
+        hash_value = self.bash_value(
+            'source "$HUBI_FILE"; compute_identity_hash "$CANON" codex primary',
+            {**self.env, "CANON": canonical},
+        )
+        result = self.bash(
+            'source "$HUBI_FILE"; stop_trusted_record "$HASH"',
+            {**self.env, "HASH": hash_value, "HUBI_TMUX_BIN": str(wrapper)},
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        # The scope really is gone (terminate_scope ran and succeeded before
+        # the session removal failed) but the record must be preserved,
+        # since the session itself is still unaccounted for.
+        self.assertFalse(self.scope_active(scope))
+        self.assertEqual(self.tmux("has-session", "-t", session, check=False).returncode, 0)
+        listed = self.bash_value('source "$HUBI_FILE"; list_trusted_records', self.env)
+        self.assertIn(hash_value, listed.splitlines(), "record must be preserved when cleanup is incomplete")
+        # Real cleanup (no fault injection) must still be able to finish it.
+        result = self.bash(
+            'source "$HUBI_FILE"; stop_trusted_record "$HASH"',
+            {**self.env, "HASH": hash_value},
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    # -----------------------------------------------------------------
+    # P2-02: the watchdog must never destroy anything by name alone when no
+    # trusted record exists — holding the identity's own flock proves
+    # nothing about an unrelated/manual process racing the same name.
+    # -----------------------------------------------------------------
+    def test_watchdog_never_kills_unrelated_session_without_a_trusted_record(self) -> None:
+        canonical = str(self.repo)
+        session = self.session_name("codex", canonical)
+        marker = self.temp / "stall-p2-02-session"
+        env = dict(self.env)
+        env["HUBI_TMUX_BIN"] = str(self._stalling_tmux_wrapper(marker, "has-session"))
+        process = subprocess.Popen(
+            [str(HUBI), "codex", self.repo_name],
+            env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        try:
+            deadline = time.monotonic() + 5
+            while not marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(marker.exists(), "tmux has-session was never reached")
+            os.kill(process.pid, signal.SIGTERM)  # parent-only
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=5)
+        finally:
+            if process.stdout is not None:
+                process.stdout.close()
+        # No trusted record exists for this identity yet at all. An
+        # unrelated/manual session now appears at the EXACT deterministic
+        # name — nothing Hubi did, no flock of ours protects it.
+        self.tmux("new-session", "-d", "-s", session, "--", "sleep", "30")
+        time.sleep(4)  # long enough for any lingering watchdog to have acted
+        self.assertEqual(
+            self.tmux("has-session", "-t", session, check=False).returncode, 0,
+            "the watchdog destroyed an unrelated canonical-name session with no trusted record",
+        )
+        self.tmux("kill-session", "-t", session, check=False)
+
+    def test_watchdog_never_kills_unrelated_scope_without_a_trusted_record(self) -> None:
+        canonical = str(self.repo)
+        scope = self.scope_name("codex", canonical)
+        marker = self.temp / "stall-p2-02-scope"
+        env = dict(self.env)
+        env["HUBI_TMUX_BIN"] = str(self._stalling_tmux_wrapper(marker, "has-session"))
+        process = subprocess.Popen(
+            [str(HUBI), "codex", self.repo_name],
+            env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        try:
+            deadline = time.monotonic() + 5
+            while not marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(marker.exists(), "tmux has-session was never reached")
+            os.kill(process.pid, signal.SIGTERM)  # parent-only
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=5)
+        finally:
+            if process.stdout is not None:
+                process.stdout.close()
+        # An unrelated scope appears at the exact deterministic name — no
+        # trusted record ever referenced it.
+        proc = subprocess.Popen(
+            ["systemd-run", "--user", "--scope", "--quiet", "--collect", f"--unit={scope}",
+             "--", "sleep", "60"],
+        )
+        self.created_scopes.add(scope)
+        deadline = time.monotonic() + 3
+        while not self.scope_active(scope) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(self.scope_active(scope), "precondition: unrelated scope must be active")
+        time.sleep(4)
+        self.assertTrue(
+            self.scope_active(scope),
+            "the watchdog destroyed an unrelated canonical-name scope with no trusted record",
+        )
+        subprocess.run(["systemctl", "--user", "kill", "--kill-whom=all", "--signal=KILL", scope],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proc.wait(timeout=3)
+
+    # -----------------------------------------------------------------
+    # P2-03: parent-death watchdog setup is a required startup precondition
+    # — if it cannot be established, startup must fail before any bootstrap
+    # resource (tmux session, scope, record) is created.
+    # -----------------------------------------------------------------
+    def test_startup_fails_closed_when_watch_root_is_unsafe(self) -> None:
+        canonical = str(self.repo)
+        # The runtime base itself (and therefore lock_root) is perfectly
+        # valid — only the watch/ subdirectory specifically is unsafe (a
+        # symlink), isolating watch_root's own fail-closed behavior from
+        # lock_root's (already covered elsewhere).
+        runtime_base = self.temp / "runtime-base-for-watch-test"
+        runtime_base.mkdir(mode=0o700)
+        real_dir = self.temp / "watch-symlink-target"
+        real_dir.mkdir(mode=0o700)
+        (runtime_base / "watch").symlink_to(real_dir, target_is_directory=True)
+        env = {**self.env, "HUBI_RUNTIME_DIR": str(runtime_base)}
+        result = self.start(canonical, env=env)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        session = self.session_name("codex", canonical)
+        scope = self.scope_name("codex", canonical)
+        self.assertEqual(self.tmux("has-session", "-t", session, check=False).returncode, 1)
+        self.assertFalse(self.scope_active(scope))
+        hash_value = self.bash_value(
+            'source "$HUBI_FILE"; compute_identity_hash "$CANON" codex primary',
+            {**self.env, "CANON": canonical},
+        )
+        listed = self.bash_value('source "$HUBI_FILE"; list_trusted_records', env)
+        self.assertNotIn(hash_value, listed.splitlines())
+
+    def test_startup_fails_closed_when_mkfifo_is_unavailable(self) -> None:
+        canonical = str(self.repo)
+        fake_mkfifo_dir = self.temp / "fake-bin"
+        fake_mkfifo_dir.mkdir()
+        fake_mkfifo = fake_mkfifo_dir / "mkfifo"
+        fake_mkfifo.write_text("#!/usr/bin/env bash\nexit 1\n")
+        fake_mkfifo.chmod(0o755)
+        env = dict(self.env)
+        env["PATH"] = f"{fake_mkfifo_dir}:{env.get('PATH', '')}"
+        result = self.start(canonical, env=env)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        session = self.session_name("codex", canonical)
+        scope = self.scope_name("codex", canonical)
+        self.assertEqual(self.tmux("has-session", "-t", session, check=False).returncode, 1)
+        self.assertFalse(self.scope_active(scope))
+
+    def test_ordinary_startup_still_works_with_watchdog_mandatory(self) -> None:
+        # A plain, unobstructed start must still succeed now that watchdog
+        # setup is a required precondition rather than best-effort.
+        canonical = str(self.repo)
+        result = self.start(canonical)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        scope = self.scope_name("codex", canonical)
+        self.created_scopes.add(scope)
+        deadline = time.monotonic() + 3
+        while not self.scope_active(scope) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(self.scope_active(scope))
+
+    # -----------------------------------------------------------------
+    # P2-04: a session that exists at the expected name but whose live
+    # token does not match the STARTING record's token is an ownership
+    # conflict, not "nothing to do" — the record must be preserved.
+    # -----------------------------------------------------------------
+    def test_rollback_starting_record_preserves_record_on_token_mismatch(self) -> None:
+        canonical = str(self.repo)
+        session = self.session_name("codex", canonical)
+        scope = self.scope_name("codex", canonical)
+        hash_value = self.bash_value(
+            'source "$HUBI_FILE"; compute_identity_hash "$CANON" codex primary',
+            {**self.env, "CANON": canonical},
+        )
+        # A live session exists at the expected name, but with a DIFFERENT
+        # token than the STARTING record below will claim.
+        self.tmux(
+            "new-session", "-d", "-s", session, "-c", str(self.repo), "--", "sleep", "30",
+        )
+        self.tmux("set-option", "-t", session, "@hubi-token", "live-token-does-not-match")
+        write = self.bash(
+            'source "$HUBI_FILE"; write_state_record "$HASH" '
+            '"identity_version=$HUBI_IDENTITY_VERSION" "agent=codex" "instance=primary" '
+            '"canonical_path=$CANON" "repo_dev_inode=1:1" "session=$SESSION" "pane=%1" '
+            '"scope=$SCOPE" "token=record-token" "state=STARTING" "created=1" "committed=0"',
+            {**self.env, "HASH": hash_value, "CANON": canonical, "SESSION": session, "SCOPE": scope},
+        )
+        self.assertEqual(write.returncode, 0, write.stdout + write.stderr)
+
+        result = self.bash(
+            'source "$HUBI_FILE"; rollback_starting_record "$HASH"',
+            {**self.env, "HASH": hash_value},
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("CONFLICT", result.stdout + result.stderr)
+        # The mismatched session is left completely untouched.
+        self.assertEqual(self.tmux("has-session", "-t", session, check=False).returncode, 0)
+        listed = self.bash_value('source "$HUBI_FILE"; list_trusted_records', self.env)
+        self.assertIn(hash_value, listed.splitlines(), "record must be preserved on a token mismatch")
+        self.tmux("kill-session", "-t", session, check=False)
+
+    def test_rollback_starting_record_removes_record_on_matching_token(self) -> None:
+        canonical = str(self.repo)
+        session = self.session_name("codex", canonical)
+        scope = self.scope_name("codex", canonical)
+        hash_value = self.bash_value(
+            'source "$HUBI_FILE"; compute_identity_hash "$CANON" codex primary',
+            {**self.env, "CANON": canonical},
+        )
+        self.tmux(
+            "new-session", "-d", "-s", session, "-c", str(self.repo), "--", "sleep", "30",
+        )
+        self.tmux("set-option", "-t", session, "@hubi-token", "matching-token")
+        write = self.bash(
+            'source "$HUBI_FILE"; write_state_record "$HASH" '
+            '"identity_version=$HUBI_IDENTITY_VERSION" "agent=codex" "instance=primary" '
+            '"canonical_path=$CANON" "repo_dev_inode=1:1" "session=$SESSION" "pane=%1" '
+            '"scope=$SCOPE" "token=matching-token" "state=STARTING" "created=1" "committed=0"',
+            {**self.env, "HASH": hash_value, "CANON": canonical, "SESSION": session, "SCOPE": scope},
+        )
+        self.assertEqual(write.returncode, 0, write.stdout + write.stderr)
+
+        result = self.bash(
+            'source "$HUBI_FILE"; rollback_starting_record "$HASH"',
+            {**self.env, "HASH": hash_value},
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.tmux("has-session", "-t", session, check=False).returncode, 1)
+        listed = self.bash_value('source "$HUBI_FILE"; list_trusted_records', self.env)
+        self.assertNotIn(hash_value, listed.splitlines())
 
 
 if __name__ == "__main__":

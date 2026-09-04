@@ -878,35 +878,45 @@ ensure_agent_instance_session() {
     # anything. File-descriptor closure on process exit is unconditional
     # kernel behavior — it happens whether we exit cleanly, via a caught
     # signal, or via an uncatchable SIGKILL — so the worker's watchdog sees
-    # EOF and rolls back even in the one case cancel_startup_worker's trap
-    # cannot help with at all. Best-effort: if the FIFO can't be set up,
-    # startup still proceeds with the (already correct) protections that do
-    # not depend on it — only the earliest-window SIGKILL case loses this
-    # extra layer.
+    # EOF and stops the worker even in the one case cancel_startup_worker's
+    # trap cannot help with at all.
+    #
+    # This is a required startup precondition (P2-03), not best-effort: if
+    # it cannot be established, startup fails closed here — before the flock
+    # supervisor or anything else is spawned — rather than silently proceed
+    # without the one protection that covers the window before any trusted
+    # STARTING record exists.
     watch_fifo=""
     watch_write_fd=""
-    if watch_dir="$(watch_root)" 2>/dev/null; then
-        watch_fifo="$watch_dir/$hash-$$-$RANDOM.fifo"
-        if mkfifo -m 600 -- "$watch_fifo" 2>/dev/null; then
-            # Opened read-write (not write-only): a plain write-only open
-            # would block right here until a reader opens the FIFO, but the
-            # worker that will do that hasn't even been spawned yet. O_RDWR
-            # on a FIFO never blocks (the fd trivially satisfies "a peer
-            # exists" against itself) while still behaving as a writer for
-            # the worker's blocking read to see EOF against once we close it.
-            #
-            # NOTE: a bare `exec` (no command) applies its redirections to
-            # THIS shell permanently, not just to the exec call itself — a
-            # trailing `2>/dev/null` here would silently swallow every later
-            # diagnostic this function prints. Do not add one.
-            if ! exec {watch_write_fd}<>"$watch_fifo"; then
-                watch_write_fd=""
-                rm -f -- "$watch_fifo" 2>/dev/null
-                watch_fifo=""
-            fi
-        else
-            watch_fifo=""
-        fi
+    if ! watch_dir="$(watch_root)" 2>/dev/null; then
+        printf 'Hubi: nie można utworzyć bezpiecznego katalogu obserwatora startu (watchdog); odmowa startu (fail-closed).\n' >&2
+        rm -f -- "$tmp_out" 2>/dev/null
+        return 1
+    fi
+    watch_fifo="$watch_dir/$hash-$$-$RANDOM.fifo"
+    if ! mkfifo -m 600 -- "$watch_fifo" 2>/dev/null; then
+        printf 'Hubi: nie można utworzyć FIFO obserwatora startu (watchdog); odmowa startu (fail-closed).\n' >&2
+        watch_fifo=""
+        rm -f -- "$tmp_out" 2>/dev/null
+        return 1
+    fi
+    # Opened read-write (not write-only): a plain write-only open would
+    # block right here until a reader opens the FIFO, but the worker that
+    # will do that hasn't even been spawned yet. O_RDWR on a FIFO never
+    # blocks (the fd trivially satisfies "a peer exists" against itself)
+    # while still behaving as a writer for the worker's blocking read to
+    # see EOF against once we close it.
+    #
+    # NOTE: a bare `exec` (no command) applies its redirections to THIS
+    # shell permanently, not just to the exec call itself — a trailing
+    # `2>/dev/null` here would silently swallow every later diagnostic this
+    # function prints. Do not add one.
+    if ! exec {watch_write_fd}<>"$watch_fifo"; then
+        printf 'Hubi: nie można otworzyć FIFO obserwatora startu (watchdog); odmowa startu (fail-closed).\n' >&2
+        watch_write_fd=""
+        rm -f -- "$watch_fifo" "$tmp_out" 2>/dev/null
+        watch_fifo=""
+        return 1
     fi
     STARTUP_WATCH_FIFO="$watch_fifo"
 
@@ -926,19 +936,11 @@ ensure_agent_instance_session() {
     # end and the FIFO would never actually reach EOF when we exit: it would
     # always still have this inherited writer reference open, defeating the
     # whole mechanism. This closes only the child's copy; ours stays open.
-    if [[ -n "$watch_write_fd" ]]; then
-        "$FLOCK_BIN" --exclusive --close --wait "$HUBI_LOCK_TIMEOUT" \
-            --conflict-exit-code 75 "$lock_file" \
-            env -u HUBI_ACTIVE bash "$HUBI_SCRIPT_PATH" __start-locked \
-            "$agent" "$canonical_path" "$expected_repo_id" "$instance" "$hash" "$watch_fifo" \
-            "$executable" "${arguments[@]}" >"$tmp_out" 2>&1 {watch_write_fd}<&- &
-    else
-        "$FLOCK_BIN" --exclusive --close --wait "$HUBI_LOCK_TIMEOUT" \
-            --conflict-exit-code 75 "$lock_file" \
-            env -u HUBI_ACTIVE bash "$HUBI_SCRIPT_PATH" __start-locked \
-            "$agent" "$canonical_path" "$expected_repo_id" "$instance" "$hash" "$watch_fifo" \
-            "$executable" "${arguments[@]}" >"$tmp_out" 2>&1 &
-    fi
+    "$FLOCK_BIN" --exclusive --close --wait "$HUBI_LOCK_TIMEOUT" \
+        --conflict-exit-code 75 "$lock_file" \
+        env -u HUBI_ACTIVE bash "$HUBI_SCRIPT_PATH" __start-locked \
+        "$agent" "$canonical_path" "$expected_repo_id" "$instance" "$hash" "$watch_fifo" \
+        "$executable" "${arguments[@]}" >"$tmp_out" 2>&1 {watch_write_fd}<&- &
     worker_pid=$!
     STARTUP_WORKER_PID="$worker_pid"
     STARTUP_IDENTITY_HASH="$hash"
@@ -989,6 +991,13 @@ rollback_starting_record() {
         live_token="$(tmux_cmd show-option -qv -t "$session" @hubi-token 2>/dev/null || true)"
         if [[ "$live_token" == "$token" ]]; then
             tmux_cmd kill-session -t "$session" >/dev/null 2>&1 || ok=0
+        else
+            # A live session exists at the expected name but does not carry
+            # our token: this is not "nothing to clean", it is an ownership
+            # conflict. Never kill it, and never treat this as successful
+            # cleanup — the record must stay as evidence (P2-04).
+            printf 'Hubi: sesja %s przy wycofywaniu nie ma zweryfikowanego tokenu (CONFLICT); pozostawiono bez zmian.\n' "$session" >&2
+            ok=0
         fi
     fi
     if [[ -n "$scope" ]]; then
@@ -1029,25 +1038,25 @@ rollback_bootstrap() {
 
 # Spawns a background watchdog (inside the worker itself) that blocks on the
 # parent-death FIFO and, upon EOF — the launcher is gone for any reason,
-# including an uncatchable SIGKILL that no trap could ever see — terminates
-# this worker and rolls back whatever it finds:
+# including an uncatchable SIGKILL that no trap could ever see — stops this
+# worker so it cannot go on to create/commit anything further, then rolls
+# back ONLY through a trusted record:
 #
 #   - a trusted STARTING record, if one already exists, is the authoritative
 #     source and is rolled back exactly as rollback_starting_record already
 #     does (token-verified);
 #   - a COMMITTED record (the worker finished normally moments earlier) is
 #     left completely alone;
-#   - only when NO record exists at all does this fall back to checking the
-#     exact deterministic session/scope names for this identity directly.
-#     That narrow name-only exception is safe *here specifically* because
-#     this watchdog only ever runs while its worker still holds the
-#     identity's exclusive flock, and the worker already confirmed no
-#     session/scope existed at those exact names before arming it — so
-#     nothing else could have raced to create them independently, and
-#     anything found there now can only be what this attempt itself just
-#     created.
+#   - if NO record exists at all yet, nothing is cleaned by name. Holding
+#     the identity's own flock only serializes Hubi's own participants —
+#     it proves nothing about an unrelated or manual process, which never
+#     acquires that lock, appearing at the same deterministic name in the
+#     meantime. Absent a trusted record there is no ownership evidence, and
+#     "no trusted record => no destructive action" has no exception: the
+#     worker being stopped is what prevents it from finishing the bootstrap
+#     unsupervised; nothing further is destroyed on its behalf.
 start_parent_death_watchdog() {
-    local hash="$1" session="$2" scope="$3" fifo="$4" worker_pid="$$"
+    local hash="$1" fifo="$2" worker_pid="$$"
     (
         IFS= read -r _ <"$fifo" 2>/dev/null
         kill -TERM "$worker_pid" 2>/dev/null || true
@@ -1055,20 +1064,8 @@ start_parent_death_watchdog() {
         while (( waited < 20 )) && kill -0 "$worker_pid" 2>/dev/null; do sleep 0.1; ((waited += 1)); done
         kill -KILL "$worker_pid" 2>/dev/null || true
 
-        local record_rc
-        load_state_record "$hash"; record_rc=$?
-        if (( record_rc == 0 )); then
-            if [[ "${REC[state]}" == STARTING ]]; then
-                rollback_starting_record "$hash" >/dev/null 2>&1 || true
-            fi
-            exit 0
-        fi
-        (( record_rc == 1 )) || exit 0
-        if [[ -n "$session" ]] && tmux_cmd has-session -t "$session" 2>/dev/null; then
-            tmux_cmd kill-session -t "$session" >/dev/null 2>&1 || true
-        fi
-        if [[ -n "$scope" ]]; then
-            terminate_scope "$scope" "" >/dev/null 2>&1 || true
+        if load_state_record "$hash" && [[ "${REC[state]}" == STARTING ]]; then
+            rollback_starting_record "$hash" >/dev/null 2>&1 || true
         fi
     ) &
 }
@@ -1126,8 +1123,16 @@ ensure_agent_session_locked() {
     # parent-death watchdog first: a launcher that vanishes for ANY reason
     # from this point on — including an uncatchable SIGKILL, which
     # cancel_startup_worker's trap cannot help with at all — must not leave
-    # this attempt to finish unsupervised (P2-05).
-    [[ -z "$watch_fifo" ]] || start_parent_death_watchdog "$hash" "$session" "$scope" "$watch_fifo"
+    # this attempt to finish unsupervised (P2-05). The launcher only ever
+    # invokes this worker with a working watchdog FIFO (P2-03: setup is a
+    # mandatory startup precondition, checked before the worker is even
+    # spawned) — a missing one here means that guarantee was somehow
+    # violated, so this fails closed too rather than proceed unsupervised.
+    if [[ -z "$watch_fifo" ]]; then
+        printf 'Hubi: brak FIFO obserwatora startu (watchdog); odmowa startu (fail-closed).\n' >&2
+        return 1
+    fi
+    start_parent_death_watchdog "$hash" "$watch_fifo"
 
     token="$(random_token)"
     if ! output="$(tmux_cmd new-session -d -P -F '#{pane_id}' -s "$session" -c "$canonical_path" -- sleep 30 2>&1)"; then
@@ -1789,8 +1794,13 @@ stop_trusted_record() {
     fi
     terminate_scope "$scope" "$token"; rc=$?
     if (( rc == 0 )); then
+        # An already-absent session is cleanup success, not a failure to
+        # report: only attempt (and require) removal when the session is
+        # actually still there (P2-01) — an ORPHANED object (session gone,
+        # scope was the only thing still alive) must not be misreported as
+        # a failed stop just because there is nothing left to kill.
         local kill_ok=1
-        if [[ -n "$session" ]]; then
+        if [[ -n "$session" ]] && tmux_cmd has-session -t "$session" 2>/dev/null; then
             tmux_cmd kill-session -t "$session" >/dev/null 2>&1 || kill_ok=0
         fi
         if (( kill_ok )); then
