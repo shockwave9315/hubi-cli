@@ -260,6 +260,46 @@ agent_session_name() {
     fi
 }
 
+terminal_session_name() {
+    local repo_key="$1" instance="$2"
+    validate_instance_name "$instance" || return 2
+    printf 'hubi-terminal-%s-%s-%s' "$(safe_slug "${repo_key##*/}")" \
+        "$(safe_slug "$instance")" "$(instance_name_hash "$repo_key" "$instance")"
+}
+
+find_terminal_session() {
+    local repo_key="$1" instance="$2" session managed kind stored_repo stored_instance
+    FOUND_SESSION=""
+    validate_instance_name "$instance" || return 2
+    session="$(terminal_session_name "$repo_key" "$instance")" || return 2
+    tmux_cmd has-session -t "=$session" 2>/dev/null || return 1
+    managed="$(tmux_cmd show-option -qv -t "=$session:" @hubi-managed 2>/dev/null || true)"
+    kind="$(tmux_cmd show-option -qv -t "=$session:" @hubi-kind 2>/dev/null || true)"
+    stored_repo="$(tmux_cmd show-option -qv -t "=$session:" @hubi-repo 2>/dev/null || true)"
+    stored_instance="$(tmux_cmd show-option -qv -t "=$session:" @hubi-instance 2>/dev/null || true)"
+    if [[ "$managed" == "v4" && "$kind" == "terminal" && "$stored_repo" == "$repo_key" \
+        && "$stored_instance" == "$instance" ]]; then
+        FOUND_SESSION="$session"
+        return 0
+    fi
+    return 1
+}
+
+terminal_list() {
+    local repo_key="$1" session managed kind stored_repo instance
+    while IFS= read -r session; do
+        [[ -n "$session" ]] || continue
+        managed="$(tmux_cmd show-option -qv -t "=$session:" @hubi-managed 2>/dev/null || true)"
+        kind="$(tmux_cmd show-option -qv -t "=$session:" @hubi-kind 2>/dev/null || true)"
+        stored_repo="$(tmux_cmd show-option -qv -t "=$session:" @hubi-repo 2>/dev/null || true)"
+        instance="$(tmux_cmd show-option -qv -t "=$session:" @hubi-instance 2>/dev/null || true)"
+        if [[ "$managed" == "v4" && "$kind" == "terminal" && "$stored_repo" == "$repo_key" ]] \
+            && validate_instance_name "$instance"; then
+            printf '%s\n' "$instance"
+        fi
+    done < <(tmux_cmd list-sessions -F '#S' 2>/dev/null | sort || true)
+}
+
 agent_scope_name() {
     local agent="$1" repo_key="$2" instance="${3:-primary}"
     validate_instance_name "$instance" || return 2
@@ -357,7 +397,8 @@ session_is_managed() {
 
 session_is_dead() {
     local session="$1"
-    if session_is_managed "$session"; then
+    if session_is_managed "$session" \
+        && [[ "$(tmux_cmd show-option -qv -t "=$session:" @hubi-kind 2>/dev/null || true)" != "terminal" ]]; then
         agent_pane "$session" || return 0
         [[ "$(tmux_cmd display-message -p -t "$FOUND_PANE" '#{pane_dead}' 2>/dev/null || true)" == "1" ]]
     else
@@ -787,6 +828,137 @@ project_shell() {
     clear_screen
 }
 
+terminal_status() {
+    local repo_key="$1" instance="$2" clients
+    if ! find_terminal_session "$repo_key" "$instance"; then
+        printf '○ STOPPED'
+        return
+    fi
+    clients="$(session_clients "$FOUND_SESSION")"
+    if (( clients > 0 )); then printf '● ATTACHED (%d)' "$clients"; else printf '● RUNNING'; fi
+}
+
+start_terminal() {
+    local repo_key="$1" instance="$2" session output
+    if ! validate_instance_name "$instance"; then
+        printf 'Hubi: nieprawidłowa nazwa terminala: %s\n' "$instance" >&2
+        return 2
+    fi
+    resolve_repo "$repo_key" || { pause_for_ack; return 2; }
+    repo_key="$RESOLVED_REPO_KEY"
+    if find_terminal_session "$repo_key" "$instance"; then
+        attach_session "$FOUND_SESSION"
+        return
+    fi
+    session="$(terminal_session_name "$repo_key" "$instance")" || return 2
+    if ! output="$(tmux_cmd new-session -d -s "$session" -c "$RESOLVED_REPO_DIR" -- bash 2>&1)"; then
+        printf 'Hubi: tmux nie utworzył terminala %s:\n%s\n' "$session" "$output" >&2
+        pause_for_ack
+        return 1
+    fi
+    sanitize_tmux_environment
+    if ! tmux_cmd set-option -t "=$session:" @hubi-managed v4 \
+        || ! tmux_cmd set-option -t "=$session:" @hubi-kind terminal \
+        || ! tmux_cmd set-option -t "=$session:" @hubi-repo "$repo_key" \
+        || ! tmux_cmd set-option -t "=$session:" @hubi-instance "$instance" \
+        || ! tmux_cmd set-window-option -t "=$session:" window-size largest; then
+        printf 'Hubi: nie udało się zapisać metadanych terminala %s.\n' "$session" >&2
+        tmux_cmd kill-session -t "=$session" >/dev/null 2>&1 || true
+        pause_for_ack
+        return 1
+    fi
+    attach_session "$session"
+}
+
+stop_terminal_now() {
+    local repo_key="$1" instance="$2" session
+    if ! find_terminal_session "$repo_key" "$instance"; then
+        printf 'Hubi: terminal %s dla %s nie działa.\n' "$instance" "$repo_key" >&2
+        return 1
+    fi
+    session="$FOUND_SESSION"
+    tmux_cmd kill-session -t "=$session"
+}
+
+kill_terminal() {
+    local repo_key="$1" instance="$2" choice
+    if ! find_terminal_session "$repo_key" "$instance"; then
+        printf '\n  Terminal %s dla %s nie działa.\n' "$instance" "$repo_key"
+        pause_for_ack
+        return 0
+    fi
+    printf '\n  Zakończyć terminal %s dla %s?\n' "$instance" "$repo_key"
+    printf '  [y] Tak\n  [n] Nie\n  > '
+    if ! read_choice choice; then return 0; fi
+    case "$choice" in
+        y|Y) stop_terminal_now "$repo_key" "$instance" || { pause_for_ack; return 1; } ;;
+        n|N) ;;
+        *) printf '  Anulowano: nieznany wybór.\n'; pause_for_ack ;;
+    esac
+}
+
+terminal_menu() {
+    local repo_key="$1" instance="$2" choice
+    while find_terminal_session "$repo_key" "$instance"; do
+        clear_screen
+        printf '\n  TERMINAL — %s\n  ──────────────────────────────────\n\n' "$instance"
+        printf '  Projekt: %s\n  Status:  %s\n\n' "$repo_key" "$(terminal_status "$repo_key" "$instance")"
+        show_hint
+        printf '  [a] Podłącz\n  [x] Zakończ terminal\n  [b] Powrót\n  > '
+        if ! read_choice choice; then return; fi
+        case "$choice" in
+            a|A) if find_terminal_session "$repo_key" "$instance"; then attach_session "$FOUND_SESSION" || true; fi ;;
+            x|X) kill_terminal "$repo_key" "$instance" || true ;;
+            b|B) return ;;
+            *) unknown_key ;;
+        esac
+    done
+}
+
+terminals_menu() {
+    local repo_key="$1" page=0 page_size=9 pages start end i index choice instance
+    local -a entries=()
+    while true; do
+        clear_screen
+        mapfile -t entries < <(terminal_list "$repo_key" | sort)
+        pages=$(( (${#entries[@]} + page_size - 1) / page_size )); (( pages == 0 )) && pages=1
+        (( page >= pages )) && page=$((pages - 1))
+        start=$((page * page_size)); end=$((start + page_size)); (( end > ${#entries[@]} )) && end=${#entries[@]}
+        printf '\n  TERMINALE — %s (strona %d/%d)\n  ──────────────────────────────────\n\n' \
+            "$repo_key" "$((page + 1))" "$pages"
+        show_hint
+        for ((i = start; i < end; i++)); do
+            instance="${entries[$i]}"
+            printf '  [%d] %-32s %s\n' "$((i - start + 1))" "$instance" \
+                "$(terminal_status "$repo_key" "$instance")"
+        done
+        if (( ${#entries[@]} == 0 )); then printf '  Brak persistent terminali.\n'; fi
+        printf '\n  [n] Nowy terminal'
+        if (( pages > 1 )); then printf '  [>] Następna  [<] Poprzednia'; fi
+        printf '\n  [b] Powrót\n  > '
+        if ! read_choice choice; then return; fi
+        case "$choice" in
+            b|B) return ;;
+            n|N)
+                printf '\n  Nazwa terminala (litery, cyfry, _ lub -, maks. 32): '
+                if ! read_choice instance; then return; fi
+                if validate_instance_name "$instance"; then
+                    start_terminal "$repo_key" "$instance" || true
+                else
+                    MENU_HINT="Nieprawidłowa nazwa terminala."
+                fi
+                ;;
+            \>) if (( page + 1 < pages )); then ((page += 1)); else MENU_HINT="To ostatnia strona."; fi ;;
+            \<) if (( page > 0 )); then ((page -= 1)); else MENU_HINT="To pierwsza strona."; fi ;;
+            [1-9])
+                index=$((start + choice - 1))
+                if (( index < end )); then terminal_menu "$repo_key" "${entries[$index]}"; else unknown_key; fi
+                ;;
+            *) unknown_key ;;
+        esac
+    done
+}
+
 normal_shell() {
     clear_screen
     printf '\n  Shell ai-devbox\n  Powrót do menu: exit\n\n'
@@ -966,6 +1138,7 @@ project_menu() {
         printf '  [1] Codex primary  — uruchom / podłącz / zobacz EXITED\n'
         printf '  [2] Claude primary — uruchom / podłącz / zobacz EXITED\n'
         printf '  [i] Instancje\n'
+        printf '  [t] Terminale persistent\n'
         printf '  [3] Shell projektu\n  [g] Git status\n'
         printf '  [c] Zakończ Codexa (także EXITED)\n  [a] Zakończ Claude (także EXITED)\n  [b] Powrót\n  > '
         if ! read_choice choice; then return; fi
@@ -973,6 +1146,7 @@ project_menu() {
             1) start_agent codex "$repo_key" || true ;;
             2) start_agent claude "$repo_key" || true ;;
             i|I) instances_menu "$repo_key" ;;
+            t|T) terminals_menu "$repo_key" ;;
             3) project_shell "$repo_key" || true ;;
             g|G) show_git_status "$directory" "$repo_key" ;;
             c|C) kill_agent codex "$repo_key" || true ;;

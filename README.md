@@ -1,8 +1,9 @@
 # Hubi v4
 
 Hubi is the SSH launcher for the ai-devbox. The menu itself and temporary
-shells run outside tmux; only long-lived Codex and Claude agents use tmux.
-Detaching or losing SSH therefore leaves agents running.
+shells run outside tmux; long-lived Codex and Claude agents and persistent
+project terminals use tmux. Detaching or losing SSH therefore leaves them
+running.
 
 This repository is development-only. Installation targets such as
 `~/.local/bin/hubi`, `~/.tmux.conf`, and `~/.bashrc` must only be updated in a
@@ -61,6 +62,14 @@ scope names when their tmux session is gone. It can start, attach, inspect, or
 stop one instance without affecting its siblings. A stopped secondary instance
 can start a new conversation or ask the installed agent CLI to resume one;
 Hubi does not store conversation history.
+
+`Shell projektu` remains an ephemeral Bash shell: exiting Hubi or losing its
+SSH connection ends that shell. `Terminale persistent` instead creates named
+tmux-only Bash sessions in the repository root. A project can have multiple
+terminal instances using the same bounded name grammar as agent instances;
+they survive tmux detach and SSH disconnect and can be reattached from another
+client. Terminal sessions have no systemd scope or persistent state file, and
+ending one explicitly kills only its exact tmux session.
 
 When a live session already has a client, Hubi asks whether to attach in one of
 three modes:
@@ -133,11 +142,13 @@ Run the isolated test suite with:
 ./tests/run.sh
 python3 tests/adversarial.py
 ./tests/multi_instance.sh
+./tests/persistent_terminal.sh
 ```
 
 At this revision the functional harness reports 16 tests and the adversarial
 suite contains 31 tests. The focused multi-instance harness reports 12 tests;
-all three totals must be fully green for release review.
+the focused persistent-terminal harness reports 7 tests. All four totals must
+be fully green for release review.
 
 The harness uses a unique tmux socket, disposable Git repositories, fake agent
 processes, and unique systemd scopes. It never attaches to or stops the default
