@@ -129,6 +129,53 @@ test_new_windows_inherit_largest() {
 }
 check "new persistent-terminal windows inherit largest sizing" test_new_windows_inherit_largest
 
+test_terminal_delayed_cwd_readiness() {
+    local instance=cwd-delayed session log="$TEST_ROOT/terminal-delayed-cwd.log"
+    local marker="$TEST_ROOT/terminal-delayed-cwd.marker" result
+    session="$(terminal_name "$REPO_ONE" "$instance")"
+    hubi_env REPO_NAME="$REPO_ONE" INSTANCE="$instance" HUBI_FILE="$HUBI" \
+        HUBI_TMUX_BIN="$ROOT/tests/tmux_cwd_wrapper.sh" HUBI_TEST_REAL_TMUX="$TEST_ROOT/tmux-clean" \
+        HUBI_TEST_CWD_LOG="$log" HUBI_TEST_CWD_MARKER="$marker" HUBI_TEST_CWD_MODE=delayed \
+        bash -c '
+            source "$HUBI_FILE"
+            attach_session() { :; }
+            pause_for_ack() { :; }
+            start_terminal "$REPO_NAME" "$INSTANCE"
+        ' >/dev/null 2>&1 || return 1
+    [[ "$(wc -l <"$log")" -ge 2 ]] \
+        && tmux -L "$SOCKET" has-session -t "=$session" 2>/dev/null \
+        && [[ "$(tmux -L "$SOCKET" show-option -qv -t "=$session:" @hubi-kind)" == terminal ]]
+    result=$?
+    tmux -L "$SOCKET" kill-session -t "=$session" >/dev/null 2>&1 || true
+    return "$result"
+}
+check "persistent terminal waits for delayed tmux cwd readiness" test_terminal_delayed_cwd_readiness
+
+test_terminal_wrong_cwd_cleanup() {
+    local instance=cwd-wrong session sentinel="terminal-cwd-sentinel-$$" output rc result
+    local log="$TEST_ROOT/terminal-wrong-cwd.log" marker="$TEST_ROOT/terminal-wrong-cwd.marker"
+    session="$(terminal_name "$REPO_ONE" "$instance")"
+    tmux -L "$SOCKET" new-session -d -s "$sentinel" -- sleep 30 || return 1
+    output="$(hubi_env REPO_NAME="$REPO_ONE" INSTANCE="$instance" HUBI_FILE="$HUBI" \
+        HUBI_TMUX_BIN="$ROOT/tests/tmux_cwd_wrapper.sh" HUBI_TEST_REAL_TMUX="$TEST_ROOT/tmux-clean" \
+        HUBI_TEST_CWD_LOG="$log" HUBI_TEST_CWD_MARKER="$marker" HUBI_TEST_CWD_MODE=wrong \
+        bash -c '
+            source "$HUBI_FILE"
+            attach_session() { :; }
+            pause_for_ack() { :; }
+            start_terminal "$REPO_NAME" "$INSTANCE"
+        ' 2>&1)"; rc=$?
+    [[ $rc -ne 0 && "$output" == *"tmux nie zachował katalogu repozytorium"* \
+        && "$(wc -l <"$log")" -eq 11 ]] \
+        && ! tmux -L "$SOCKET" has-session -t "=$session" 2>/dev/null \
+        && tmux -L "$SOCKET" has-session -t "=$sentinel" 2>/dev/null
+    result=$?
+    tmux -L "$SOCKET" kill-session -t "=$sentinel" >/dev/null 2>&1 || true
+    return "$result"
+}
+check "persistent terminal rejects persistent wrong cwd and removes only its new session" \
+    test_terminal_wrong_cwd_cleanup
+
 test_repository_identity_revalidation() {
     local session output rc
     session="$(terminal_name "$REPO_REPLACED" identity-check)"
