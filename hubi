@@ -861,7 +861,9 @@ start_terminal() {
         || ! tmux_cmd set-option -t "=$session:" @hubi-kind terminal \
         || ! tmux_cmd set-option -t "=$session:" @hubi-repo "$repo_key" \
         || ! tmux_cmd set-option -t "=$session:" @hubi-instance "$instance" \
-        || ! tmux_cmd set-window-option -t "=$session:" window-size largest; then
+        || ! tmux_cmd set-window-option -t "=$session:" window-size largest \
+        || ! tmux_cmd set-hook -t "=$session:" after-new-window \
+            'set-window-option window-size largest'; then
         printf 'Hubi: nie udało się zapisać metadanych terminala %s.\n' "$session" >&2
         tmux_cmd kill-session -t "=$session" >/dev/null 2>&1 || true
         pause_for_ack

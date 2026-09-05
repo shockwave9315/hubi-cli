@@ -116,6 +116,17 @@ test_multiple_terminals() {
 }
 check "multiple named terminals coexist in one repository" test_multiple_terminals
 
+test_new_windows_inherit_largest() {
+    local session new_window
+    session="$(terminal_name "$REPO_ONE" primary)"
+    [[ "$(tmux -L "$SOCKET" show-window-options -v -t "=$session:" window-size)" == largest ]] \
+        || return 1
+    new_window="$(tmux -L "$SOCKET" new-window -d -P -F '#{window_id}' -t "=$session:" -- bash)" \
+        || return 1
+    [[ "$(tmux -L "$SOCKET" show-window-options -v -t "$new_window" window-size)" == largest ]]
+}
+check "new persistent-terminal windows inherit largest sizing" test_new_windows_inherit_largest
+
 test_repo_isolation() {
     create_terminal "$REPO_TWO" primary >/dev/null 2>&1 \
         && terminal_exists "$REPO_ONE" primary \
