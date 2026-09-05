@@ -10,12 +10,14 @@ REPOS="$TEST_ROOT/repos"
 SOCKET="hubi-persistent-terminal-$$"
 REPO_ONE="terminal-one-$$"
 REPO_TWO="terminal-two-$$"
+REPO_REPLACED="terminal-replaced-$$"
 PASS_COUNT=0
 FAIL_COUNT=0
 
-mkdir -p "$REPOS/$REPO_ONE" "$REPOS/$REPO_TWO"
+mkdir -p "$REPOS/$REPO_ONE" "$REPOS/$REPO_TWO" "$REPOS/$REPO_REPLACED"
 git init -q "$REPOS/$REPO_ONE"
 git init -q "$REPOS/$REPO_TWO"
+git init -q "$REPOS/$REPO_REPLACED"
 
 cleanup() {
     tmux -L "$SOCKET" kill-server >/dev/null 2>&1 || true
@@ -126,6 +128,46 @@ test_new_windows_inherit_largest() {
     [[ "$(tmux -L "$SOCKET" show-window-options -v -t "$new_window" window-size)" == largest ]]
 }
 check "new persistent-terminal windows inherit largest sizing" test_new_windows_inherit_largest
+
+test_repository_identity_revalidation() {
+    local session output rc
+    session="$(terminal_name "$REPO_REPLACED" identity-check)"
+    output="$(hubi_env REPO_NAME="$REPO_REPLACED" REPO_PATH="$REPOS/$REPO_REPLACED" \
+        HUBI_FILE="$HUBI" bash -c '
+            source "$HUBI_FILE"
+            eval "$(declare -f revalidate_repo_for_start \
+                | sed "1s/revalidate_repo_for_start/original_revalidate_repo_for_start/")"
+            validation_calls=0
+            revalidate_repo_for_start() {
+                ((validation_calls += 1))
+                if (( validation_calls == 2 )); then
+                    mv -- "$REPO_PATH" "$REPO_PATH-old"
+                    mkdir -- "$REPO_PATH"
+                    git init -q "$REPO_PATH"
+                fi
+                original_revalidate_repo_for_start "$@"
+            }
+            attach_session() { :; }
+            pause_for_ack() { :; }
+            start_terminal "$REPO_NAME" identity-check
+        ' 2>&1)"; rc=$?
+    [[ $rc -ne 0 && "$output" == *"tożsamość repozytorium zmieniła się"* ]] \
+        && ! tmux -L "$SOCKET" has-session -t "=$session" 2>/dev/null
+}
+check "repository replacement aborts and removes the new terminal" test_repository_identity_revalidation
+
+test_stale_hubi_active_is_not_inherited() {
+    local session pane_pid inherited=0
+    tmux -L "$SOCKET" set-environment -g HUBI_ACTIVE 1 || return 1
+    create_terminal "$REPO_ONE" stale-env >/dev/null 2>&1 || return 1
+    session="$(terminal_name "$REPO_ONE" stale-env)"
+    pane_pid="$(tmux -L "$SOCKET" display-message -p -t "=$session:" '#{pane_pid}')"
+    [[ "$pane_pid" =~ ^[1-9][0-9]*$ ]] || return 1
+    if tr '\0' '\n' <"/proc/$pane_pid/environ" | grep -q '^HUBI_ACTIVE='; then inherited=1; fi
+    tmux -L "$SOCKET" kill-session -t "=$session" || return 1
+    (( inherited == 0 ))
+}
+check "new terminal Bash does not inherit stale HUBI_ACTIVE" test_stale_hubi_active_is_not_inherited
 
 test_repo_isolation() {
     create_terminal "$REPO_TWO" primary >/dev/null 2>&1 \

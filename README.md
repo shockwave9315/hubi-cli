@@ -147,7 +147,7 @@ python3 tests/adversarial.py
 
 At this revision the functional harness reports 16 tests and the adversarial
 suite contains 31 tests. The focused multi-instance harness reports 12 tests;
-the focused persistent-terminal harness reports 7 tests. All four totals must
+the focused persistent-terminal harness reports 10 tests. All four totals must
 be fully green for release review.
 
 The harness uses a unique tmux socket, disposable Git repositories, fake agent

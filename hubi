@@ -839,24 +839,40 @@ terminal_status() {
 }
 
 start_terminal() {
-    local repo_key="$1" instance="$2" session output
+    local repo_key="$1" instance="$2" session output directory expected_repo_id
     if ! validate_instance_name "$instance"; then
         printf 'Hubi: nieprawidłowa nazwa terminala: %s\n' "$instance" >&2
         return 2
     fi
     resolve_repo "$repo_key" || { pause_for_ack; return 2; }
     repo_key="$RESOLVED_REPO_KEY"
+    directory="$RESOLVED_REPO_DIR"
+    expected_repo_id="$RESOLVED_REPO_ID"
     if find_terminal_session "$repo_key" "$instance"; then
         attach_session "$FOUND_SESSION"
         return
     fi
     session="$(terminal_session_name "$repo_key" "$instance")" || return 2
-    if ! output="$(tmux_cmd new-session -d -s "$session" -c "$RESOLVED_REPO_DIR" -- bash 2>&1)"; then
+    sanitize_tmux_environment
+    revalidate_repo_for_start "$repo_key" "$directory" "$expected_repo_id" \
+        || { pause_for_ack; return 1; }
+    if ! output="$(tmux_cmd new-session -d -s "$session" -c "$directory" -- bash 2>&1)"; then
         printf 'Hubi: tmux nie utworzył terminala %s:\n%s\n' "$session" "$output" >&2
         pause_for_ack
         return 1
     fi
-    sanitize_tmux_environment
+    if ! revalidate_repo_for_start "$repo_key" "$directory" "$expected_repo_id"; then
+        tmux_cmd kill-session -t "=$session" >/dev/null 2>&1 || true
+        pause_for_ack
+        return 1
+    fi
+    if [[ "$(tmux_cmd display-message -p -t "=$session:" '#{pane_current_path}' 2>/dev/null || true)" \
+        != "$directory" ]]; then
+        printf 'Hubi: tmux nie zachował katalogu repozytorium %s; start został przerwany.\n' "$directory" >&2
+        tmux_cmd kill-session -t "=$session" >/dev/null 2>&1 || true
+        pause_for_ack
+        return 1
+    fi
     if ! tmux_cmd set-option -t "=$session:" @hubi-managed v4 \
         || ! tmux_cmd set-option -t "=$session:" @hubi-kind terminal \
         || ! tmux_cmd set-option -t "=$session:" @hubi-repo "$repo_key" \
