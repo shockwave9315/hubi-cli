@@ -27,7 +27,8 @@ cleanup() {
     lock_dir="${XDG_RUNTIME_DIR:-/tmp}/hubi-locks-$UID"
     if [[ -d "$lock_dir" ]]; then
         for agent in codex claude; do
-            for repo in "$PREFIX-repo-01" "$PREFIX-repo-02" "$PREFIX-repo-03"; do
+            for repo in "$PREFIX-repo-01" "$PREFIX-repo-02" "$PREFIX-repo-03" \
+                "$PREFIX-repo-04" "$PREFIX-repo-05"; do
                 digest="$(printf '%s' "$agent:$repo" | sha256sum | cut -c1-12)"
                 find "$lock_dir" -maxdepth 1 -type f -name "$digest.lock" -delete
             done
@@ -147,6 +148,59 @@ test_concurrent_start() {
     [[ $rc1 -eq 0 && $rc2 -eq 0 && $count -eq 1 ]]
 }
 check "concurrent startup converges on one session" test_concurrent_start
+
+test_agent_delayed_cwd_readiness() {
+    local repo="$PREFIX-repo-04" session log="$TEST_ROOT/agent-delayed-cwd.log"
+    local marker="$TEST_ROOT/agent-delayed-cwd.marker" result=0
+    # Environment variables intentionally expand in child Bash.
+    # shellcheck disable=SC2016
+    session="$(hubi_env REPO_NAME="$repo" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; agent_session_name codex "$REPO_NAME"')"
+    # Environment variables intentionally expand in child Bash.
+    # shellcheck disable=SC2016
+    hubi_env REPO_NAME="$repo" HUBI_FILE="$HUBI" \
+        HUBI_TMUX_BIN="$ROOT/tests/tmux_cwd_wrapper.sh" HUBI_TEST_REAL_TMUX=tmux \
+        HUBI_TEST_CWD_LOG="$log" HUBI_TEST_CWD_MARKER="$marker" HUBI_TEST_CWD_MODE=delayed \
+        bash -c '
+            source "$HUBI_FILE"; resolve_repo "$REPO_NAME"
+            ensure_agent_session codex "$RESOLVED_REPO_KEY" "$RESOLVED_REPO_DIR" "$CODEX_BIN"
+        ' >/dev/null 2>&1 || return 1
+    [[ "$(wc -l <"$log")" -ge 2 ]] \
+        && tmux -L "$SOCKET" has-session -t "=$session" 2>/dev/null || result=1
+    # Expansion is intentionally deferred to child Bash.
+    # shellcheck disable=SC2016
+    hubi_env REPO_NAME="$repo" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; stop_agent_now codex "$REPO_NAME"' >/dev/null 2>&1 || result=1
+    return "$result"
+}
+check "managed agent waits for delayed tmux cwd readiness" test_agent_delayed_cwd_readiness
+
+test_agent_wrong_cwd_cleanup() {
+    local repo="$PREFIX-repo-05" session sentinel="$PREFIX-agent-cwd-sentinel" output rc result
+    local log="$TEST_ROOT/agent-wrong-cwd.log" marker="$TEST_ROOT/agent-wrong-cwd.marker"
+    # Environment variables intentionally expand in child Bash.
+    # shellcheck disable=SC2016
+    session="$(hubi_env REPO_NAME="$repo" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; agent_session_name claude "$REPO_NAME"')"
+    tmux -L "$SOCKET" new-session -d -s "$sentinel" -- sleep 30 || return 1
+    # Environment variables intentionally expand in child Bash.
+    # shellcheck disable=SC2016
+    output="$(hubi_env REPO_NAME="$repo" HUBI_FILE="$HUBI" \
+        HUBI_TMUX_BIN="$ROOT/tests/tmux_cwd_wrapper.sh" HUBI_TEST_REAL_TMUX=tmux \
+        HUBI_TEST_CWD_LOG="$log" HUBI_TEST_CWD_MARKER="$marker" HUBI_TEST_CWD_MODE=wrong \
+        bash -c '
+            source "$HUBI_FILE"; resolve_repo "$REPO_NAME"
+            ensure_agent_session claude "$RESOLVED_REPO_KEY" "$RESOLVED_REPO_DIR" "$CLAUDE_BIN"
+        ' 2>&1)"; rc=$?
+    [[ $rc -ne 0 && "$output" == *"tmux nie zachował katalogu repozytorium"* \
+        && "$(wc -l <"$log")" -eq 11 ]] \
+        && ! tmux -L "$SOCKET" has-session -t "=$session" 2>/dev/null \
+        && tmux -L "$SOCKET" has-session -t "=$sentinel" 2>/dev/null
+    result=$?
+    tmux -L "$SOCKET" kill-session -t "=$sentinel" >/dev/null 2>&1 || true
+    return "$result"
+}
+check "managed agent rejects persistent wrong cwd and removes only its new session" test_agent_wrong_cwd_cleanup
 
 test_start_failure_evidence() {
     local repo="$PREFIX-repo-02" output
