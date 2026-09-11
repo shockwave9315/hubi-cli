@@ -26,6 +26,7 @@ cleanup() {
     fi
     tmux -L "$SOCKET" kill-server >/dev/null 2>&1 || true
     v5_test_server_stop "$TMUX_SERVICE" || true
+    if [[ -S "/tmp/tmux-$UID/$SOCKET" ]]; then unlink -- "/tmp/tmux-$UID/$SOCKET"; fi
     lock_dir="${XDG_RUNTIME_DIR:-/tmp}/hubi-locks-$UID"
     if [[ -d "$lock_dir" ]]; then
         for agent in codex claude; do
@@ -81,7 +82,8 @@ while :; do sleep 1; done
 EOF
 chmod +x "$TEST_ROOT/live-agent"
 
-# shellcheck source=tests/lib/v5_test_server.sh
+# The path is resolved from the runtime repository root.
+# shellcheck disable=SC1091
 source "$ROOT/tests/lib/v5_test_server.sh"
 v5_test_server_start "$TMUX_SERVICE" "$SOCKET" || {
     printf 'Hubi test tmux service did not start.\n' >&2

@@ -20,7 +20,8 @@ UNANCHORED_PID=""
 mkdir -p "$REPOS/$REPO_NAME" "$SOCKET_ROOT"
 git init -q "$REPOS/$REPO_NAME"
 
-# shellcheck source=tests/lib/v5_test_server.sh
+# The path is resolved from the runtime repository root.
+# shellcheck disable=SC1091
 source "$ROOT/tests/lib/v5_test_server.sh"
 
 cleanup() {

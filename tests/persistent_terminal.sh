@@ -28,6 +28,7 @@ cleanup() {
     done < <(tmux -L "$SOCKET" list-sessions -F '#{@hubi-scope}' 2>/dev/null || true)
     tmux -L "$SOCKET" kill-server >/dev/null 2>&1 || true
     v5_test_server_stop "$TMUX_SERVICE" || true
+    if [[ -S "/tmp/tmux-$UID/$SOCKET" ]]; then unlink -- "/tmp/tmux-$UID/$SOCKET"; fi
     if [[ -n "$TEST_ROOT" && "$TEST_ROOT" == /tmp/* && -d "$TEST_ROOT" ]]; then
         find "$TEST_ROOT" -depth -delete
     fi

@@ -61,7 +61,10 @@ printf 'loginctl %s\n' "$*" >>"$HUBI_TEST_LOG"
 [[ "${HUBI_TEST_LOGINCTL:-ok}" == ok ]] || exit 1
 case " $* " in
     *" --property=Linger --value "*) printf '%s\n' "${HUBI_TEST_LINGER:-yes}" ;;
-    *" --property=KillProcesses --value "*) printf '%s\n' "${HUBI_TEST_KILL_PROCESSES:-no}" ;;
+    *" --property=KillProcesses --value "*)
+        [[ "${HUBI_TEST_KILL_QUERY:-ok}" == ok ]] || exit 1
+        printf '%s\n' "${HUBI_TEST_KILL_PROCESSES:-no}"
+        ;;
     *) exit 93 ;;
 esac
 EOF
@@ -118,6 +121,15 @@ test_linger_query_error() {
         && "$output" == *"creation must fail closed"* ]]
 }
 check "doctor handles a linger query error deterministically" test_linger_query_error
+
+test_informational_warning() {
+    local output
+    set_cgroup hubi-tmux.service
+    output="$(doctor_env HUBI_TEST_KILL_QUERY=error "$HUBI" doctor 2>&1)" || return 1
+    [[ "$output" == *"KillUserProcesses:        unknown (information only)"* \
+        && "$output" == *"Summary: WARN"* ]]
+}
+check "doctor warns but does not gate on unknown KillUserProcesses" test_informational_warning
 
 test_broken_user_bus() {
     local output rc

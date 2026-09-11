@@ -153,11 +153,12 @@ hubi_doctor() {
     local linger="unknown" kill_processes="unknown" manager="unreachable"
     local service="inactive" pid="unavailable" cgroup="unavailable" ownership="FAIL"
     local exit_empty="unavailable" kill_capability="unavailable" tmux_version inventory
-    local failures=0
+    local failures=0 warnings=0
 
     tmux_version="$("$TMUX_BIN" -V 2>/dev/null || printf 'unavailable')"
     linger="$(linger_state 2>/dev/null || printf 'unknown')"
     kill_processes="$(kill_user_processes_state 2>/dev/null || printf 'unknown')"
+    [[ "$kill_processes" == "unknown" ]] && ((warnings += 1))
     if user_manager_available; then manager="reachable"; else ((failures += 1)); fi
     if hubi_service_active; then service="active"; else ((failures += 1)); fi
     if verify_hubi_server_ownership; then
@@ -198,6 +199,10 @@ hubi_doctor() {
         printf '  Linger could not be verified; creation must fail closed.\n'
     fi
     if (( failures == 0 )); then
+        if (( warnings > 0 )); then
+            printf 'Summary: WARN - ready for creation with %d informational warning(s).\n' "$warnings"
+            return 0
+        fi
         printf 'Summary: PASS - ready to create Hubi-managed work.\n'
         return 0
     fi

@@ -5,9 +5,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HUBI="$ROOT/hubi"
 TEST_ROOT="$(mktemp -d)"
 REPOS="$TEST_ROOT/repos"
-SOCKET="hubi-v4-tests-$$"
+SOCKET="hubi-v5-tests-$$"
 TMUX_SERVICE="hubiv5-test-run-$$.service"
-PREFIX="hubiv4test$$"
+PREFIX="hubiv5test$$"
 PASS_COUNT=0
 FAIL_COUNT=0
 
@@ -72,7 +72,8 @@ while :; do sleep 1; done
 EOF
 chmod +x "$TEST_ROOT/fake-agent"
 
-# shellcheck source=tests/lib/v5_test_server.sh
+# The path is resolved from the runtime repository root.
+# shellcheck disable=SC1091
 source "$ROOT/tests/lib/v5_test_server.sh"
 v5_test_server_start "$TMUX_SERVICE" "$SOCKET" || {
     printf 'Hubi test tmux service did not start.\n' >&2

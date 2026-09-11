@@ -201,17 +201,59 @@ New conversations invoke `codex` or
 Run the isolated test suite with:
 
 ```bash
+env -u HUBI_AGENT_INSTANCE bash -n hubi bashrc-autologin.sh tests/*.sh tests/lib/*.sh
+env -u HUBI_AGENT_INSTANCE shellcheck hubi bashrc-autologin.sh tests/*.sh tests/lib/*.sh
 ./tests/run.sh
-python3 tests/adversarial.py
+env -u HUBI_NOAUTO python3 tests/adversarial.py
 ./tests/multi_instance.sh
 ./tests/persistent_terminal.sh
+./tests/v5_doctor.sh
+./tests/v5_tmux_server.sh
+./tests/v5_ownership.sh
+./tests/v5_preflight.sh
+./tests/v5_lifetime.sh
 ```
 
 At this revision the functional harness reports 18 tests and the adversarial
 suite contains 31 tests. The focused multi-instance harness reports 12 tests;
-the focused persistent-terminal harness reports 12 tests. All four totals must
-be fully green for release review.
+the focused persistent-terminal harness reports 15 tests. The v5 doctor,
+server, ownership, preflight, and login-scope lifetime harnesses report 7, 7,
+6, 6, and 1 tests respectively. That is 103 behavior tests in total; every
+harness must be fully green for release review.
 
-The harness uses a unique tmux socket, disposable Git repositories, fake agent
-processes, and unique systemd scopes. It never attaches to or stops the default
-tmux server's Codex/Claude sessions.
+The harnesses use unique private tmux sockets, disposable Git repositories and
+processes, and exact test-only systemd units/scopes. They never address the
+production/default tmux socket, production `hubi-tmux.service`, or existing
+Hubi scopes. Tests require a reachable systemd user manager but do not require
+root and never change real linger settings.
+
+## Later production installation (do not run during repository development)
+
+This is a clean v5 cutover, not a live migration. First finish all v4 work and
+confirm that no v4 session needs to be preserved. From a reviewed v5 checkout,
+the proposed later installation sequence is:
+
+```bash
+cd "$HOME/repos/hubi-cli"
+install -d -m 700 "$HOME/.config/hubi"
+install -m 644 config/tmux-server.conf "$HOME/.config/hubi/tmux-server.conf"
+install -d -m 755 "$HOME/.config/systemd/user"
+install -m 644 systemd/user/hubi-tmux.service "$HOME/.config/systemd/user/hubi-tmux.service"
+
+# Run with the privileges required by this machine's login manager:
+loginctl enable-linger "$(id -un)"
+
+systemctl --user daemon-reload
+systemctl --user enable --now hubi-tmux.service
+./hubi doctor
+
+install -d -m 755 "$HOME/.local/bin"
+install -m 755 hubi "$HOME/.local/bin/hubi"
+"$HOME/.local/bin/hubi" doctor
+```
+
+Do not copy the repository's `tmux.conf` over `~/.tmux.conf`: the Hubi-owned
+server config deliberately sources the existing user file and applies its
+`exit-empty off` invariant afterward. No `.bashrc` change is required for this
+v5 runtime cutover. The default/v4 tmux socket and sessions are not migrated,
+stopped, or adopted by these steps.
