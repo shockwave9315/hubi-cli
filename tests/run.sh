@@ -6,6 +6,7 @@ HUBI="$ROOT/hubi"
 TEST_ROOT="$(mktemp -d)"
 REPOS="$TEST_ROOT/repos"
 SOCKET="hubi-v5-tests-$$"
+SOCKET_PATH="/tmp/tmux-$UID/$SOCKET"
 TMUX_SERVICE="hubiv5-test-run-$$.service"
 PREFIX="hubiv5test$$"
 PASS_COUNT=0
@@ -54,7 +55,7 @@ check() {
 hubi_env() {
     env -u HUBI_ACTIVE -u HUBI_AGENT_INSTANCE -u TMUX \
         HUBI_REPOS="$REPOS" \
-        HUBI_TMUX_SOCKET="$SOCKET" \
+        HUBI_TMUX_SOCKET_PATH="$SOCKET_PATH" \
         HUBI_TMUX_SERVICE="$TMUX_SERVICE" \
         HUBI_CODEX_BIN="$TEST_ROOT/fake-agent" \
         HUBI_CLAUDE_BIN="$TEST_ROOT/fake-agent" \
@@ -81,7 +82,7 @@ v5_test_server_start "$TMUX_SERVICE" "$SOCKET" || {
 }
 
 test_eof() {
-    timeout 2 env -u HUBI_ACTIVE -u HUBI_AGENT_INSTANCE -u TMUX HUBI_REPOS="$REPOS" HUBI_TMUX_SOCKET="$SOCKET" \
+    timeout 2 env -u HUBI_ACTIVE -u HUBI_AGENT_INSTANCE -u TMUX HUBI_REPOS="$REPOS" HUBI_TMUX_SOCKET_PATH="$SOCKET_PATH" \
         "$HUBI" </dev/null >/dev/null 2>&1
 }
 check "EOF exits without a loop" test_eof

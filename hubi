@@ -211,13 +211,7 @@ hubi_doctor() {
 }
 
 tmux_cmd() {
-    if [[ -n "${HUBI_TMUX_SOCKET:-}" ]]; then
-        # Compatibility seam for isolated pre-v5 test harnesses. Production
-        # always takes the explicit -S path below.
-        command env -u HUBI_ACTIVE "$TMUX_BIN" -N -L "$HUBI_TMUX_SOCKET" "$@"
-    else
-        command env -u HUBI_ACTIVE "$TMUX_BIN" -N -S "$(effective_hubi_socket)" "$@"
-    fi
+    command env -u HUBI_ACTIVE "$TMUX_BIN" -N -S "$(effective_hubi_socket)" "$@"
 }
 
 wait_for_pane_cwd() {

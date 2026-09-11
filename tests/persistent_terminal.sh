@@ -8,6 +8,7 @@ HUBI="$ROOT/hubi"
 TEST_ROOT="$(mktemp -d)"
 REPOS="$TEST_ROOT/repos"
 SOCKET="hubi-persistent-terminal-$$"
+SOCKET_PATH="/tmp/tmux-$UID/$SOCKET"
 TMUX_SERVICE="hubiv5-test-terminal-$$.service"
 REPO_ONE="terminal-one-$$"
 REPO_TWO="terminal-two-$$"
@@ -60,7 +61,7 @@ check() {
 hubi_env() {
     env -u HUBI_ACTIVE -u HUBI_AGENT_INSTANCE -u TMUX \
         HUBI_REPOS="$REPOS" \
-        HUBI_TMUX_SOCKET="$SOCKET" \
+        HUBI_TMUX_SOCKET_PATH="$SOCKET_PATH" \
         HUBI_TMUX_SERVICE="$TMUX_SERVICE" \
         HUBI_TMUX_BIN="$TEST_ROOT/tmux-clean" \
         "$@"

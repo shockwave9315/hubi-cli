@@ -9,6 +9,7 @@ TEST_ROOT="$(mktemp -d)"
 REPOS="$TEST_ROOT/repos"
 REPO_NAME="multi-instance-$$"
 SOCKET="hubi-multi-instance-$$"
+SOCKET_PATH="/tmp/tmux-$UID/$SOCKET"
 TMUX_SERVICE="hubiv5-test-multi-$$.service"
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -60,7 +61,7 @@ check() {
 hubi_env() {
     env -u HUBI_ACTIVE -u HUBI_AGENT_INSTANCE -u TMUX \
         HUBI_REPOS="$REPOS" \
-        HUBI_TMUX_SOCKET="$SOCKET" \
+        HUBI_TMUX_SOCKET_PATH="$SOCKET_PATH" \
         HUBI_TMUX_SERVICE="$TMUX_SERVICE" \
         HUBI_TMUX_BIN="$TEST_ROOT/tmux-clean" \
         HUBI_CODEX_BIN="$TEST_ROOT/live-agent" \
@@ -442,7 +443,8 @@ chmod +x "$TEST_ROOT/tmux-attach-log"
 test_attach_and_launcher_disappearance() {
     local expected
     expected="$(session_name codex review)"
-    env -u HUBI_ACTIVE -u TMUX HUBI_REPOS="$REPOS" HUBI_TMUX_SOCKET="$SOCKET" \
+    env -u HUBI_ACTIVE -u HUBI_AGENT_INSTANCE -u TMUX HUBI_REPOS="$REPOS" \
+        HUBI_TMUX_SOCKET_PATH="$SOCKET_PATH" \
         HUBI_TMUX_BIN="$TEST_ROOT/tmux-attach-log" HUBI_CODEX_BIN="$TEST_ROOT/live-agent" \
         "$HUBI" codex "$REPO_NAME" review </dev/null >/dev/null 2>&1 || true
     # Hubi now targets tmux with the exact-match "=" form so a sibling

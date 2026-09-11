@@ -126,6 +126,7 @@ class HubiAdversarialTests(unittest.TestCase):
         self.runtime.mkdir(mode=0o700)
         self.unique = f"red{os.getpid()}-{time.time_ns() % 1_000_000_000}"
         self.socket = f"hubi-adversarial-{self.unique}"
+        self.socket_path = f"/tmp/tmux-{os.getuid()}/{self.socket}"
         self.tmux_service = f"hubiv5-test-adv-{self.unique}.service"
         self.repo_name = f"{self.unique}-repo"
         self.repo = self.repos / self.repo_name
@@ -185,7 +186,7 @@ class HubiAdversarialTests(unittest.TestCase):
         self.env.update(
             {
                 "HUBI_REPOS": str(self.repos),
-                "HUBI_TMUX_SOCKET": self.socket,
+                "HUBI_TMUX_SOCKET_PATH": self.socket_path,
                 "HUBI_TMUX_SERVICE": self.tmux_service,
                 "HUBI_TMUX_BIN": str(self.tmux_wrapper),
                 "HUBI_CODEX_BIN": str(self.fake_agent),
