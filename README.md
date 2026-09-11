@@ -54,6 +54,16 @@ It uses tmux's no-start mode and never starts a server, service, session, or
 scope and never changes configuration. A failed linger query is treated as
 unknown and creation readiness fails closed.
 
+The versioned server templates are [`config/tmux-server.conf`](config/tmux-server.conf)
+and [`systemd/user/hubi-tmux.service`](systemd/user/hubi-tmux.service). They are
+intended to be installed later as `~/.config/hubi/tmux-server.conf` and
+`~/.config/systemd/user/hubi-tmux.service`; repository tests do not install or
+enable them. The Hubi config sources `~/.tmux.conf` first and then forces
+`exit-empty` off. The service runs `tmux -D` in the foreground on
+`$XDG_RUNTIME_DIR/tmux-$UID/hubi`, creates that private socket directory on a
+clean start, removes a stale socket after stop, and retains the audited
+`Restart=on-failure` policy.
+
 `REPO` must resolve to a Git repository root beneath `~/repos` (or
 `$HUBI_REPOS`). Both normal clones and Git worktrees are supported. Repository
 and session lists paginate after nine entries. Immediately before tmux and
