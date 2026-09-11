@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-HUBI_VERSION=4
+HUBI_VERSION=5
 HUBI_SCRIPT_PATH="$(realpath -e -- "${BASH_SOURCE[0]}")"
 REPOS_ROOT="${HUBI_REPOS:-$HOME/repos}"
 TMUX_BIN="${HUBI_TMUX_BIN:-tmux}"
 SYSTEMD_RUN_BIN="${HUBI_SYSTEMD_RUN_BIN:-systemd-run}"
 SYSTEMCTL_BIN="${HUBI_SYSTEMCTL_BIN:-systemctl}"
+LOGINCTL_BIN="${HUBI_LOGINCTL_BIN:-loginctl}"
 FLOCK_BIN="${HUBI_FLOCK_BIN:-flock}"
+HUBI_TMUX_SERVICE="${HUBI_TMUX_SERVICE:-hubi-tmux.service}"
+HUBI_PROC_ROOT="${HUBI_PROC_ROOT:-/proc}"
 
 CODEX_BIN="${HUBI_CODEX_BIN:-$HOME/.npm-global/bin/codex}"
 [[ -x "$CODEX_BIN" ]] || CODEX_BIN="$(command -v codex 2>/dev/null || true)"
@@ -25,6 +28,149 @@ ENSURED_SESSION=""
 ATTACH_MODE=""
 HUBI_LOCK_TIMEOUT="${HUBI_LOCK_TIMEOUT:-3}"
 HUBI_PASTE_TIMEOUT="${HUBI_PASTE_TIMEOUT:-5}"
+
+effective_hubi_socket() {
+    if [[ -n "${HUBI_TMUX_SOCKET_PATH:-}" ]]; then
+        printf '%s' "$HUBI_TMUX_SOCKET_PATH"
+    else
+        printf '%s/tmux-%s/hubi' "${XDG_RUNTIME_DIR:-/run/user/$UID}" "$UID"
+    fi
+}
+
+# Inspection of the dedicated v5 server must never turn into server creation.
+# tmux 3.6b's global -N option makes that guarantee explicit.
+tmux_inspect_cmd() {
+    command env -u HUBI_ACTIVE "$TMUX_BIN" -N -S "$(effective_hubi_socket)" "$@"
+}
+
+current_login_user() { id -un; }
+
+linger_state() {
+    local user value
+    user="$(current_login_user)" || return 1
+    value="$("$LOGINCTL_BIN" show-user "$user" --property=Linger --value 2>/dev/null)" || return 1
+    case "$value" in yes|no) printf '%s' "$value" ;; *) return 1 ;; esac
+}
+
+kill_user_processes_state() {
+    local user value
+    user="$(current_login_user)" || return 1
+    value="$("$LOGINCTL_BIN" show-user "$user" --property=KillProcesses --value 2>/dev/null)" || return 1
+    [[ -n "$value" ]] || return 1
+    printf '%s' "$value"
+}
+
+user_manager_available() {
+    "$SYSTEMCTL_BIN" --user show-environment >/dev/null 2>&1
+}
+
+scope_kill_capability_available() {
+    local help
+    user_manager_available || return 1
+    help="$("$SYSTEMCTL_BIN" kill --help 2>&1 || true)"
+    [[ "$help" == *"--kill-whom=WHOM"* && "$help" == *"--signal=SIGNAL"* ]]
+}
+
+hubi_service_active() {
+    "$SYSTEMCTL_BIN" --user is-active --quiet "$HUBI_TMUX_SERVICE" 2>/dev/null
+}
+
+hubi_server_pid() {
+    local pid
+    pid="$(tmux_inspect_cmd display-message -p '#{pid}' 2>/dev/null)" || return 1
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+    printf '%s' "$pid"
+}
+
+server_cgroup_for_pid() {
+    local pid="$1" cgroup
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+    [[ -r "$HUBI_PROC_ROOT/$pid/cgroup" ]] || return 1
+    cgroup="$(awk -F: '$1 == "0" { print $3; exit }' "$HUBI_PROC_ROOT/$pid/cgroup")"
+    [[ -n "$cgroup" ]] || return 1
+    printf '%s' "$cgroup"
+}
+
+HUBI_SERVER_PID=""
+HUBI_SERVER_CGROUP=""
+HUBI_OWNERSHIP_VERDICT="FAIL"
+
+verify_hubi_server_ownership() {
+    local pid cgroup
+    HUBI_SERVER_PID=""
+    HUBI_SERVER_CGROUP=""
+    HUBI_OWNERSHIP_VERDICT="FAIL"
+    hubi_service_active || return 1
+    pid="$(hubi_server_pid)" || return 1
+    cgroup="$(server_cgroup_for_pid "$pid")" || return 1
+    HUBI_SERVER_PID="$pid"
+    HUBI_SERVER_CGROUP="$cgroup"
+    if [[ "$cgroup" != */"$HUBI_TMUX_SERVICE" ]]; then
+        return 1
+    fi
+    HUBI_OWNERSHIP_VERDICT="PASS"
+}
+
+hubi_scope_inventory() {
+    "$SYSTEMCTL_BIN" --user list-units --all --type=scope --no-legend --plain 2>/dev/null \
+        | awk '$1 ~ /^hubi-(codex|claude|terminal)-.*\.scope$/ { print $1 " " $3 " " $4 }'
+}
+
+hubi_doctor() {
+    local linger="unknown" kill_processes="unknown" manager="unreachable"
+    local service="inactive" pid="unavailable" cgroup="unavailable" ownership="FAIL"
+    local exit_empty="unavailable" kill_capability="unavailable" tmux_version inventory
+    local failures=0
+
+    tmux_version="$("$TMUX_BIN" -V 2>/dev/null || printf 'unavailable')"
+    linger="$(linger_state 2>/dev/null || printf 'unknown')"
+    kill_processes="$(kill_user_processes_state 2>/dev/null || printf 'unknown')"
+    if user_manager_available; then manager="reachable"; else ((failures += 1)); fi
+    if hubi_service_active; then service="active"; else ((failures += 1)); fi
+    if verify_hubi_server_ownership; then
+        pid="$HUBI_SERVER_PID"
+        cgroup="$HUBI_SERVER_CGROUP"
+        ownership="$HUBI_OWNERSHIP_VERDICT"
+    else
+        [[ -n "$HUBI_SERVER_PID" ]] && pid="$HUBI_SERVER_PID"
+        [[ -n "$HUBI_SERVER_CGROUP" ]] && cgroup="$HUBI_SERVER_CGROUP"
+        ((failures += 1))
+    fi
+    exit_empty="$(tmux_inspect_cmd show-options -gv exit-empty 2>/dev/null || printf 'unavailable')"
+    [[ "$exit_empty" == "off" ]] || ((failures += 1))
+    if scope_kill_capability_available; then kill_capability="available"; else ((failures += 1)); fi
+    [[ "$linger" == "yes" ]] || ((failures += 1))
+    inventory="$(hubi_scope_inventory || true)"
+
+    printf 'Hubi doctor\n'
+    printf '  Hubi version:             %s\n' "$HUBI_VERSION"
+    printf '  tmux version:             %s\n' "$tmux_version"
+    printf '  Hubi socket:              %s\n' "$(effective_hubi_socket)"
+    printf '  Linger:                   %s\n' "$linger"
+    printf '  KillUserProcesses:        %s (information only)\n' "$kill_processes"
+    printf '  systemd user manager:     %s\n' "$manager"
+    printf '  %s:      %s\n' "$HUBI_TMUX_SERVICE" "$service"
+    printf '  tmux server PID:          %s\n' "$pid"
+    printf '  tmux server cgroup:       %s\n' "$cgroup"
+    printf '  server ownership:         %s\n' "$ownership"
+    printf '  exit-empty:               %s\n' "$exit_empty"
+    printf '  full-cgroup kill:         %s\n' "$kill_capability"
+    printf '  managed scopes:\n'
+    if [[ -n "$inventory" ]]; then printf '%s\n' "$inventory" | sed 's/^/    /'; else printf '    (none)\n'; fi
+
+    if [[ "$linger" == "no" ]]; then
+        printf '  Remediation: loginctl enable-linger %s (run with appropriate privileges)\n' \
+            "$(current_login_user 2>/dev/null || printf USER)"
+    elif [[ "$linger" == "unknown" ]]; then
+        printf '  Linger could not be verified; creation must fail closed.\n'
+    fi
+    if (( failures == 0 )); then
+        printf 'Summary: PASS - ready to create Hubi-managed work.\n'
+        return 0
+    fi
+    printf 'Summary: FAIL - not ready to create Hubi-managed work (%d failed checks).\n' "$failures"
+    return 1
+}
 
 tmux_cmd() {
     if [[ -n "${HUBI_TMUX_SOCKET:-}" ]]; then
@@ -1238,7 +1384,8 @@ main_menu() {
 
 usage() {
     printf '%s\n' 'Użycie:' '  hubi' '  hubi codex REPO [INSTANCE [new|resume]]' \
-        '  hubi claude REPO [INSTANCE [new|resume]]' '  hubi shell REPO' '  hubi sessions'
+        '  hubi claude REPO [INSTANCE [new|resume]]' '  hubi shell REPO' '  hubi sessions' \
+        '  hubi doctor'
 }
 
 hubi_main() {
@@ -1261,6 +1408,7 @@ hubi_main() {
             ;;
         shell) if (( $# != 2 )); then usage >&2; rc=2; else project_shell "$2" || rc=$?; fi ;;
         sessions) if (( $# != 1 )); then usage >&2; rc=2; else sessions_menu || rc=$?; fi ;;
+        doctor) if (( $# != 1 )); then usage >&2; rc=2; else hubi_doctor || rc=$?; fi ;;
         *) usage >&2; rc=2 ;;
     esac
     return "$rc"

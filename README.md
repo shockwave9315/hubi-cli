@@ -1,13 +1,26 @@
-# Hubi v4
+# Hubi v5
 
 Hubi is the SSH launcher for the ai-devbox. The menu itself and temporary
-shells run outside tmux; long-lived Codex and Claude agents and persistent
-project terminals use tmux. Detaching or losing SSH therefore leaves them
-running.
+shells run outside tmux. Long-lived Codex and Claude agents and persistent
+project terminals run beneath the lingering systemd user manager and use a
+dedicated, systemd-owned tmux server. SSH, the Hubi launcher, and tmux clients
+are only a disposable control plane.
 
 This repository is development-only. Installation targets such as
 `~/.local/bin/hubi`, `~/.tmux.conf`, and `~/.bashrc` must only be updated in a
 separate, explicitly approved installation step.
+
+## Reliability contract
+
+Hubi v5 supports continued operation after loss of any or all SSH clients,
+network connectivity, the Hubi launcher, or tmux client processes while the
+Debian container and the user's systemd manager remain alive. This includes
+abrupt TCP loss and simultaneous disappearance of every SSH login.
+
+Hubi does not guarantee restoration after a tmux server crash, a user systemd
+manager restart or `terminate-user`, or a container/host reboot. Linger must be
+enabled for the Hubi user; `KillUserProcesses` is diagnostic information only
+and is not a v5 persistence requirement.
 
 ## Use
 
@@ -30,7 +43,16 @@ hubi codex REPO [INSTANCE [new|resume]]
 hubi claude REPO [INSTANCE [new|resume]]
 hubi shell REPO
 hubi sessions
+hubi doctor
 ```
+
+`hubi doctor` is a read-only readiness report. It displays the Hubi and tmux
+versions, dedicated socket, linger and informational `KillUserProcesses`
+states, user-manager reachability, service state, tmux PID and cgroup ownership,
+effective `exit-empty`, full-cgroup kill support, and managed-scope inventory.
+It uses tmux's no-start mode and never starts a server, service, session, or
+scope and never changes configuration. A failed linger query is treated as
+unknown and creation readiness fails closed.
 
 `REPO` must resolve to a Git repository root beneath `~/repos` (or
 `$HUBI_REPOS`). Both normal clones and Git worktrees are supported. Repository
