@@ -519,7 +519,7 @@ class HubiAdversarialTests(unittest.TestCase):
         unsupported.write_text(
             "#!/usr/bin/env bash\n"
             "if [[ \"$1\" == kill && \"$2\" == --help ]]; then echo 'no cgroup kill'; exit 0; fi\n"
-            "exit 1\n"
+            "exec /usr/bin/systemctl \"$@\"\n"
         )
         unsupported.chmod(0o755)
         result = self.bash(

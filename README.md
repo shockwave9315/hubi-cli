@@ -165,8 +165,15 @@ Runtime dependencies are Bash, Git, tmux, core Debian utilities, and a running
 systemd user manager (`systemd-run --user` / `systemctl --user`). Claude keeps
 `--permission-mode bypassPermissions`; Codex receives no added permission flag.
 Both programs and their arguments are passed as separate argv elements. Hubi
-checks full-cgroup kill support before creating a managed agent and fails
-closed if the local systemd interface cannot provide it.
+probes the real systemd user-manager bus and checks full-cgroup kill support
+before creating managed work. Creation also requires a positively verified
+`Linger=yes`, an active `hubi-tmux.service`, and exact server cgroup ownership.
+An unavailable bus, unavailable kill semantics, `Linger=no` or unknown linger
+state, inactive service, stale socket, or ownership mismatch fails closed.
+Hubi does not enable linger, run `sudo`, start services, or change systemd or
+logind configuration. When linger is disabled it prints the remediation command
+`loginctl enable-linger USER`, which must be run separately with the appropriate
+privileges for the machine.
 
 New conversations invoke `codex` or
 `claude --permission-mode bypassPermissions`. Resume invokes `codex resume` or

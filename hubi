@@ -118,6 +118,31 @@ require_anchored_server() {
     return 1
 }
 
+require_linger() {
+    local state user
+    user="$(current_login_user 2>/dev/null || printf USER)"
+    if ! state="$(linger_state)"; then
+        printf 'Hubi: nie można potwierdzić stanu Linger dla użytkownika %s; odmowa utworzenia pracy.\n' \
+            "$user" >&2
+        return 1
+    fi
+    if [[ "$state" != "yes" ]]; then
+        printf 'Hubi: Linger=no dla użytkownika %s; odmowa utworzenia pracy.\n' "$user" >&2
+        printf 'Hubi: uruchom z odpowiednimi uprawnieniami: loginctl enable-linger %s\n' "$user" >&2
+        return 1
+    fi
+}
+
+runtime_creation_preflight() {
+    if ! user_manager_available; then
+        printf 'Hubi: magistrala systemd --user jest niedostępna; odmowa utworzenia pracy.\n' >&2
+        return 1
+    fi
+    require_linger || return 1
+    require_scope_kill_capability || return 1
+    require_anchored_server || return 1
+}
+
 hubi_scope_inventory() {
     "$SYSTEMCTL_BIN" --user list-units --all --type=scope --no-legend --plain 2>/dev/null \
         | awk '$1 ~ /^hubi-(codex|claude|terminal)-.*\.scope$/ { print $1 " " $3 " " $4 }'
@@ -679,7 +704,7 @@ ensure_agent_session() {
     fi
     session="$(agent_session_name "$agent" "$repo_key" "$instance")"
     expected_repo_id="$RESOLVED_REPO_ID"
-    require_scope_kill_capability || return 1
+    runtime_creation_preflight || return 1
     revalidate_repo_for_start "$repo_key" "$directory" "$expected_repo_id" || return 1
     locks="$(lock_root)" || { printf 'Hubi: nie można utworzyć katalogu blokad startowych.\n' >&2; return 1; }
     if [[ "$instance" == "primary" ]]; then
@@ -858,6 +883,10 @@ scope_is_active() { "$SYSTEMCTL_BIN" --user is-active --quiet "$1" 2>/dev/null; 
 
 require_scope_kill_capability() {
     local help
+    if ! user_manager_available; then
+        printf 'Hubi: magistrala systemd --user jest niedostępna; nie można zagwarantować pełnego kill cgroup.\n' >&2
+        return 1
+    fi
     help="$("$SYSTEMCTL_BIN" kill --help 2>&1 || true)"
     if [[ "$help" != *"--kill-whom=WHOM"* || "$help" != *"--signal=SIGNAL"* ]]; then
         printf 'Hubi: ten systemctl nie obsługuje wymaganego zabijania pełnego cgroup (--kill-whom=all).\n' >&2
@@ -990,6 +1019,7 @@ start_terminal() {
         attach_session "$FOUND_SESSION"
         return
     fi
+    runtime_creation_preflight || { pause_for_ack; return 1; }
     session="$(terminal_session_name "$repo_key" "$instance")" || return 2
     sanitize_tmux_environment
     revalidate_repo_for_start "$repo_key" "$directory" "$expected_repo_id" \
