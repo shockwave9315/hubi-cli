@@ -78,15 +78,13 @@ Agent states are:
 - `● ATTACHED (N)` — the agent is alive with N attached clients.
 - `⚠ EXITED` — the agent ended, but its pane and final output were retained.
 - `⚠ ORPHANED` — the systemd scope is alive but its tmux session is missing.
-- `⚠ LEGACY/UNMANAGED` — a matching pre-v4 session is available only for an
-  explicitly confirmed attach and is never managed by v4 lifecycle actions.
 
 Selecting an `EXITED` agent opens the retained terminal output. Use the
 project's stop action to discard that retained session before starting it
 again.
 
 Each project has a `primary` Codex instance and a `primary` Claude instance,
-which keep the exact v4 tmux session and systemd scope names. The project's
+with deterministic tmux session and systemd scope names. The project's
 Instances menu can create additional names matching
 `^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$`, list secondary instances from managed tmux
 metadata, and also recover secondary `ORPHANED` instances from active systemd
@@ -118,7 +116,7 @@ not changed.
 
 ## Lifecycle and signals
 
-Every v4 agent starts in a uniquely named `systemd --user` scope. Stopping it
+Every v5 agent starts in a uniquely named `systemd --user` scope. Stopping it
 sends Ctrl+C first, waits for a bounded grace period, then signals the complete
 scope with TERM and finally KILL if necessary. This cgroup boundary includes
 descendants that create new process groups. Codex and Claude use separate tmux
@@ -133,10 +131,16 @@ restart can recover.
 
 Hubi preserves tmux and systemd diagnostics when startup or attachment fails.
 A failed/ended pane remains available as `EXITED` rather than disappearing.
-Pre-v4 tmux session names are recognized as legacy/unmanaged for migration.
-They require an explicit attach confirmation and did not start inside a v4
-scope, so Hubi refuses to stop them automatically rather than risk leaving
-unidentified descendants behind.
+V5 is intentionally a clean start: it does not enumerate, route to, migrate,
+or stop sessions on the default/v4 socket and has no dual-socket mode.
+
+All production tmux client operations use the one dedicated Hubi socket with
+tmux 3.6b's `-N` no-start option. New work is created only after Hubi verifies
+that `hubi-tmux.service` is active, reads the server PID through that socket,
+and proves that `/proc/PID/cgroup` ends in the exact owning service. The
+ownership check and `-N` are separate defenses: if the service disappears
+after verification, the creation command fails instead of auto-spawning an
+unanchored tmux server.
 
 Launcher signal behavior is explicit:
 

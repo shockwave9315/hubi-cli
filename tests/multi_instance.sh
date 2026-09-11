@@ -9,6 +9,7 @@ TEST_ROOT="$(mktemp -d)"
 REPOS="$TEST_ROOT/repos"
 REPO_NAME="multi-instance-$$"
 SOCKET="hubi-multi-instance-$$"
+TMUX_SERVICE="hubiv5-test-multi-$$.service"
 PASS_COUNT=0
 FAIL_COUNT=0
 
@@ -24,6 +25,7 @@ cleanup() {
         done < <(tmux -L "$SOCKET" list-sessions -F '#{@hubi-scope}' 2>/dev/null || true)
     fi
     tmux -L "$SOCKET" kill-server >/dev/null 2>&1 || true
+    v5_test_server_stop "$TMUX_SERVICE" || true
     lock_dir="${XDG_RUNTIME_DIR:-/tmp}/hubi-locks-$UID"
     if [[ -d "$lock_dir" ]]; then
         for agent in codex claude; do
@@ -55,9 +57,10 @@ check() {
 }
 
 hubi_env() {
-    env -u HUBI_ACTIVE -u TMUX \
+    env -u HUBI_ACTIVE -u HUBI_AGENT_INSTANCE -u TMUX \
         HUBI_REPOS="$REPOS" \
         HUBI_TMUX_SOCKET="$SOCKET" \
+        HUBI_TMUX_SERVICE="$TMUX_SERVICE" \
         HUBI_TMUX_BIN="$TEST_ROOT/tmux-clean" \
         HUBI_CODEX_BIN="$TEST_ROOT/live-agent" \
         HUBI_CLAUDE_BIN="$TEST_ROOT/live-agent" \
@@ -77,6 +80,13 @@ trap 'exit 0' INT TERM
 while :; do sleep 1; done
 EOF
 chmod +x "$TEST_ROOT/live-agent"
+
+# shellcheck source=tests/lib/v5_test_server.sh
+source "$ROOT/tests/lib/v5_test_server.sh"
+v5_test_server_start "$TMUX_SERVICE" "$SOCKET" || {
+    printf 'Hubi test tmux service did not start.\n' >&2
+    exit 1
+}
 
 session_name() {
     hubi_env AGENT="$1" INSTANCE="$2" REPO_NAME="$REPO_NAME" HUBI_FILE="$HUBI" bash -c \
@@ -189,18 +199,18 @@ start_instance codex review review >/dev/null 2>&1
 start_instance codex upstream upstream >/dev/null 2>&1
 start_instance claude review claude-review >/dev/null 2>&1
 
-test_existing_primary_metadata_compatibility() {
-    local primary found
+test_primary_metadata() {
+    local primary found stored_instance
     primary="$(session_name codex primary)"
-    tmux -L "$SOCKET" set-option -u -t "$primary" @hubi-instance
+    stored_instance="$(tmux -L "$SOCKET" show-option -qv -t "$primary" @hubi-instance)"
     found="$(hubi_env REPO_NAME="$REPO_NAME" HUBI_FILE="$HUBI" bash -c '
         source "$HUBI_FILE"
         find_agent_session codex "$REPO_NAME" primary || exit 1
-        printf "%s|%s" "$FOUND_SESSION" "$FOUND_SESSION_KIND"
+        printf "%s" "$FOUND_SESSION"
     ')"
-    [[ "$found" == "$primary|managed" ]] && scope_active codex primary
+    [[ "$stored_instance" == primary && "$found" == "$primary" ]] && scope_active codex primary
 }
-check "existing v4 primary metadata remains compatible" test_existing_primary_metadata_compatibility
+check "v5 primary metadata is explicit and discoverable" test_primary_metadata
 
 test_same_agent_siblings() {
     session_exists codex primary && session_exists codex review && session_exists codex upstream \

@@ -8,6 +8,7 @@ HUBI="$ROOT/hubi"
 TEST_ROOT="$(mktemp -d)"
 REPOS="$TEST_ROOT/repos"
 SOCKET="hubi-persistent-terminal-$$"
+TMUX_SERVICE="hubiv5-test-terminal-$$.service"
 REPO_ONE="terminal-one-$$"
 REPO_TWO="terminal-two-$$"
 REPO_REPLACED="terminal-replaced-$$"
@@ -21,6 +22,7 @@ git init -q "$REPOS/$REPO_REPLACED"
 
 cleanup() {
     tmux -L "$SOCKET" kill-server >/dev/null 2>&1 || true
+    v5_test_server_stop "$TMUX_SERVICE" || true
     if [[ -n "$TEST_ROOT" && "$TEST_ROOT" == /tmp/* && -d "$TEST_ROOT" ]]; then
         find "$TEST_ROOT" -depth -delete
     fi
@@ -33,6 +35,13 @@ exec tmux -f /dev/null "$@"
 EOF
 chmod +x "$TEST_ROOT/tmux-clean"
 
+# shellcheck source=tests/lib/v5_test_server.sh
+source "$ROOT/tests/lib/v5_test_server.sh"
+v5_test_server_start "$TMUX_SERVICE" "$SOCKET" || {
+    printf 'Hubi test tmux service did not start.\n' >&2
+    exit 1
+}
+
 pass() { printf 'ok - %s\n' "$1"; ((PASS_COUNT += 1)); }
 fail() { printf 'not ok - %s\n' "$1" >&2; ((FAIL_COUNT += 1)); }
 check() {
@@ -42,9 +51,10 @@ check() {
 }
 
 hubi_env() {
-    env -u HUBI_ACTIVE -u TMUX \
+    env -u HUBI_ACTIVE -u HUBI_AGENT_INSTANCE -u TMUX \
         HUBI_REPOS="$REPOS" \
         HUBI_TMUX_SOCKET="$SOCKET" \
+        HUBI_TMUX_SERVICE="$TMUX_SERVICE" \
         HUBI_TMUX_BIN="$TEST_ROOT/tmux-clean" \
         "$@"
 }
@@ -103,7 +113,7 @@ test_multiple_terminals() {
         && terminal_exists "$REPO_ONE" primary \
         && terminal_exists "$REPO_ONE" matrix \
         && [[ "$(tmux -L "$SOCKET" list-sessions -F '#S' | grep -Fxc "$primary")" -eq 1 ]] \
-        && [[ "$(tmux -L "$SOCKET" show-option -qv -t "=$primary:" @hubi-managed)" == v4 ]] \
+        && [[ "$(tmux -L "$SOCKET" show-option -qv -t "=$primary:" @hubi-managed)" == v5 ]] \
         && [[ "$(tmux -L "$SOCKET" show-option -qv -t "=$primary:" @hubi-kind)" == terminal ]] \
         && [[ "$(tmux -L "$SOCKET" show-option -qv -t "=$primary:" @hubi-repo)" == "$REPO_ONE" ]] \
         && [[ "$(tmux -L "$SOCKET" show-option -qv -t "=$primary:" @hubi-instance)" == primary ]] \
@@ -241,12 +251,12 @@ test_exact_stop_isolation() {
     agent_codex="hubi-codex-test-$$"
     agent_claude="hubi-claude-test-$$"
     tmux -L "$SOCKET" new-session -d -s "$agent_codex" -- bash
-    tmux -L "$SOCKET" set-option -t "=$agent_codex:" @hubi-managed v4
+    tmux -L "$SOCKET" set-option -t "=$agent_codex:" @hubi-managed v5
     tmux -L "$SOCKET" set-option -t "=$agent_codex:" @hubi-agent codex
     tmux -L "$SOCKET" set-option -t "=$agent_codex:" @hubi-repo "$REPO_ONE"
     tmux -L "$SOCKET" set-option -t "=$agent_codex:" @hubi-instance primary
     tmux -L "$SOCKET" new-session -d -s "$agent_claude" -- bash
-    tmux -L "$SOCKET" set-option -t "=$agent_claude:" @hubi-managed v4
+    tmux -L "$SOCKET" set-option -t "=$agent_claude:" @hubi-managed v5
     tmux -L "$SOCKET" set-option -t "=$agent_claude:" @hubi-agent claude
     tmux -L "$SOCKET" set-option -t "=$agent_claude:" @hubi-repo "$REPO_ONE"
     tmux -L "$SOCKET" set-option -t "=$agent_claude:" @hubi-instance primary
@@ -265,12 +275,12 @@ test_discovery() {
     invalid="$(terminal_name "$REPO_ONE" valid-name)"
     tmux -L "$SOCKET" new-session -d -s "$arbitrary" -- bash
     tmux -L "$SOCKET" new-session -d -s "$foreign" -- bash
-    tmux -L "$SOCKET" set-option -t "=$foreign:" @hubi-managed v4
+    tmux -L "$SOCKET" set-option -t "=$foreign:" @hubi-managed v5
     tmux -L "$SOCKET" set-option -t "=$foreign:" @hubi-kind terminal
     tmux -L "$SOCKET" set-option -t "=$foreign:" @hubi-repo "$REPO_TWO"
     tmux -L "$SOCKET" set-option -t "=$foreign:" @hubi-instance foreign
     tmux -L "$SOCKET" new-session -d -s "$invalid" -- bash
-    tmux -L "$SOCKET" set-option -t "=$invalid:" @hubi-managed v4
+    tmux -L "$SOCKET" set-option -t "=$invalid:" @hubi-managed v5
     tmux -L "$SOCKET" set-option -t "=$invalid:" @hubi-kind terminal
     tmux -L "$SOCKET" set-option -t "=$invalid:" @hubi-repo "$REPO_ONE"
     tmux -L "$SOCKET" set-option -t "=$invalid:" @hubi-instance 'bad name'

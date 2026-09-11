@@ -22,7 +22,6 @@ RESOLVED_REPO_DIR=""
 RESOLVED_REPO_KEY=""
 RESOLVED_REPO_ID=""
 FOUND_SESSION=""
-FOUND_SESSION_KIND=""
 FOUND_PANE=""
 ENSURED_SESSION=""
 ATTACH_MODE=""
@@ -40,7 +39,7 @@ effective_hubi_socket() {
 # Inspection of the dedicated v5 server must never turn into server creation.
 # tmux 3.6b's global -N option makes that guarantee explicit.
 tmux_inspect_cmd() {
-    command env -u HUBI_ACTIVE "$TMUX_BIN" -N -S "$(effective_hubi_socket)" "$@"
+    tmux_cmd "$@"
 }
 
 current_login_user() { id -un; }
@@ -111,6 +110,14 @@ verify_hubi_server_ownership() {
     HUBI_OWNERSHIP_VERDICT="PASS"
 }
 
+require_anchored_server() {
+    if verify_hubi_server_ownership; then return 0; fi
+    printf 'Hubi: dedykowany serwer tmux nie jest aktywnym serwerem należącym dokładnie do %s.\n' \
+        "$HUBI_TMUX_SERVICE" >&2
+    printf 'Hubi: odmowa utworzenia pracy; uruchom "hubi doctor" po poprawnej instalacji usługi.\n' >&2
+    return 1
+}
+
 hubi_scope_inventory() {
     "$SYSTEMCTL_BIN" --user list-units --all --type=scope --no-legend --plain 2>/dev/null \
         | awk '$1 ~ /^hubi-(codex|claude|terminal)-.*\.scope$/ { print $1 " " $3 " " $4 }'
@@ -174,9 +181,11 @@ hubi_doctor() {
 
 tmux_cmd() {
     if [[ -n "${HUBI_TMUX_SOCKET:-}" ]]; then
-        command env -u HUBI_ACTIVE "$TMUX_BIN" -L "$HUBI_TMUX_SOCKET" "$@"
+        # Compatibility seam for isolated pre-v5 test harnesses. Production
+        # always takes the explicit -S path below.
+        command env -u HUBI_ACTIVE "$TMUX_BIN" -N -L "$HUBI_TMUX_SOCKET" "$@"
     else
-        command env -u HUBI_ACTIVE "$TMUX_BIN" "$@"
+        command env -u HUBI_ACTIVE "$TMUX_BIN" -N -S "$(effective_hubi_socket)" "$@"
     fi
 }
 
@@ -435,7 +444,7 @@ find_terminal_session() {
     kind="$(tmux_cmd show-option -qv -t "=$session:" @hubi-kind 2>/dev/null || true)"
     stored_repo="$(tmux_cmd show-option -qv -t "=$session:" @hubi-repo 2>/dev/null || true)"
     stored_instance="$(tmux_cmd show-option -qv -t "=$session:" @hubi-instance 2>/dev/null || true)"
-    if [[ "$managed" == "v4" && "$kind" == "terminal" && "$stored_repo" == "$repo_key" \
+    if [[ "$managed" == "v5" && "$kind" == "terminal" && "$stored_repo" == "$repo_key" \
         && "$stored_instance" == "$instance" ]]; then
         FOUND_SESSION="$session"
         return 0
@@ -451,7 +460,7 @@ terminal_list() {
         kind="$(tmux_cmd show-option -qv -t "=$session:" @hubi-kind 2>/dev/null || true)"
         stored_repo="$(tmux_cmd show-option -qv -t "=$session:" @hubi-repo 2>/dev/null || true)"
         instance="$(tmux_cmd show-option -qv -t "=$session:" @hubi-instance 2>/dev/null || true)"
-        if [[ "$managed" == "v4" && "$kind" == "terminal" && "$stored_repo" == "$repo_key" ]] \
+        if [[ "$managed" == "v5" && "$kind" == "terminal" && "$stored_repo" == "$repo_key" ]] \
             && validate_instance_name "$instance"; then
             printf '%s\n' "$instance"
         fi
@@ -492,15 +501,10 @@ secondary_scope_instances() {
         done
 }
 
-legacy_session_name() {
-    if [[ "$2" != */* && "$2" =~ ^[[:alnum:]_.-]+$ ]]; then printf '%s-%s' "$1" "$2"; fi
-}
-
 find_agent_session() {
     local agent="$1" repo_key="$2" instance="${3:-primary}"
-    local session legacy managed stored_agent stored_repo stored_instance
+    local session managed stored_agent stored_repo stored_instance
     FOUND_SESSION=""
-    FOUND_SESSION_KIND=""
     validate_instance_name "$instance" || return 2
     session="$(agent_session_name "$agent" "$repo_key" "$instance")"
     if tmux_cmd has-session -t "=$session" 2>/dev/null; then
@@ -508,19 +512,9 @@ find_agent_session() {
         stored_agent="$(tmux_cmd show-option -qv -t "=$session:" @hubi-agent 2>/dev/null || true)"
         stored_repo="$(tmux_cmd show-option -qv -t "=$session:" @hubi-repo 2>/dev/null || true)"
         stored_instance="$(tmux_cmd show-option -qv -t "=$session:" @hubi-instance 2>/dev/null || true)"
-        [[ -n "$stored_instance" ]] || stored_instance="primary"
-        if [[ "$managed" == "v4" && "$stored_agent" == "$agent" && "$stored_repo" == "$repo_key" \
+        if [[ "$managed" == "v5" && "$stored_agent" == "$agent" && "$stored_repo" == "$repo_key" \
             && "$stored_instance" == "$instance" ]]; then
             FOUND_SESSION="$session"
-            FOUND_SESSION_KIND="managed"
-            return 0
-        fi
-    fi
-    if [[ "$instance" == "primary" ]]; then
-        legacy="$(legacy_session_name "$agent" "$repo_key")"
-        if [[ -n "$legacy" ]] && tmux_cmd has-session -t "$legacy" 2>/dev/null; then
-            FOUND_SESSION="$legacy"
-            FOUND_SESSION_KIND="legacy"
             return 0
         fi
     fi
@@ -550,7 +544,7 @@ agent_pane() {
 }
 
 session_is_managed() {
-    [[ "$(tmux_cmd show-option -qv -t "=$1:" @hubi-managed 2>/dev/null || true)" == "v4" ]]
+    [[ "$(tmux_cmd show-option -qv -t "=$1:" @hubi-managed 2>/dev/null || true)" == "v5" ]]
 }
 
 session_is_dead() {
@@ -580,9 +574,7 @@ agent_status() {
     local agent="$1" repo_key="$2" instance="${3:-primary}" scope
     scope="$(agent_scope_name "$agent" "$repo_key" "$instance")" || return 2
     if find_agent_session "$agent" "$repo_key" "$instance"; then
-        if [[ "$FOUND_SESSION_KIND" == "legacy" ]]; then
-            printf '⚠ LEGACY/UNMANAGED'
-        elif session_is_dead "$FOUND_SESSION" && scope_is_active "$scope"; then
+        if session_is_dead "$FOUND_SESSION" && scope_is_active "$scope"; then
             printf '⚠ EXITED / STALE SCOPE'
         elif ! session_is_dead "$FOUND_SESSION" && ! scope_is_active "$scope"; then
             printf '⚠ STALE SESSION'
@@ -744,11 +736,11 @@ ensure_agent_session_locked() {
         # Recover only the exact bootstrap shape created by Hubi before it had
         # a chance to persist metadata. Never claim an arbitrary lookalike.
         start_command="$(tmux_cmd display-message -p -t "=$session:" '#{pane_start_command}' 2>/dev/null || true)"
-        if [[ "$start_command" == "sleep 30" || "$(tmux_cmd show-option -qv -t "=$session:" @hubi-managed 2>/dev/null || true)" == "v4" ]]; then
+        if [[ "$start_command" == "sleep 30" || "$(tmux_cmd show-option -qv -t "=$session:" @hubi-managed 2>/dev/null || true)" == "v5" ]]; then
             terminate_scope "$scope" || return 1
             tmux_cmd kill-session -t "=$session" || return 1
         else
-            printf 'Hubi: sesja %s istnieje bez zweryfikowanych metadanych v4; odmowa przejęcia.\n' "$session" >&2
+            printf 'Hubi: sesja %s istnieje bez zweryfikowanych metadanych v5; odmowa przejęcia.\n' "$session" >&2
             return 1
         fi
     elif scope_is_active "$scope"; then
@@ -759,6 +751,7 @@ ensure_agent_session_locked() {
     # This is the last check before tmux receives -c and before systemd creates
     # a scope. It also detects replacement of a repository at the same path.
     revalidate_repo_for_start "$repo_key" "$directory" "$expected_repo_id" || return 1
+    require_anchored_server || return 1
 
     if ! output="$(tmux_cmd new-session -d -P -F '#{pane_id}' -s "$session" -c "$directory" -- sleep 30 2>&1)"; then
         printf 'Hubi: tmux nie utworzył sesji %s:\n%s\n' "$session" "$output" >&2
@@ -777,7 +770,7 @@ ensure_agent_session_locked() {
     fi
 
     sanitize_tmux_environment
-    if ! tmux_cmd set-option -t "=$session:" @hubi-managed v4 \
+    if ! tmux_cmd set-option -t "=$session:" @hubi-managed v5 \
         || ! tmux_cmd set-option -t "=$session:" @hubi-agent "$agent" \
         || ! tmux_cmd set-option -t "=$session:" @hubi-repo "$repo_key" \
         || ! tmux_cmd set-option -t "=$session:" @hubi-instance "$instance" \
@@ -831,14 +824,6 @@ start_agent() {
     # Existing RUNNING/ATTACHED/EXITED sessions remain inspectable even if the
     # agent executable was subsequently moved or removed.
     if find_agent_session "$agent" "$RESOLVED_REPO_KEY" "$instance"; then
-        if [[ "$FOUND_SESSION_KIND" == "legacy" ]]; then
-            printf '\n  Uwaga: %s jest sesją legacy/unmanaged; dostępna jest tylko bezpieczna funkcja attach.\n' "$FOUND_SESSION" >&2
-            printf '  [a] Podłącz legacy/unmanaged\n  [b] Anuluj\n  > '
-            local legacy_choice
-            if ! read_choice legacy_choice || [[ "$legacy_choice" != "a" && "$legacy_choice" != "A" ]]; then
-                return 0
-            fi
-        fi
         attach_session "$FOUND_SESSION"
         return $?
     fi
@@ -929,11 +914,6 @@ stop_agent_now() {
         return 1
     fi
     session="$FOUND_SESSION"
-    if [[ "$FOUND_SESSION_KIND" != "managed" ]]; then
-        printf 'Hubi: sesja %s jest legacy/unmanaged i nie ma bezpiecznej granicy cgroup.\n' "$session" >&2
-        printf 'Hubi: odmowa automatycznego zatrzymania; sesja i jej procesy pozostają bez zmian.\n' >&2
-        return 1
-    fi
     configured_scope="$(tmux_cmd show-option -qv -t "=$session:" @hubi-scope 2>/dev/null || true)"
     if [[ -n "$configured_scope" && "$configured_scope" == "$scope" ]]; then
         if ! session_is_dead "$session"; then
@@ -944,7 +924,7 @@ stop_agent_now() {
         fi
         terminate_scope "$scope" || return 1
     else
-        printf 'Hubi: sesja %s pochodzi sprzed v4 i nie ma bezpiecznej granicy cgroup.\n' "$session" >&2
+        printf 'Hubi: sesja %s nie ma zweryfikowanej granicy cgroup v5.\n' "$session" >&2
         printf 'Hubi: odmowa automatycznego zatrzymania; sesja i jej procesy pozostają bez zmian.\n' >&2
         return 1
     fi
@@ -1014,6 +994,7 @@ start_terminal() {
     sanitize_tmux_environment
     revalidate_repo_for_start "$repo_key" "$directory" "$expected_repo_id" \
         || { pause_for_ack; return 1; }
+    require_anchored_server || { pause_for_ack; return 1; }
     if ! output="$(tmux_cmd new-session -d -s "$session" -c "$directory" -- bash 2>&1)"; then
         printf 'Hubi: tmux nie utworzył terminala %s:\n%s\n' "$session" "$output" >&2
         pause_for_ack
@@ -1030,7 +1011,7 @@ start_terminal() {
         pause_for_ack
         return 1
     fi
-    if ! tmux_cmd set-option -t "=$session:" @hubi-managed v4 \
+    if ! tmux_cmd set-option -t "=$session:" @hubi-managed v5 \
         || ! tmux_cmd set-option -t "=$session:" @hubi-kind terminal \
         || ! tmux_cmd set-option -t "=$session:" @hubi-repo "$repo_key" \
         || ! tmux_cmd set-option -t "=$session:" @hubi-instance "$instance" \
@@ -1199,8 +1180,7 @@ instance_list() {
             stored_agent="$(tmux_cmd show-option -qv -t "=$session:" @hubi-agent 2>/dev/null || true)"
             stored_repo="$(tmux_cmd show-option -qv -t "=$session:" @hubi-repo 2>/dev/null || true)"
             instance="$(tmux_cmd show-option -qv -t "=$session:" @hubi-instance 2>/dev/null || true)"
-            [[ -n "$instance" ]] || instance="primary"
-            if [[ "$managed" == "v4" && "$stored_agent" == "$agent" && "$stored_repo" == "$repo_key" \
+            if [[ "$managed" == "v5" && "$stored_agent" == "$agent" && "$stored_repo" == "$repo_key" \
                 && "$instance" != "primary" ]] && validate_instance_name "$instance"; then
                 printf '%s|%s\n' "$agent" "$instance"
                 found["$instance"]=1
