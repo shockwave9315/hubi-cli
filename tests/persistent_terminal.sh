@@ -21,6 +21,11 @@ git init -q "$REPOS/$REPO_TWO"
 git init -q "$REPOS/$REPO_REPLACED"
 
 cleanup() {
+    local scope
+    while IFS= read -r scope; do
+        [[ "$scope" == hubi-*.scope ]] || continue
+        systemctl --user kill --kill-whom=all --signal=KILL "$scope" >/dev/null 2>&1 || true
+    done < <(tmux -L "$SOCKET" list-sessions -F '#{@hubi-scope}' 2>/dev/null || true)
     tmux -L "$SOCKET" kill-server >/dev/null 2>&1 || true
     v5_test_server_stop "$TMUX_SERVICE" || true
     if [[ -n "$TEST_ROOT" && "$TEST_ROOT" == /tmp/* && -d "$TEST_ROOT" ]]; then
@@ -35,7 +40,8 @@ exec tmux -f /dev/null "$@"
 EOF
 chmod +x "$TEST_ROOT/tmux-clean"
 
-# shellcheck source=tests/lib/v5_test_server.sh
+# The path is resolved from the runtime repository root.
+# shellcheck disable=SC1091
 source "$ROOT/tests/lib/v5_test_server.sh"
 v5_test_server_start "$TMUX_SERVICE" "$SOCKET" || {
     printf 'Hubi test tmux service did not start.\n' >&2
@@ -62,6 +68,11 @@ hubi_env() {
 terminal_name() {
     hubi_env REPO_NAME="$1" INSTANCE="$2" HUBI_FILE="$HUBI" bash -c \
         'source "$HUBI_FILE"; terminal_session_name "$REPO_NAME" "$INSTANCE"'
+}
+
+terminal_scope() {
+    hubi_env REPO_NAME="$1" INSTANCE="$2" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; terminal_scope_name "$REPO_NAME" "$INSTANCE"'
 }
 
 create_terminal() {
@@ -105,8 +116,9 @@ test_validation() {
 check "terminal instance names use the shared bounded grammar" test_validation
 
 test_multiple_terminals() {
-    local primary
+    local primary scope
     primary="$(terminal_name "$REPO_ONE" primary)"
+    scope="$(terminal_scope "$REPO_ONE" primary)"
     create_terminal "$REPO_ONE" primary >/dev/null 2>&1 \
         && create_terminal "$REPO_ONE" matrix >/dev/null 2>&1 \
         && create_terminal "$REPO_ONE" primary >/dev/null 2>&1 \
@@ -118,13 +130,14 @@ test_multiple_terminals() {
         && [[ "$(tmux -L "$SOCKET" show-option -qv -t "=$primary:" @hubi-repo)" == "$REPO_ONE" ]] \
         && [[ "$(tmux -L "$SOCKET" show-option -qv -t "=$primary:" @hubi-instance)" == primary ]] \
         && [[ -z "$(tmux -L "$SOCKET" show-option -qv -t "=$primary:" @hubi-agent)" ]] \
-        && [[ -z "$(tmux -L "$SOCKET" show-option -qv -t "=$primary:" @hubi-scope)" ]] \
-        && [[ -z "$(tmux -L "$SOCKET" show-option -qv -t "=$primary:" @hubi-pane)" ]] \
+        && [[ "$(tmux -L "$SOCKET" show-option -qv -t "=$primary:" @hubi-scope)" == "$scope" ]] \
+        && [[ "$(tmux -L "$SOCKET" show-option -qv -t "=$primary:" @hubi-pane)" == %* ]] \
         && [[ "$(tmux -L "$SOCKET" display-message -p -t "=$primary:" '#{pane_current_path}')" \
             == "$REPOS/$REPO_ONE" ]] \
         && [[ "$(tmux -L "$SOCKET" show-window-options -v -t "=$primary:" window-size)" == largest ]] \
         && [[ "$(hubi_env SESSION="$primary" HUBI_FILE="$HUBI" bash -c \
-            'source "$HUBI_FILE"; session_status "$SESSION"')" == '● RUNNING' ]]
+            'source "$HUBI_FILE"; session_status "$SESSION"')" == '● RUNNING' ]] \
+        && systemctl --user is-active --quiet "$scope"
 }
 check "multiple named terminals coexist in one repository" test_multiple_terminals
 
@@ -156,7 +169,8 @@ test_terminal_delayed_cwd_readiness() {
         && tmux -L "$SOCKET" has-session -t "=$session" 2>/dev/null \
         && [[ "$(tmux -L "$SOCKET" show-option -qv -t "=$session:" @hubi-kind)" == terminal ]]
     result=$?
-    tmux -L "$SOCKET" kill-session -t "=$session" >/dev/null 2>&1 || true
+    hubi_env REPO_NAME="$REPO_ONE" INSTANCE="$instance" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; stop_terminal_now "$REPO_NAME" "$INSTANCE"' >/dev/null 2>&1 || true
     return "$result"
 }
 check "persistent terminal waits for delayed tmux cwd readiness" test_terminal_delayed_cwd_readiness
@@ -221,7 +235,8 @@ test_stale_hubi_active_is_not_inherited() {
     pane_pid="$(tmux -L "$SOCKET" display-message -p -t "=$session:" '#{pane_pid}')"
     [[ "$pane_pid" =~ ^[1-9][0-9]*$ ]] || return 1
     if tr '\0' '\n' <"/proc/$pane_pid/environ" | grep -q '^HUBI_ACTIVE='; then inherited=1; fi
-    tmux -L "$SOCKET" kill-session -t "=$session" || return 1
+    hubi_env REPO_NAME="$REPO_ONE" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; stop_terminal_now "$REPO_NAME" stale-env' || return 1
     (( inherited == 0 ))
 }
 check "new terminal Bash does not inherit stale HUBI_ACTIVE" test_stale_hubi_active_is_not_inherited
@@ -243,6 +258,105 @@ test_attach_persistence() {
         && [[ "$(tmux -L "$SOCKET" list-clients -t "=$session" -F '#{client_name}' 2>/dev/null | wc -l)" -eq 0 ]]
 }
 check "client detach and launcher disappearance preserve the terminal" test_attach_persistence
+
+test_scoped_bash_interactivity() {
+    local instance=interactive session scope state_file jobs_file ctrl_file output
+    state_file="$TEST_ROOT/interactive-state"
+    jobs_file="$TEST_ROOT/interactive-jobs"
+    ctrl_file="$TEST_ROOT/interactive-ctrl"
+    create_terminal "$REPO_TWO" "$instance" >/dev/null 2>&1 || return 1
+    session="$(terminal_name "$REPO_TWO" "$instance")"
+    scope="$(terminal_scope "$REPO_TWO" "$instance")"
+    tmux -L "$SOCKET" send-keys -t "=$session:" \
+        "printf '%s|%s|%s\\n' \"\$PWD\" \"\$(test -t 0 && echo TTY || echo NO_TTY)\" \"\$(set -o | awk '\$1 == \"monitor\" {print \$2}')\" >'$state_file'" Enter \
+        || return 1
+    tmux -L "$SOCKET" send-keys -t "=$session:" \
+        "sleep 30 & jobs -p >'$jobs_file'" Enter || return 1
+    for _ in {1..50}; do [[ -s "$state_file" && -s "$jobs_file" ]] && break; sleep 0.05; done
+    [[ -s "$state_file" && -s "$jobs_file" ]] || return 1
+    output="$(<"$state_file")"
+    [[ "$output" == "$REPOS/$REPO_TWO|TTY|on" ]] || return 1
+    [[ "$(<"$jobs_file")" =~ ^[1-9][0-9]*$ ]] || return 1
+
+    tmux -L "$SOCKET" send-keys -t "=$session:" 'sleep 30' Enter || return 1
+    for _ in {1..30}; do
+        [[ "$(tmux -L "$SOCKET" display-message -p -t "=$session:" '#{pane_current_command}')" == sleep ]] && break
+        sleep 0.05
+    done
+    tmux -L "$SOCKET" send-keys -t "=$session:" C-c || return 1
+    tmux -L "$SOCKET" send-keys -t "=$session:" "printf ALIVE >'$ctrl_file'" Enter || return 1
+    for _ in {1..30}; do [[ -s "$ctrl_file" ]] && break; sleep 0.05; done
+    [[ "$(<"$ctrl_file")" == ALIVE && "$(tmux -L "$SOCKET" display-message -p -t "=$session:" '#{pane_current_command}')" == bash \
+        && "$(tmux -L "$SOCKET" show-option -qv -t "=$session:" @hubi-scope)" == "$scope" ]] || return 1
+    hubi_env REPO_NAME="$REPO_TWO" INSTANCE="$instance" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; stop_terminal_now "$REPO_NAME" "$INSTANCE"'
+}
+check "scoped Bash keeps cwd PTY job control jobs and Ctrl-C behavior" test_scoped_bash_interactivity
+
+test_terminal_descendant_cleanup_and_scope_isolation() {
+    local target=stubborn sibling=scope-sibling target_session target_scope sibling_scope
+    local agent_scope agent_session pidfile="$TEST_ROOT/terminal-descendant.pid" child result=0
+    create_terminal "$REPO_TWO" "$target" >/dev/null 2>&1 || return 1
+    create_terminal "$REPO_TWO" "$sibling" >/dev/null 2>&1 || return 1
+    target_session="$(terminal_name "$REPO_TWO" "$target")"
+    target_scope="$(terminal_scope "$REPO_TWO" "$target")"
+    sibling_scope="$(terminal_scope "$REPO_TWO" "$sibling")"
+    hubi_env REPO_NAME="$REPO_TWO" HUBI_FILE="$HUBI" bash -c '
+        source "$HUBI_FILE"; resolve_repo "$REPO_NAME"
+        ensure_agent_session codex "$RESOLVED_REPO_KEY" "$RESOLVED_REPO_DIR" /usr/bin/sleep 30
+    ' >/dev/null 2>&1 || return 1
+    agent_scope="$(hubi_env REPO_NAME="$REPO_TWO" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; agent_scope_name codex "$REPO_NAME"')"
+    agent_session="$(hubi_env REPO_NAME="$REPO_TWO" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; agent_session_name codex "$REPO_NAME"')"
+
+    tmux -L "$SOCKET" send-keys -t "=$target_session:" \
+        "setsid bash -c 'trap \"\" INT TERM; echo \$\$ >\"$pidfile\"; while :; do sleep 1; done' &" Enter \
+        || return 1
+    for _ in {1..50}; do [[ -s "$pidfile" ]] && break; sleep 0.05; done
+    [[ -s "$pidfile" ]] || return 1
+    child="$(<"$pidfile")"
+    kill -0 "$child" 2>/dev/null || return 1
+    hubi_env REPO_NAME="$REPO_TWO" INSTANCE="$target" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; stop_terminal_now "$REPO_NAME" "$INSTANCE"' || return 1
+    ! kill -0 "$child" 2>/dev/null || result=1
+    ! systemctl --user is-active --quiet "$target_scope" || result=1
+    systemctl --user is-active --quiet "$sibling_scope" || result=1
+    systemctl --user is-active --quiet "$agent_scope" || result=1
+    tmux -L "$SOCKET" has-session -t "=$(terminal_name "$REPO_TWO" "$sibling")" 2>/dev/null || result=1
+    tmux -L "$SOCKET" has-session -t "=$agent_session" 2>/dev/null || result=1
+    hubi_env REPO_NAME="$REPO_TWO" INSTANCE="$sibling" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; stop_terminal_now "$REPO_NAME" "$INSTANCE"' >/dev/null 2>&1 || result=1
+    hubi_env REPO_NAME="$REPO_TWO" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; stop_agent_now codex "$REPO_NAME"' >/dev/null 2>&1 || result=1
+    return "$result"
+}
+check "terminal stop kills stubborn descendants without touching sibling scopes" \
+    test_terminal_descendant_cleanup_and_scope_isolation
+
+test_orphan_terminal_scope_reconciliation() {
+    local instance=orphan-scope session scope pidfile="$TEST_ROOT/orphan-terminal.pid" child listing
+    create_terminal "$REPO_TWO" "$instance" >/dev/null 2>&1 || return 1
+    session="$(terminal_name "$REPO_TWO" "$instance")"
+    scope="$(terminal_scope "$REPO_TWO" "$instance")"
+    tmux -L "$SOCKET" send-keys -t "=$session:" \
+        "setsid bash -c 'trap \"\" HUP INT TERM; echo \$\$ >\"$pidfile\"; while :; do sleep 1; done' &" Enter \
+        || return 1
+    for _ in {1..50}; do [[ -s "$pidfile" ]] && break; sleep 0.05; done
+    [[ -s "$pidfile" ]] || return 1
+    child="$(<"$pidfile")"
+    tmux -L "$SOCKET" kill-session -t "=$session" || return 1
+    for _ in {1..30}; do systemctl --user is-active --quiet "$scope" && break; sleep 0.05; done
+    systemctl --user is-active --quiet "$scope" || return 1
+    listing="$(hubi_env REPO_NAME="$REPO_TWO" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; terminal_list "$REPO_NAME"')"
+    [[ "$listing" == *"$instance"* ]] || return 1
+    hubi_env REPO_NAME="$REPO_TWO" INSTANCE="$instance" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; stop_terminal_now "$REPO_NAME" "$INSTANCE"' || return 1
+    ! kill -0 "$child" 2>/dev/null && ! systemctl --user is-active --quiet "$scope"
+}
+check "orphaned terminal scope remains discoverable and is reconciled exactly" \
+    test_orphan_terminal_scope_reconciliation
 
 test_exact_stop_isolation() {
     local matrix primary agent_codex agent_claude

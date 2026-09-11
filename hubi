@@ -9,6 +9,7 @@ SYSTEMD_RUN_BIN="${HUBI_SYSTEMD_RUN_BIN:-systemd-run}"
 SYSTEMCTL_BIN="${HUBI_SYSTEMCTL_BIN:-systemctl}"
 LOGINCTL_BIN="${HUBI_LOGINCTL_BIN:-loginctl}"
 FLOCK_BIN="${HUBI_FLOCK_BIN:-flock}"
+BASH_BIN="${HUBI_BASH_BIN:-bash}"
 HUBI_TMUX_SERVICE="${HUBI_TMUX_SERVICE:-hubi-tmux.service}"
 HUBI_PROC_ROOT="${HUBI_PROC_ROOT:-/proc}"
 
@@ -459,18 +460,40 @@ terminal_session_name() {
         "$(safe_slug "$instance")" "$(instance_name_hash "$repo_key" "$instance")"
 }
 
+terminal_scope_name() {
+    local repo_key="$1" instance="$2"
+    validate_instance_name "$instance" || return 2
+    printf 'hubi-terminal-%s-%s.scope' "$(name_hash "$repo_key")" "$instance"
+}
+
+terminal_scope_instances() {
+    local repo_key="$1" prefix scope instance
+    prefix="hubi-terminal-$(name_hash "$repo_key")-"
+    "$SYSTEMCTL_BIN" --user list-units --type=scope --state=active --no-legend --plain 2>/dev/null \
+        | awk '{print $1}' \
+        | while IFS= read -r scope; do
+            [[ -n "$scope" && "$scope" == "$prefix"*.scope ]] || continue
+            instance="${scope#"$prefix"}"
+            instance="${instance%.scope}"
+            validate_instance_name "$instance" || continue
+            printf '%s\n' "$instance"
+        done
+}
+
 find_terminal_session() {
-    local repo_key="$1" instance="$2" session managed kind stored_repo stored_instance
+    local repo_key="$1" instance="$2" session scope managed kind stored_repo stored_instance stored_scope
     FOUND_SESSION=""
     validate_instance_name "$instance" || return 2
     session="$(terminal_session_name "$repo_key" "$instance")" || return 2
+    scope="$(terminal_scope_name "$repo_key" "$instance")" || return 2
     tmux_cmd has-session -t "=$session" 2>/dev/null || return 1
     managed="$(tmux_cmd show-option -qv -t "=$session:" @hubi-managed 2>/dev/null || true)"
     kind="$(tmux_cmd show-option -qv -t "=$session:" @hubi-kind 2>/dev/null || true)"
     stored_repo="$(tmux_cmd show-option -qv -t "=$session:" @hubi-repo 2>/dev/null || true)"
     stored_instance="$(tmux_cmd show-option -qv -t "=$session:" @hubi-instance 2>/dev/null || true)"
+    stored_scope="$(tmux_cmd show-option -qv -t "=$session:" @hubi-scope 2>/dev/null || true)"
     if [[ "$managed" == "v5" && "$kind" == "terminal" && "$stored_repo" == "$repo_key" \
-        && "$stored_instance" == "$instance" ]]; then
+        && "$stored_instance" == "$instance" && "$stored_scope" == "$scope" ]]; then
         FOUND_SESSION="$session"
         return 0
     fi
@@ -478,18 +501,27 @@ find_terminal_session() {
 }
 
 terminal_list() {
-    local repo_key="$1" session managed kind stored_repo instance
+    local repo_key="$1" session managed kind stored_repo instance stored_scope expected_scope
+    local -A found=()
     while IFS= read -r session; do
         [[ -n "$session" ]] || continue
         managed="$(tmux_cmd show-option -qv -t "=$session:" @hubi-managed 2>/dev/null || true)"
         kind="$(tmux_cmd show-option -qv -t "=$session:" @hubi-kind 2>/dev/null || true)"
         stored_repo="$(tmux_cmd show-option -qv -t "=$session:" @hubi-repo 2>/dev/null || true)"
         instance="$(tmux_cmd show-option -qv -t "=$session:" @hubi-instance 2>/dev/null || true)"
+        stored_scope="$(tmux_cmd show-option -qv -t "=$session:" @hubi-scope 2>/dev/null || true)"
+        expected_scope="$(terminal_scope_name "$repo_key" "$instance" 2>/dev/null || true)"
         if [[ "$managed" == "v5" && "$kind" == "terminal" && "$stored_repo" == "$repo_key" ]] \
-            && validate_instance_name "$instance"; then
+            && validate_instance_name "$instance" && [[ "$stored_scope" == "$expected_scope" ]]; then
             printf '%s\n' "$instance"
+            found["$instance"]=1
         fi
     done < <(tmux_cmd list-sessions -F '#S' 2>/dev/null | sort || true)
+    while IFS= read -r instance; do
+        [[ -n "$instance" && -z "${found[$instance]:-}" ]] || continue
+        printf '%s\n' "$instance"
+        found["$instance"]=1
+    done < <(terminal_scope_instances "$repo_key" | sort -u)
 }
 
 agent_scope_name() {
@@ -996,9 +1028,14 @@ project_shell() {
 }
 
 terminal_status() {
-    local repo_key="$1" instance="$2" clients
+    local repo_key="$1" instance="$2" clients scope
+    scope="$(terminal_scope_name "$repo_key" "$instance")" || return 2
     if ! find_terminal_session "$repo_key" "$instance"; then
-        printf '○ STOPPED'
+        if scope_is_active "$scope"; then printf '⚠ ORPHANED'; else printf '○ STOPPED'; fi
+        return
+    fi
+    if ! scope_is_active "$scope"; then
+        printf '⚠ STALE SESSION'
         return
     fi
     clients="$(session_clients "$FOUND_SESSION")"
@@ -1006,7 +1043,7 @@ terminal_status() {
 }
 
 start_terminal() {
-    local repo_key="$1" instance="$2" session output directory expected_repo_id
+    local repo_key="$1" instance="$2" session scope output pane directory expected_repo_id
     if ! validate_instance_name "$instance"; then
         printf 'Hubi: nieprawidłowa nazwa terminala: %s\n' "$instance" >&2
         return 2
@@ -1021,12 +1058,25 @@ start_terminal() {
     fi
     runtime_creation_preflight || { pause_for_ack; return 1; }
     session="$(terminal_session_name "$repo_key" "$instance")" || return 2
+    scope="$(terminal_scope_name "$repo_key" "$instance")" || return 2
+    if scope_is_active "$scope"; then
+        printf 'Hubi: znaleziono osierocony scope terminala %s; bezpieczne czyszczenie przed restartem.\n' \
+            "$scope" >&2
+        terminate_scope "$scope" || { pause_for_ack; return 1; }
+    fi
     sanitize_tmux_environment
     revalidate_repo_for_start "$repo_key" "$directory" "$expected_repo_id" \
         || { pause_for_ack; return 1; }
     require_anchored_server || { pause_for_ack; return 1; }
-    if ! output="$(tmux_cmd new-session -d -s "$session" -c "$directory" -- bash 2>&1)"; then
+    if ! output="$(tmux_cmd new-session -d -P -F '#{pane_id}' -s "$session" -c "$directory" -- sleep 30 2>&1)"; then
         printf 'Hubi: tmux nie utworzył terminala %s:\n%s\n' "$session" "$output" >&2
+        pause_for_ack
+        return 1
+    fi
+    pane="$output"
+    if [[ "$pane" != %* ]]; then
+        printf 'Hubi: tmux nie zwrócił identyfikatora panelu terminala: %s\n' "$pane" >&2
+        tmux_cmd kill-session -t "=$session" >/dev/null 2>&1 || true
         pause_for_ack
         return 1
     fi
@@ -1035,7 +1085,7 @@ start_terminal() {
         pause_for_ack
         return 1
     fi
-    if ! wait_for_pane_cwd "=$session:" "$directory"; then
+    if ! wait_for_pane_cwd "$pane" "$directory"; then
         printf 'Hubi: tmux nie zachował katalogu repozytorium %s; start został przerwany.\n' "$directory" >&2
         tmux_cmd kill-session -t "=$session" >/dev/null 2>&1 || true
         pause_for_ack
@@ -1045,6 +1095,8 @@ start_terminal() {
         || ! tmux_cmd set-option -t "=$session:" @hubi-kind terminal \
         || ! tmux_cmd set-option -t "=$session:" @hubi-repo "$repo_key" \
         || ! tmux_cmd set-option -t "=$session:" @hubi-instance "$instance" \
+        || ! tmux_cmd set-option -t "=$session:" @hubi-scope "$scope" \
+        || ! tmux_cmd set-option -t "=$session:" @hubi-pane "$pane" \
         || ! tmux_cmd set-window-option -t "=$session:" window-size largest \
         || ! tmux_cmd set-hook -t "=$session:" after-new-window \
             'set-window-option window-size largest'; then
@@ -1053,17 +1105,62 @@ start_terminal() {
         pause_for_ack
         return 1
     fi
-    attach_session "$session"
+    if ! revalidate_repo_for_start "$repo_key" "$directory" "$expected_repo_id"; then
+        tmux_cmd kill-session -t "=$session" >/dev/null 2>&1 || true
+        pause_for_ack
+        return 1
+    fi
+    if ! output="$(tmux_cmd respawn-pane -k -t "$pane" -- \
+        "$SYSTEMD_RUN_BIN" --user --scope --quiet --collect --unit="$scope" -- \
+        "$BASH_BIN" 2>&1)"; then
+        printf 'Hubi: nie można uruchomić terminala w scope %s:\n%s\n' "$scope" "$output" >&2
+        tmux_cmd kill-session -t "=$session" >/dev/null 2>&1 || true
+        pause_for_ack
+        return 1
+    fi
+    for _ in {1..20}; do
+        if scope_is_active "$scope" \
+            && [[ "$(tmux_cmd display-message -p -t "$pane" '#{pane_dead}' 2>/dev/null || true)" != "1" ]]; then
+            attach_session "$session"
+            return
+        fi
+        sleep 0.05
+    done
+    printf 'Hubi: terminal nie osiągnął aktywnego stanu w scope %s.\n' "$scope" >&2
+    terminate_scope "$scope" || true
+    tmux_cmd kill-session -t "=$session" >/dev/null 2>&1 || true
+    pause_for_ack
+    return 1
 }
 
 stop_terminal_now() {
-    local repo_key="$1" instance="$2" session
+    local repo_key="$1" instance="$2" session="" scope configured_scope
+    scope="$(terminal_scope_name "$repo_key" "$instance")" || return 2
     if ! find_terminal_session "$repo_key" "$instance"; then
+        if scope_is_active "$scope"; then
+            printf 'Hubi: czyszczenie osieroconego scope terminala %s.\n' "$scope" >&2
+            terminate_scope "$scope"
+            return $?
+        fi
         printf 'Hubi: terminal %s dla %s nie działa.\n' "$instance" "$repo_key" >&2
         return 1
     fi
     session="$FOUND_SESSION"
-    tmux_cmd kill-session -t "=$session"
+    configured_scope="$(tmux_cmd show-option -qv -t "=$session:" @hubi-scope 2>/dev/null || true)"
+    if [[ "$configured_scope" != "$scope" ]]; then
+        printf 'Hubi: terminal %s nie ma zweryfikowanej granicy cgroup v5; odmowa zatrzymania.\n' \
+            "$session" >&2
+        return 1
+    fi
+    terminate_scope "$scope" || return 1
+    # With remain-on-exit disabled, tmux may remove the terminal session as
+    # soon as its scoped Bash exits. Otherwise remove that exact session now.
+    if tmux_cmd has-session -t "=$session" 2>/dev/null \
+        && ! tmux_cmd kill-session -t "=$session"; then
+        printf 'Hubi: scope terminala zatrzymany, ale nie udało się usunąć sesji tmux %s.\n' \
+            "$session" >&2
+        return 1
+    fi
 }
 
 kill_terminal() {

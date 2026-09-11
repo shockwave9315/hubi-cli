@@ -95,11 +95,25 @@ Hubi does not store conversation history.
 
 `Shell projektu` remains an ephemeral Bash shell: exiting Hubi or losing its
 SSH connection ends that shell. `Terminale persistent` instead creates named
-tmux-only Bash sessions in the repository root. A project can have multiple
-terminal instances using the same bounded name grammar as agent instances;
-they survive tmux detach and SSH disconnect and can be reattached from another
-client. Terminal sessions have no systemd scope or persistent state file, and
-ending one explicitly kills only its exact tmux session.
+Bash sessions in the repository root. Each managed primary pane starts through
+`systemd-run --user --scope --collect` in its own deterministic
+`hubi-terminal-REPO_HASH-INSTANCE.scope`, recorded as `@hubi-scope`. A project
+can have multiple terminal instances using the same bounded name grammar as
+agent instances; they survive tmux detach and SSH disconnect and can be
+reattached from another client.
+
+Stopping a persistent terminal sends TERM to its complete scope, waits for a
+bounded interval, escalates to KILL for the entire cgroup when necessary,
+verifies inactivity, and removes only the exact tmux session if tmux has not
+already removed it. This includes descendants that call `setsid` or ignore
+TERM. Orphan terminal scopes remain discoverable and can be reconciled without
+touching siblings.
+
+The lifecycle guarantee covers the Hubi-created primary pane and its scope.
+Extra windows manually created in the same tmux session receive separate
+`tmux-spawn-*` scopes from systemd and are not swept by Hubi v5 core. This is a
+documented limitation; Hubi deliberately avoids broad cgroup discovery or
+sweeps.
 
 When a live session already has a client, Hubi asks whether to attach in one of
 three modes:
@@ -141,6 +155,11 @@ and proves that `/proc/PID/cgroup` ends in the exact owning service. The
 ownership check and `-N` are separate defenses: if the service disappears
 after verification, the creation command fails instead of auto-spawning an
 unanchored tmux server.
+
+The resulting ownership tree is `user@UID.service` (kept alive by linger) →
+`app.slice` → `hubi-tmux.service`, agent scopes, and persistent-terminal
+scopes. SSH shells contain only the Hubi launcher and tmux clients, so killing
+an isolated login/client scope does not kill the server or managed work.
 
 Launcher signal behavior is explicit:
 
