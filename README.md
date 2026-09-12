@@ -48,8 +48,8 @@ hubi doctor
 
 `hubi doctor` is a read-only readiness report. It displays the Hubi and tmux
 versions, dedicated socket, linger and the live login1 Manager's informational
-`KillUserProcesses`
-states, user-manager reachability, service state, tmux PID and cgroup ownership,
+`KillUserProcesses` state, user-manager reachability, service state, tmux PID
+and cgroup ownership,
 effective `exit-empty`, full-cgroup kill support, and managed-scope inventory.
 It uses tmux's no-start mode and never starts a server, service, session, or
 scope and never changes configuration. A failed linger query is treated as
@@ -108,7 +108,8 @@ bounded interval, escalates to KILL for the entire cgroup when necessary,
 verifies inactivity, and removes only the exact tmux session if tmux has not
 already removed it. This includes descendants that call `setsid` or ignore
 TERM. Orphan terminal scopes remain discoverable and can be reconciled without
-touching siblings.
+touching siblings; their `ORPHANED` menu entries remain selectable for an
+explicit confirmed stop.
 
 The lifecycle guarantee covers the Hubi-created primary pane and its scope.
 Extra windows manually created in the same tmux session receive separate
@@ -137,12 +138,14 @@ scope with TERM and finally KILL if necessary. This cgroup boundary includes
 descendants that create new process groups. Codex and Claude use separate tmux
 sessions and separate scopes.
 
-Startup serialization uses a bounded command-mode `flock --close`: the lock is
-owned by a short-lived supervisor and its descriptor is closed before the
-worker can create tmux or systemd processes. A busy lock produces a diagnostic
-after three seconds instead of freezing the menu. Hubi reconciles the tmux
-session and scope independently; an orphan scope can be safely cleaned and a
-restart can recover.
+Agent startup and each persistent terminal's complete start/stop/reconciliation
+lifecycle use bounded command-mode `flock --close`. Each lock is owned by a
+short-lived supervisor and its descriptor is closed before the worker can
+create tmux or systemd processes. Terminal locks are deterministic per exact
+repository and instance, so siblings remain independent. A busy lock produces
+a diagnostic after three seconds instead of freezing the menu. Under the lock,
+Hubi rechecks the tmux session and exact deterministic scope independently; an
+orphan scope can be safely cleaned and a restart can recover.
 
 Hubi preserves tmux and systemd diagnostics when startup or attachment fails.
 A failed/ended pane remains available as `EXITED` rather than disappearing.
@@ -151,10 +154,12 @@ or stop sessions on the default/v4 socket and has no dual-socket mode.
 
 All production tmux client operations use the one dedicated Hubi socket with
 tmux 3.6b's `-N` no-start option. New work is created only after Hubi verifies
-that `hubi-tmux.service` is active, reads the server PID through that socket,
-and proves that `/proc/PID/cgroup` ends in the exact owning service. The
-ownership check and `-N` are separate defenses: if the service disappears
-after verification, the creation command fails instead of auto-spawning an
+that `hubi-tmux.service` is active with a nonzero `MainPID` and absolute
+`ControlGroup`, binds the PID reported by the dedicated socket exactly to that
+`MainPID`, and requires `/proc/MainPID/cgroup` to equal `ControlGroup`. A second
+systemd snapshot rejects a service change during verification. The ownership
+check and `-N` are separate defenses: if the service disappears after
+verification, the creation command fails instead of auto-spawning an
 unanchored tmux server.
 
 The resulting ownership tree is `user@UID.service` (kept alive by linger) →
@@ -217,9 +222,9 @@ env -u HUBI_NOAUTO python3 tests/adversarial.py
 
 At this revision the functional harness reports 18 tests and the adversarial
 suite contains 31 tests. The focused multi-instance harness reports 12 tests;
-the focused persistent-terminal harness reports 15 tests. The v5 doctor,
-server, ownership, preflight, and login-scope lifetime harnesses report 7, 7,
-6, 6, and 1 tests respectively. That is 103 behavior tests in total; every
+the focused persistent-terminal harness reports 20 tests. The v5 doctor,
+server, ownership, preflight, and login-scope lifetime harnesses report 9, 7,
+12, 6, and 1 tests respectively. That is 116 behavior tests in total; every
 harness must be fully green for release review.
 
 The harnesses use unique private tmux sockets, disposable Git repositories and
