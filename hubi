@@ -718,9 +718,51 @@ attach_session() {
 }
 
 lock_root() {
-    local root="${XDG_RUNTIME_DIR:-/tmp}/hubi-locks-${UID}"
+    local root="${HUBI_LOCK_ROOT:-${XDG_RUNTIME_DIR:-/tmp}/hubi-locks-${UID}}"
     if [[ ! -d "$root" ]]; then install -d -m 700 -- "$root" || return 1; fi
     printf '%s' "$root"
+}
+
+terminal_lifecycle_lock_file() {
+    local repo_key="$1" instance="$2" locks digest
+    validate_instance_name "$instance" || return 2
+    locks="$(lock_root)" || return 1
+    digest="$(printf '%s\0%s' "$repo_key" "$instance" | sha256sum | awk '{print $1}')"
+    [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+    printf '%s/terminal-%s.lock' "$locks" "$digest"
+}
+
+run_terminal_lifecycle_locked() {
+    local operation="$1" repo_key="$2" instance="$3" lock_file output rc
+    shift 3
+    case "$operation" in start|stop) ;; *) return 2 ;; esac
+    lock_file="$(terminal_lifecycle_lock_file "$repo_key" "$instance")" || {
+        printf 'Hubi: nie można przygotować blokady cyklu życia terminala.\n' >&2
+        return 1
+    }
+    if [[ ! "$HUBI_LOCK_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
+        printf 'Hubi: nieprawidłowy limit oczekiwania na blokadę: %s\n' "$HUBI_LOCK_TIMEOUT" >&2
+        return 1
+    fi
+    # The flock supervisor owns the descriptor. --close prevents the worker,
+    # tmux server, scoped Bash and every descendant from inheriting it.
+    output="$("$FLOCK_BIN" --exclusive --close --wait "$HUBI_LOCK_TIMEOUT" \
+        --conflict-exit-code 75 "$lock_file" \
+        env -u HUBI_ACTIVE bash "$HUBI_SCRIPT_PATH" "__terminal-${operation}-locked" \
+        "$repo_key" "$instance" "$@" 2>&1)"
+    rc=$?
+    if (( rc == 75 )); then
+        printf 'Hubi: limit %ss oczekiwania na blokadę cyklu życia terminala %s/%s został przekroczony.\n' \
+            "$HUBI_LOCK_TIMEOUT" "$repo_key" "$instance" >&2
+        return 1
+    fi
+    if (( rc != 0 )); then
+        printf 'Hubi: operacja %s terminala %s/%s pod blokadą nie powiodła się (rc=%d).\n' \
+            "$operation" "$repo_key" "$instance" "$rc" >&2
+        [[ -z "$output" ]] || printf '%s\n' "$output" >&2
+        return "$rc"
+    fi
+    [[ -z "$output" ]] || printf '%s\n' "$output" >&2
 }
 
 ensure_agent_session() {
@@ -1041,53 +1083,46 @@ terminal_status() {
     if (( clients > 0 )); then printf '● ATTACHED (%d)' "$clients"; else printf '● RUNNING'; fi
 }
 
-start_terminal() {
-    local repo_key="$1" instance="$2" session scope output pane directory expected_repo_id
-    if ! validate_instance_name "$instance"; then
-        printf 'Hubi: nieprawidłowa nazwa terminala: %s\n' "$instance" >&2
-        return 2
-    fi
-    resolve_repo "$repo_key" || { pause_for_ack; return 2; }
-    repo_key="$RESOLVED_REPO_KEY"
-    directory="$RESOLVED_REPO_DIR"
-    expected_repo_id="$RESOLVED_REPO_ID"
-    if find_terminal_session "$repo_key" "$instance"; then
-        attach_session "$FOUND_SESSION"
-        return
-    fi
-    runtime_creation_preflight || { pause_for_ack; return 1; }
+start_terminal_locked() {
+    local repo_key="$1" instance="$2" directory="$3" expected_repo_id="$4"
+    local session scope output pane
+    validate_instance_name "$instance" || return 2
     session="$(terminal_session_name "$repo_key" "$instance")" || return 2
     scope="$(terminal_scope_name "$repo_key" "$instance")" || return 2
-    if scope_is_active "$scope"; then
+
+    # Both the exact session and exact scope are re-read only after acquiring
+    # the tuple's lifecycle lock. No pre-lock observation drives cleanup.
+    if find_terminal_session "$repo_key" "$instance"; then
+        if scope_is_active "$scope"; then return 0; fi
+        printf 'Hubi: usuwanie nieaktywnej sesji terminala %s przed restartem.\n' "$session" >&2
+        tmux_cmd kill-session -t "=$session" || return 1
+    elif scope_is_active "$scope"; then
         printf 'Hubi: znaleziono osierocony scope terminala %s; bezpieczne czyszczenie przed restartem.\n' \
             "$scope" >&2
-        terminate_scope "$scope" || { pause_for_ack; return 1; }
+        terminate_scope "$scope" || return 1
     fi
+
+    runtime_creation_preflight || return 1
     sanitize_tmux_environment
-    revalidate_repo_for_start "$repo_key" "$directory" "$expected_repo_id" \
-        || { pause_for_ack; return 1; }
-    require_anchored_server || { pause_for_ack; return 1; }
+    revalidate_repo_for_start "$repo_key" "$directory" "$expected_repo_id" || return 1
+    require_anchored_server || return 1
     if ! output="$(tmux_cmd new-session -d -P -F '#{pane_id}' -s "$session" -c "$directory" -- sleep 30 2>&1)"; then
         printf 'Hubi: tmux nie utworzył terminala %s:\n%s\n' "$session" "$output" >&2
-        pause_for_ack
         return 1
     fi
     pane="$output"
     if [[ "$pane" != %* ]]; then
         printf 'Hubi: tmux nie zwrócił identyfikatora panelu terminala: %s\n' "$pane" >&2
         tmux_cmd kill-session -t "=$session" >/dev/null 2>&1 || true
-        pause_for_ack
         return 1
     fi
     if ! revalidate_repo_for_start "$repo_key" "$directory" "$expected_repo_id"; then
         tmux_cmd kill-session -t "=$session" >/dev/null 2>&1 || true
-        pause_for_ack
         return 1
     fi
     if ! wait_for_pane_cwd "$pane" "$directory"; then
         printf 'Hubi: tmux nie zachował katalogu repozytorium %s; start został przerwany.\n' "$directory" >&2
         tmux_cmd kill-session -t "=$session" >/dev/null 2>&1 || true
-        pause_for_ack
         return 1
     fi
     if ! tmux_cmd set-option -t "=$session:" @hubi-managed v5 \
@@ -1101,12 +1136,10 @@ start_terminal() {
             'set-window-option window-size largest'; then
         printf 'Hubi: nie udało się zapisać metadanych terminala %s.\n' "$session" >&2
         tmux_cmd kill-session -t "=$session" >/dev/null 2>&1 || true
-        pause_for_ack
         return 1
     fi
     if ! revalidate_repo_for_start "$repo_key" "$directory" "$expected_repo_id"; then
         tmux_cmd kill-session -t "=$session" >/dev/null 2>&1 || true
-        pause_for_ack
         return 1
     fi
     if ! output="$(tmux_cmd respawn-pane -k -t "$pane" -- \
@@ -1114,25 +1147,46 @@ start_terminal() {
         "$BASH_BIN" 2>&1)"; then
         printf 'Hubi: nie można uruchomić terminala w scope %s:\n%s\n' "$scope" "$output" >&2
         tmux_cmd kill-session -t "=$session" >/dev/null 2>&1 || true
-        pause_for_ack
         return 1
     fi
     for _ in {1..20}; do
         if scope_is_active "$scope" \
             && [[ "$(tmux_cmd display-message -p -t "$pane" '#{pane_dead}' 2>/dev/null || true)" != "1" ]]; then
-            attach_session "$session"
-            return
+            return 0
         fi
         sleep 0.05
     done
     printf 'Hubi: terminal nie osiągnął aktywnego stanu w scope %s.\n' "$scope" >&2
     terminate_scope "$scope" || true
     tmux_cmd kill-session -t "=$session" >/dev/null 2>&1 || true
+    return 1
+}
+
+start_terminal() {
+    local repo_key="$1" instance="$2" session directory expected_repo_id
+    if ! validate_instance_name "$instance"; then
+        printf 'Hubi: nieprawidłowa nazwa terminala: %s\n' "$instance" >&2
+        return 2
+    fi
+    resolve_repo "$repo_key" || { pause_for_ack; return 2; }
+    repo_key="$RESOLVED_REPO_KEY"
+    directory="$RESOLVED_REPO_DIR"
+    expected_repo_id="$RESOLVED_REPO_ID"
+    session="$(terminal_session_name "$repo_key" "$instance")" || return 2
+    if ! run_terminal_lifecycle_locked start "$repo_key" "$instance" "$directory" "$expected_repo_id"; then
+        pause_for_ack
+        return 1
+    fi
+    if find_terminal_session "$repo_key" "$instance"; then
+        attach_session "$FOUND_SESSION"
+        return $?
+    fi
+    printf 'Hubi: terminal %s zakończył się przed podłączeniem.\n' "$session" >&2
     pause_for_ack
     return 1
 }
 
-stop_terminal_now() {
+stop_terminal_locked() {
     local repo_key="$1" instance="$2" session="" scope configured_scope
     scope="$(terminal_scope_name "$repo_key" "$instance")" || return 2
     if ! find_terminal_session "$repo_key" "$instance"; then
@@ -1160,6 +1214,12 @@ stop_terminal_now() {
             "$session" >&2
         return 1
     fi
+}
+
+stop_terminal_now() {
+    local repo_key="$1" instance="$2"
+    validate_instance_name "$instance" || return 2
+    run_terminal_lifecycle_locked stop "$repo_key" "$instance"
 }
 
 kill_terminal() {
@@ -1527,6 +1587,26 @@ if [[ "${BASH_SOURCE[0]}" == "$0" && "${1:-}" == "__start-locked" ]]; then
         exit 2
     fi
     ensure_agent_session_locked "$@"
+    exit $?
+fi
+
+if [[ "${BASH_SOURCE[0]}" == "$0" && "${1:-}" == "__terminal-start-locked" ]]; then
+    shift
+    if (( $# != 4 )); then
+        printf 'Hubi: niepełne argumenty wewnętrznego startu terminala.\n' >&2
+        exit 2
+    fi
+    start_terminal_locked "$@"
+    exit $?
+fi
+
+if [[ "${BASH_SOURCE[0]}" == "$0" && "${1:-}" == "__terminal-stop-locked" ]]; then
+    shift
+    if (( $# != 2 )); then
+        printf 'Hubi: niepełne argumenty wewnętrznego zatrzymania terminala.\n' >&2
+        exit 2
+    fi
+    stop_terminal_locked "$@"
     exit $?
 fi
 

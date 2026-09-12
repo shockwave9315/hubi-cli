@@ -64,6 +64,7 @@ hubi_env() {
         HUBI_TMUX_SOCKET_PATH="$SOCKET_PATH" \
         HUBI_TMUX_SERVICE="$TMUX_SERVICE" \
         HUBI_TMUX_BIN="$TEST_ROOT/tmux-clean" \
+        HUBI_LOCK_ROOT="$TEST_ROOT/locks" \
         "$@"
 }
 
@@ -75,6 +76,59 @@ terminal_name() {
 terminal_scope() {
     hubi_env REPO_NAME="$1" INSTANCE="$2" HUBI_FILE="$HUBI" bash -c \
         'source "$HUBI_FILE"; terminal_scope_name "$REPO_NAME" "$INSTANCE"'
+}
+
+terminal_lock() {
+    hubi_env REPO_NAME="$1" INSTANCE="$2" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; terminal_lifecycle_lock_file "$REPO_NAME" "$INSTANCE"'
+}
+
+wait_for_barrier() {
+    local directory="$1" marker
+    for _ in {1..500}; do
+        marker="$(find "$directory" -maxdepth 1 -type f ! -name '*.release' -print -quit 2>/dev/null)"
+        if [[ -n "$marker" ]]; then
+            BARRIER_MARKER="$marker"
+            return 0
+        fi
+        sleep 0.01
+    done
+    return 1
+}
+
+launch_barrier_start() {
+    local repo="$1" instance="$2" barrier_dir="$3" log="$4"
+    hubi_env REPO_NAME="$repo" INSTANCE="$instance" HUBI_FILE="$HUBI" \
+        HUBI_FLOCK_BIN="$ROOT/tests/flock_barrier_wrapper.sh" \
+        HUBI_TEST_FLOCK_BARRIER_DIR="$barrier_dir" HUBI_LOCK_TIMEOUT=8 bash -c '
+            source "$HUBI_FILE"
+            attach_session() { :; }
+            pause_for_ack() { :; }
+            start_terminal "$REPO_NAME" "$INSTANCE"
+        ' >"$log" 2>&1 &
+    LAUNCHED_PID=$!
+}
+
+launch_barrier_stop() {
+    local repo="$1" instance="$2" barrier_dir="$3" log="$4"
+    hubi_env REPO_NAME="$repo" INSTANCE="$instance" HUBI_FILE="$HUBI" \
+        HUBI_FLOCK_BIN="$ROOT/tests/flock_barrier_wrapper.sh" \
+        HUBI_TEST_FLOCK_BARRIER_DIR="$barrier_dir" HUBI_LOCK_TIMEOUT=8 bash -c '
+            source "$HUBI_FILE"
+            stop_terminal_now "$REPO_NAME" "$INSTANCE"
+        ' >"$log" 2>&1 &
+    LAUNCHED_PID=$!
+}
+
+lock_fd_absent() {
+    local lock_file="$1" pid fd_target
+    shift
+    for pid in "$@"; do
+        [[ "$pid" =~ ^[1-9][0-9]*$ && -d "/proc/$pid/fd" ]] || return 1
+        while IFS= read -r fd_target; do
+            [[ "$fd_target" != "$lock_file" && "$fd_target" != "$lock_file (deleted)" ]] || return 1
+        done < <(find "/proc/$pid/fd" -maxdepth 1 -type l -printf '%l\n' 2>/dev/null)
+    done
 }
 
 create_terminal() {
@@ -203,23 +257,13 @@ check "persistent terminal rejects persistent wrong cwd and removes only its new
     test_terminal_wrong_cwd_cleanup
 
 test_repository_identity_revalidation() {
-    local session output rc
+    local session output rc marker="$TEST_ROOT/repository-replaced.marker"
     session="$(terminal_name "$REPO_REPLACED" identity-check)"
     output="$(hubi_env REPO_NAME="$REPO_REPLACED" REPO_PATH="$REPOS/$REPO_REPLACED" \
-        HUBI_FILE="$HUBI" bash -c '
+        HUBI_FILE="$HUBI" HUBI_TMUX_BIN="$ROOT/tests/tmux_repo_replace_wrapper.sh" \
+        HUBI_TEST_REAL_TMUX="$TEST_ROOT/tmux-clean" HUBI_TEST_REPO_PATH="$REPOS/$REPO_REPLACED" \
+        HUBI_TEST_REPLACE_MARKER="$marker" bash -c '
             source "$HUBI_FILE"
-            eval "$(declare -f revalidate_repo_for_start \
-                | sed "1s/revalidate_repo_for_start/original_revalidate_repo_for_start/")"
-            validation_calls=0
-            revalidate_repo_for_start() {
-                ((validation_calls += 1))
-                if (( validation_calls == 2 )); then
-                    mv -- "$REPO_PATH" "$REPO_PATH-old"
-                    mkdir -- "$REPO_PATH"
-                    git init -q "$REPO_PATH"
-                fi
-                original_revalidate_repo_for_start "$@"
-            }
             attach_session() { :; }
             pause_for_ack() { :; }
             start_terminal "$REPO_NAME" identity-check
@@ -359,6 +403,159 @@ test_orphan_terminal_scope_reconciliation() {
 }
 check "orphaned terminal scope remains discoverable and is reconciled exactly" \
     test_orphan_terminal_scope_reconciliation
+
+test_concurrent_terminal_start_start() {
+    local instance=race-start barrier="$TEST_ROOT/barrier-start" session scope lock_file
+    local first second first_marker second_marker first_pane second_pane server_pid cgroup pid rc1 rc2
+    mkdir -p "$barrier"
+    session="$(terminal_name "$REPO_TWO" "$instance")"
+    scope="$(terminal_scope "$REPO_TWO" "$instance")"
+    lock_file="$(terminal_lock "$REPO_TWO" "$instance")"
+    launch_barrier_start "$REPO_TWO" "$instance" "$barrier" "$TEST_ROOT/start-start-1.log"
+    first=$LAUNCHED_PID
+    wait_for_barrier "$barrier" || return 1
+    first_marker=$BARRIER_MARKER
+    launch_barrier_start "$REPO_TWO" "$instance" "$barrier" "$TEST_ROOT/start-start-2.log"
+    second=$LAUNCHED_PID
+    sleep 0.15
+    [[ "$(find "$barrier" -maxdepth 1 -type f ! -name '*.release' | wc -l)" -eq 1 ]] || return 1
+    : >"$first_marker.release"
+    wait "$first"; rc1=$?
+    (( rc1 == 0 )) || return 1
+    first_pane="$(tmux -L "$SOCKET" display-message -p -t "=$session:" '#{pane_pid}')"
+    rm -f -- "$first_marker" "$first_marker.release"
+    wait_for_barrier "$barrier" || return 1
+    second_marker=$BARRIER_MARKER
+    : >"$second_marker.release"
+    wait "$second"; rc2=$?
+    second_pane="$(tmux -L "$SOCKET" display-message -p -t "=$session:" '#{pane_pid}')"
+    (( rc2 == 0 )) \
+        && [[ "$first_pane" =~ ^[1-9][0-9]*$ && "$second_pane" == "$first_pane" ]] \
+        && [[ "$(tmux -L "$SOCKET" list-sessions -F '#S' | grep -Fxc "$session")" -eq 1 ]] \
+        && systemctl --user is-active --quiet "$scope" || return 1
+
+    server_pid="$(tmux -N -L "$SOCKET" display-message -p '#{pid}')"
+    cgroup="$(systemctl --user show "$scope" --property=ControlGroup --value)"
+    lock_fd_absent "$lock_file" "$server_pid" || return 1
+    while IFS= read -r pid; do lock_fd_absent "$lock_file" "$pid" || return 1; done \
+        <"/sys/fs/cgroup$cgroup/cgroup.procs"
+    hubi_env REPO_NAME="$REPO_TWO" INSTANCE="$instance" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; stop_terminal_now "$REPO_NAME" "$INSTANCE"' >/dev/null 2>&1
+}
+check "concurrent terminal start/start preserves one winner and leaks no lifecycle lock fd" \
+    test_concurrent_terminal_start_start
+
+test_concurrent_terminal_start_stop() {
+    local instance=race-stop sibling=race-stop-sibling barrier="$TEST_ROOT/barrier-stop"
+    local start_pid stop_pid start_marker stop_marker session scope sibling_scope rc1 rc2
+    mkdir -p "$barrier"
+    create_terminal "$REPO_TWO" "$sibling" >/dev/null 2>&1 || return 1
+    sibling_scope="$(terminal_scope "$REPO_TWO" "$sibling")"
+    session="$(terminal_name "$REPO_TWO" "$instance")"
+    scope="$(terminal_scope "$REPO_TWO" "$instance")"
+    launch_barrier_start "$REPO_TWO" "$instance" "$barrier" "$TEST_ROOT/start-stop-start.log"
+    start_pid=$LAUNCHED_PID
+    wait_for_barrier "$barrier" || return 1
+    start_marker=$BARRIER_MARKER
+    launch_barrier_stop "$REPO_TWO" "$instance" "$barrier" "$TEST_ROOT/start-stop-stop.log"
+    stop_pid=$LAUNCHED_PID
+    sleep 0.15
+    [[ "$(find "$barrier" -maxdepth 1 -type f ! -name '*.release' | wc -l)" -eq 1 ]] || return 1
+    : >"$start_marker.release"
+    wait "$start_pid"; rc1=$?
+    (( rc1 == 0 )) || return 1
+    rm -f -- "$start_marker" "$start_marker.release"
+    wait_for_barrier "$barrier" || return 1
+    stop_marker=$BARRIER_MARKER
+    : >"$stop_marker.release"
+    wait "$stop_pid"; rc2=$?
+    (( rc2 == 0 )) \
+        && ! tmux -L "$SOCKET" has-session -t "=$session" 2>/dev/null \
+        && ! systemctl --user is-active --quiet "$scope" \
+        && systemctl --user is-active --quiet "$sibling_scope" \
+        && terminal_exists "$REPO_TWO" "$sibling" || return 1
+    hubi_env REPO_NAME="$REPO_TWO" INSTANCE="$sibling" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; stop_terminal_now "$REPO_NAME" "$INSTANCE"' >/dev/null 2>&1
+}
+check "concurrent terminal start/stop is serialized without touching a sibling" \
+    test_concurrent_terminal_start_stop
+
+test_orphan_start_rechecks_under_lock() {
+    local instance=race-orphan barrier="$TEST_ROOT/barrier-orphan" session scope old_child pidfile
+    local first second first_marker second_marker new_pane final_pane rc1 rc2
+    mkdir -p "$barrier"
+    create_terminal "$REPO_TWO" "$instance" >/dev/null 2>&1 || return 1
+    session="$(terminal_name "$REPO_TWO" "$instance")"
+    scope="$(terminal_scope "$REPO_TWO" "$instance")"
+    pidfile="$TEST_ROOT/race-orphan-child.pid"
+    tmux -L "$SOCKET" send-keys -t "=$session:" \
+        "setsid bash -c 'trap \"\" HUP INT TERM; echo \$\$ >\"$pidfile\"; while :; do sleep 1; done' &" Enter \
+        || return 1
+    for _ in {1..50}; do [[ -s "$pidfile" ]] && break; sleep 0.05; done
+    [[ -s "$pidfile" ]] || return 1
+    old_child="$(<"$pidfile")"
+    tmux -L "$SOCKET" kill-session -t "=$session" || return 1
+    systemctl --user is-active --quiet "$scope" || return 1
+
+    launch_barrier_start "$REPO_TWO" "$instance" "$barrier" "$TEST_ROOT/orphan-start-1.log"
+    first=$LAUNCHED_PID
+    wait_for_barrier "$barrier" || return 1
+    first_marker=$BARRIER_MARKER
+    launch_barrier_start "$REPO_TWO" "$instance" "$barrier" "$TEST_ROOT/orphan-start-2.log"
+    second=$LAUNCHED_PID
+    sleep 0.15
+    [[ "$(find "$barrier" -maxdepth 1 -type f ! -name '*.release' | wc -l)" -eq 1 ]] || return 1
+    : >"$first_marker.release"
+    wait "$first"; rc1=$?
+    (( rc1 == 0 )) || return 1
+    new_pane="$(tmux -L "$SOCKET" display-message -p -t "=$session:" '#{pane_pid}')"
+    [[ "$new_pane" =~ ^[1-9][0-9]*$ ]] && ! kill -0 "$old_child" 2>/dev/null || return 1
+    rm -f -- "$first_marker" "$first_marker.release"
+    wait_for_barrier "$barrier" || return 1
+    second_marker=$BARRIER_MARKER
+    : >"$second_marker.release"
+    wait "$second"; rc2=$?
+    final_pane="$(tmux -L "$SOCKET" display-message -p -t "=$session:" '#{pane_pid}')"
+    (( rc2 == 0 )) && [[ "$final_pane" == "$new_pane" ]] \
+        && terminal_exists "$REPO_TWO" "$instance" \
+        && systemctl --user is-active --quiet "$scope" || return 1
+    hubi_env REPO_NAME="$REPO_TWO" INSTANCE="$instance" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; stop_terminal_now "$REPO_NAME" "$INSTANCE"' >/dev/null 2>&1
+}
+check "orphan/start rechecks under the lock and cannot ABA-kill the replacement" \
+    test_orphan_start_rechecks_under_lock
+
+test_terminal_sibling_locks_are_independent() {
+    local held=sibling-lock-a free=sibling-lock-b barrier="$TEST_ROOT/barrier-siblings"
+    local held_pid held_marker free_session free_scope
+    mkdir -p "$barrier"
+    launch_barrier_start "$REPO_TWO" "$held" "$barrier" "$TEST_ROOT/sibling-held.log"
+    held_pid=$LAUNCHED_PID
+    wait_for_barrier "$barrier" || return 1
+    held_marker=$BARRIER_MARKER
+    free_session="$(terminal_name "$REPO_TWO" "$free")"
+    free_scope="$(terminal_scope "$REPO_TWO" "$free")"
+    timeout 2 env -u HUBI_ACTIVE -u HUBI_AGENT_INSTANCE -u TMUX \
+        HUBI_REPOS="$REPOS" HUBI_TMUX_SOCKET_PATH="$SOCKET_PATH" \
+        HUBI_TMUX_SERVICE="$TMUX_SERVICE" HUBI_TMUX_BIN="$TEST_ROOT/tmux-clean" \
+        HUBI_LOCK_ROOT="$TEST_ROOT/locks" REPO_NAME="$REPO_TWO" INSTANCE="$free" \
+        HUBI_FILE="$HUBI" bash -c '
+        source "$HUBI_FILE"
+        attach_session() { :; }
+        pause_for_ack() { :; }
+        start_terminal "$REPO_NAME" "$INSTANCE"
+    ' >/dev/null 2>&1 || return 1
+    terminal_exists "$REPO_TWO" "$free" && systemctl --user is-active --quiet "$free_scope" || return 1
+    : >"$held_marker.release"
+    wait "$held_pid" || return 1
+    hubi_env REPO_NAME="$REPO_TWO" INSTANCE="$held" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; stop_terminal_now "$REPO_NAME" "$INSTANCE"' >/dev/null 2>&1 || return 1
+    hubi_env REPO_NAME="$REPO_TWO" INSTANCE="$free" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; stop_terminal_now "$REPO_NAME" "$INSTANCE"' >/dev/null 2>&1 || return 1
+    ! tmux -L "$SOCKET" has-session -t "=$free_session" 2>/dev/null
+}
+check "a terminal lifecycle lock does not serialize a sibling terminal" \
+    test_terminal_sibling_locks_are_independent
 
 test_exact_stop_isolation() {
     local matrix primary agent_codex agent_claude
