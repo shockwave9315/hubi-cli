@@ -13,13 +13,15 @@ TMUX_SERVICE="hubiv5-test-terminal-$$.service"
 REPO_ONE="terminal-one-$$"
 REPO_TWO="terminal-two-$$"
 REPO_REPLACED="terminal-replaced-$$"
+REPO_UI="terminal-ui-$$"
 PASS_COUNT=0
 FAIL_COUNT=0
 
-mkdir -p "$REPOS/$REPO_ONE" "$REPOS/$REPO_TWO" "$REPOS/$REPO_REPLACED"
+mkdir -p "$REPOS/$REPO_ONE" "$REPOS/$REPO_TWO" "$REPOS/$REPO_REPLACED" "$REPOS/$REPO_UI"
 git init -q "$REPOS/$REPO_ONE"
 git init -q "$REPOS/$REPO_TWO"
 git init -q "$REPOS/$REPO_REPLACED"
+git init -q "$REPOS/$REPO_UI"
 
 cleanup() {
     local scope
@@ -403,6 +405,38 @@ test_orphan_terminal_scope_reconciliation() {
 }
 check "orphaned terminal scope remains discoverable and is reconciled exactly" \
     test_orphan_terminal_scope_reconciliation
+
+test_orphan_terminal_user_flow() {
+    local orphan=aaa-orphan sibling=zzz-sibling orphan_session orphan_scope sibling_scope
+    local pidfile="$TEST_ROOT/ui-orphan-child.pid" output
+    create_terminal "$REPO_UI" "$orphan" >/dev/null 2>&1 || return 1
+    create_terminal "$REPO_UI" "$sibling" >/dev/null 2>&1 || return 1
+    orphan_session="$(terminal_name "$REPO_UI" "$orphan")"
+    orphan_scope="$(terminal_scope "$REPO_UI" "$orphan")"
+    sibling_scope="$(terminal_scope "$REPO_UI" "$sibling")"
+    tmux -L "$SOCKET" send-keys -t "=$orphan_session:" \
+        "setsid bash -c 'trap \"\" HUP INT TERM; echo \$\$ >\"$pidfile\"; while :; do sleep 1; done' &" Enter \
+        || return 1
+    for _ in {1..50}; do [[ -s "$pidfile" ]] && break; sleep 0.05; done
+    [[ -s "$pidfile" ]] || return 1
+    tmux -L "$SOCKET" kill-session -t "=$orphan_session" || return 1
+    systemctl --user is-active --quiet "$orphan_scope" || return 1
+
+    if ! output="$(hubi_env REPO_NAME="$REPO_UI" HUBI_FILE="$HUBI" \
+        python3 "$ROOT/tests/terminal_menu_driver.py" bash -c \
+        'source "$HUBI_FILE"; terminals_menu "$REPO_NAME"' 2>&1)"; then
+        printf '%s\n' "$output" >&2
+        return 1
+    fi
+    [[ "$output" == *"ORPHANED"* ]] \
+        && ! systemctl --user is-active --quiet "$orphan_scope" \
+        && systemctl --user is-active --quiet "$sibling_scope" \
+        && terminal_exists "$REPO_UI" "$sibling" || return 1
+    hubi_env REPO_NAME="$REPO_UI" INSTANCE="$sibling" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; stop_terminal_now "$REPO_NAME" "$INSTANCE"' >/dev/null 2>&1
+}
+check "terminal list and menu can confirm and clean an orphan without touching siblings" \
+    test_orphan_terminal_user_flow
 
 test_concurrent_terminal_start_start() {
     local instance=race-start barrier="$TEST_ROOT/barrier-start" session scope lock_file

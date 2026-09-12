@@ -1272,14 +1272,24 @@ stop_terminal_now() {
     run_terminal_lifecycle_locked stop "$repo_key" "$instance"
 }
 
+terminal_is_actionable() {
+    local repo_key="$1" instance="$2" scope
+    scope="$(terminal_scope_name "$repo_key" "$instance")" || return 2
+    find_terminal_session "$repo_key" "$instance" || scope_is_active "$scope"
+}
+
 kill_terminal() {
-    local repo_key="$1" instance="$2" choice
-    if ! find_terminal_session "$repo_key" "$instance"; then
+    local repo_key="$1" instance="$2" choice scope
+    scope="$(terminal_scope_name "$repo_key" "$instance")" || return 2
+    if ! find_terminal_session "$repo_key" "$instance" && ! scope_is_active "$scope"; then
         printf '\n  Terminal %s dla %s nie działa.\n' "$instance" "$repo_key"
         pause_for_ack
         return 0
     fi
-    printf '\n  Zakończyć terminal %s dla %s?\n' "$instance" "$repo_key"
+    if ! find_terminal_session "$repo_key" "$instance"; then
+        printf '\n  Wykryto ORPHANED scope terminala bez sesji tmux.\n'
+    fi
+    printf '\n  Zakończyć terminal %s dla %s i cały jego scope procesów?\n' "$instance" "$repo_key"
     printf '  [y] Tak\n  [n] Nie\n  > '
     if ! read_choice choice; then return 0; fi
     case "$choice" in
@@ -1290,16 +1300,25 @@ kill_terminal() {
 }
 
 terminal_menu() {
-    local repo_key="$1" instance="$2" choice
-    while find_terminal_session "$repo_key" "$instance"; do
+    local repo_key="$1" instance="$2" choice has_session
+    while terminal_is_actionable "$repo_key" "$instance"; do
         clear_screen
         printf '\n  TERMINAL — %s\n  ──────────────────────────────────\n\n' "$instance"
         printf '  Projekt: %s\n  Status:  %s\n\n' "$repo_key" "$(terminal_status "$repo_key" "$instance")"
         show_hint
-        printf '  [a] Podłącz\n  [x] Zakończ terminal\n  [b] Powrót\n  > '
+        has_session=0
+        find_terminal_session "$repo_key" "$instance" && has_session=1
+        if (( has_session )); then printf '  [a] Podłącz\n'; fi
+        printf '  [x] Zakończ terminal\n  [b] Powrót\n  > '
         if ! read_choice choice; then return; fi
         case "$choice" in
-            a|A) if find_terminal_session "$repo_key" "$instance"; then attach_session "$FOUND_SESSION" || true; fi ;;
+            a|A)
+                if (( has_session )) && find_terminal_session "$repo_key" "$instance"; then
+                    attach_session "$FOUND_SESSION" || true
+                else
+                    MENU_HINT="Terminal nie ma aktywnej sesji tmux."
+                fi
+                ;;
             x|X) kill_terminal "$repo_key" "$instance" || true ;;
             b|B) return ;;
             *) unknown_key ;;
