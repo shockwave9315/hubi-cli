@@ -68,6 +68,36 @@ v5_test_server_start_path "$TMUX_SERVICE" "$SOCKET" || {
     exit 1
 }
 
+test_scope_invocation_generation() (
+    local scope="hubiv5-test-invocation-generation-$$.scope" runner="" first stable second
+    # Invoked indirectly by the subshell EXIT trap.
+    # shellcheck disable=SC2317
+    cleanup_generation_scope() {
+        systemctl --user kill --kill-whom=all --signal=KILL "$scope" >/dev/null 2>&1 || true
+        [[ -z "$runner" ]] || wait "$runner" 2>/dev/null || true
+    }
+    trap cleanup_generation_scope EXIT
+
+    systemd-run --user --scope --collect --quiet --unit="$scope" -- sleep 30 \
+        >/dev/null 2>&1 & runner=$!
+    for _ in {1..100}; do systemctl --user is-active --quiet "$scope" && break; sleep 0.02; done
+    first="$(systemctl --user show "$scope" --property=InvocationID --value)"
+    stable="$(systemctl --user show "$scope" --property=InvocationID --value)"
+    [[ "$first" =~ ^[0-9a-fA-F]{32}$ && "$stable" == "$first" ]] || return 1
+    systemctl --user kill --kill-whom=all --signal=KILL "$scope" || return 1
+    wait "$runner" 2>/dev/null || true
+    runner=""
+    for _ in {1..100}; do systemctl --user show "$scope" >/dev/null 2>&1 || break; sleep 0.02; done
+
+    systemd-run --user --scope --collect --quiet --unit="$scope" -- sleep 30 \
+        >/dev/null 2>&1 & runner=$!
+    for _ in {1..100}; do systemctl --user is-active --quiet "$scope" && break; sleep 0.02; done
+    second="$(systemctl --user show "$scope" --property=InvocationID --value)"
+    [[ "$second" =~ ^[0-9a-fA-F]{32}$ && "$second" != "$first" ]]
+)
+check "a reused transient scope name receives a new stable InvocationID generation" \
+    test_scope_invocation_generation
+
 create_managed_work() {
     hubi_env REPO_NAME="$REPO_NAME" HUBI_FILE="$HUBI" bash -c '
         source "$HUBI_FILE"

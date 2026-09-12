@@ -1009,6 +1009,35 @@ start_agent() {
 
 scope_is_active() { "$SYSTEMCTL_BIN" --user is-active --quiet "$1" 2>/dev/null; }
 
+scope_invocation_id() {
+    local scope="$1" output key value active_state="" invocation_id=""
+    output="$("$SYSTEMCTL_BIN" --user show "$scope" --no-pager \
+        --property=ActiveState --property=InvocationID 2>/dev/null)" || return 1
+    while IFS='=' read -r key value; do
+        case "$key" in
+            ActiveState) active_state="$value" ;;
+            InvocationID) invocation_id="$value" ;;
+        esac
+    done <<<"$output"
+    [[ "$active_state" == active && "$invocation_id" =~ ^[0-9a-fA-F]{32}$ ]] || return 1
+    printf '%s' "${invocation_id,,}"
+}
+
+scope_generation_token() {
+    local scope="$1"
+    if scope_is_active "$scope"; then
+        scope_invocation_id "$scope"
+    else
+        printf 'inactive'
+    fi
+}
+
+scope_generation_matches() {
+    local scope="$1" expected="$2" current
+    current="$(scope_generation_token "$scope")" || return 1
+    [[ "$current" == "$expected" ]]
+}
+
 require_scope_kill_capability() {
     local help
     if ! user_manager_available; then
@@ -1040,11 +1069,26 @@ wait_scope_inactive() {
 }
 
 terminate_scope() {
-    local scope="$1"
+    local scope="$1" expected="${2:-}"
     scope_is_active "$scope" || return 0
+    if [[ -z "$expected" ]]; then
+        expected="$(scope_invocation_id "$scope")" || {
+            printf 'Hubi: nie można potwierdzić generacji scope %s; odmowa wysłania sygnału.\n' "$scope" >&2
+            return 1
+        }
+    fi
+    if ! scope_generation_matches "$scope" "$expected"; then
+        printf 'Hubi: generacja scope %s zmieniła się; odmowa wysłania sygnału.\n' "$scope" >&2
+        return 1
+    fi
     signal_scope "$scope" TERM || return 1
     wait_scope_inactive "$scope" 20 || true
     if scope_is_active "$scope"; then
+        if ! scope_generation_matches "$scope" "$expected"; then
+            printf 'Hubi: generacja scope %s zmieniła się podczas zatrzymywania; odmowa KILL.\n' \
+                "$scope" >&2
+            return 1
+        fi
         signal_scope "$scope" KILL || return 1
         wait_scope_inactive "$scope" 20 || true
     fi
@@ -1242,12 +1286,21 @@ start_terminal() {
 }
 
 stop_terminal_locked() {
-    local repo_key="$1" instance="$2" session="" scope configured_scope
+    local repo_key="$1" instance="$2" expected_generation="$3"
+    local session="" scope configured_scope current_generation
     scope="$(terminal_scope_name "$repo_key" "$instance")" || return 2
+    current_generation="$(scope_generation_token "$scope")" || {
+        printf 'Hubi: nie można potwierdzić bieżącej generacji scope %s; odmowa zatrzymania.\n' "$scope" >&2
+        return 1
+    }
+    if [[ "$current_generation" != "$expected_generation" ]]; then
+        printf 'Hubi: terminal zmienił się podczas oczekiwania na potwierdzenie. Spróbuj ponownie z bieżącego stanu.\n' >&2
+        return 3
+    fi
     if ! find_terminal_session "$repo_key" "$instance"; then
         if scope_is_active "$scope"; then
             printf 'Hubi: czyszczenie osieroconego scope terminala %s.\n' "$scope" >&2
-            terminate_scope "$scope"
+            terminate_scope "$scope" "$expected_generation"
             return $?
         fi
         printf 'Hubi: terminal %s dla %s nie działa.\n' "$instance" "$repo_key" >&2
@@ -1260,7 +1313,9 @@ stop_terminal_locked() {
             "$session" >&2
         return 1
     fi
-    terminate_scope "$scope" || return 1
+    if [[ "$expected_generation" != inactive ]]; then
+        terminate_scope "$scope" "$expected_generation" || return 1
+    fi
     # With remain-on-exit disabled, tmux may remove the terminal session as
     # soon as its scoped Bash exits. Otherwise remove that exact session now.
     if tmux_cmd has-session -t "=$session" 2>/dev/null \
@@ -1272,9 +1327,16 @@ stop_terminal_locked() {
 }
 
 stop_terminal_now() {
-    local repo_key="$1" instance="$2"
+    local repo_key="$1" instance="$2" expected_generation="${3:-}" scope
     validate_instance_name "$instance" || return 2
-    run_terminal_lifecycle_locked stop "$repo_key" "$instance"
+    scope="$(terminal_scope_name "$repo_key" "$instance")" || return 2
+    if [[ -z "$expected_generation" ]]; then
+        expected_generation="$(scope_generation_token "$scope")" || {
+            printf 'Hubi: nie można potwierdzić generacji scope %s; odmowa zatrzymania.\n' "$scope" >&2
+            return 1
+        }
+    fi
+    run_terminal_lifecycle_locked stop "$repo_key" "$instance" "$expected_generation"
 }
 
 terminal_is_actionable() {
@@ -1284,7 +1346,7 @@ terminal_is_actionable() {
 }
 
 kill_terminal() {
-    local repo_key="$1" instance="$2" choice scope
+    local repo_key="$1" instance="$2" choice scope expected_generation
     scope="$(terminal_scope_name "$repo_key" "$instance")" || return 2
     if ! find_terminal_session "$repo_key" "$instance" && ! scope_is_active "$scope"; then
         printf '\n  Terminal %s dla %s nie działa.\n' "$instance" "$repo_key"
@@ -1294,11 +1356,17 @@ kill_terminal() {
     if ! find_terminal_session "$repo_key" "$instance"; then
         printf '\n  Wykryto ORPHANED scope terminala bez sesji tmux.\n'
     fi
+    expected_generation="$(scope_generation_token "$scope")" || {
+        printf '\n  Nie można potwierdzić generacji scope; odmowa przygotowania zatrzymania.\n' >&2
+        pause_for_ack
+        return 1
+    }
     printf '\n  Zakończyć terminal %s dla %s i cały jego scope procesów?\n' "$instance" "$repo_key"
     printf '  [y] Tak\n  [n] Nie\n  > '
     if ! read_choice choice; then return 0; fi
     case "$choice" in
-        y|Y) stop_terminal_now "$repo_key" "$instance" || { pause_for_ack; return 1; } ;;
+        y|Y) stop_terminal_now "$repo_key" "$instance" "$expected_generation" \
+            || { pause_for_ack; return 1; } ;;
         n|N) ;;
         *) printf '  Anulowano: nieznany wybór.\n'; pause_for_ack ;;
     esac
@@ -1676,7 +1744,7 @@ fi
 
 if [[ "${BASH_SOURCE[0]}" == "$0" && "${1:-}" == "__terminal-stop-locked" ]]; then
     shift
-    if (( $# != 2 )); then
+    if (( $# != 3 )); then
         printf 'Hubi: niepełne argumenty wewnętrznego zatrzymania terminala.\n' >&2
         exit 2
     fi

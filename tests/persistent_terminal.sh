@@ -80,6 +80,16 @@ terminal_scope() {
         'source "$HUBI_FILE"; terminal_scope_name "$REPO_NAME" "$INSTANCE"'
 }
 
+scope_invocation() {
+    systemctl --user show "$1" --property=InvocationID --value 2>/dev/null
+}
+
+wait_for_file() {
+    local path="$1"
+    for _ in {1..1000}; do [[ -e "$path" ]] && return 0; sleep 0.01; done
+    return 1
+}
+
 terminal_lock() {
     hubi_env REPO_NAME="$1" INSTANCE="$2" HUBI_FILE="$HUBI" bash -c \
         'source "$HUBI_FILE"; terminal_lifecycle_lock_file "$REPO_NAME" "$INSTANCE"'
@@ -438,6 +448,105 @@ test_orphan_terminal_user_flow() {
 check "terminal list and menu can confirm and clean an orphan without touching siblings" \
     test_orphan_terminal_user_flow
 
+test_stale_orphan_terminal_confirmation() {
+    local target=stale-orphan sibling=stale-orphan-sibling session scope sibling_scope
+    local child_file="$TEST_ROOT/stale-orphan-child.pid" ready="$TEST_ROOT/stale-orphan.ready"
+    local release="$TEST_ROOT/stale-orphan.release" log="$TEST_ROOT/stale-orphan.log"
+    local fresh_file="$TEST_ROOT/stale-orphan-fresh" g1 g2 server_before server_after driver
+    create_terminal "$REPO_UI" "$target" >/dev/null 2>&1 || return 1
+    create_terminal "$REPO_UI" "$sibling" >/dev/null 2>&1 || return 1
+    session="$(terminal_name "$REPO_UI" "$target")"
+    scope="$(terminal_scope "$REPO_UI" "$target")"
+    sibling_scope="$(terminal_scope "$REPO_UI" "$sibling")"
+    tmux -L "$SOCKET" send-keys -t "=$session:" \
+        "setsid bash -c 'trap \"\" HUP INT TERM; echo \$\$ >\"$child_file\"; while :; do sleep 1; done' &" Enter \
+        || return 1
+    wait_for_file "$child_file" || return 1
+    tmux -L "$SOCKET" kill-session -t "=$session" || return 1
+    systemctl --user is-active --quiet "$scope" || return 1
+    g1="$(scope_invocation "$scope")"
+    server_before="$(tmux -N -L "$SOCKET" display-message -p '#{pid}')"
+
+    hubi_env REPO_NAME="$REPO_UI" INSTANCE="$target" HUBI_FILE="$HUBI" \
+        HUBI_TEST_CONFIRM_READY="$ready" HUBI_TEST_CONFIRM_RELEASE="$release" \
+        HUBI_TEST_CONFIRM_PROMPT='Zakończyć terminal' \
+        HUBI_TEST_CONFIRM_REFUSAL='terminal zmienił się' \
+        python3 "$ROOT/tests/stale_confirmation_driver.py" bash -c \
+        'source "$HUBI_FILE"; kill_terminal "$REPO_NAME" "$INSTANCE"' >"$log" 2>&1 &
+    driver=$!
+    wait_for_file "$ready" || return 1
+    hubi_env REPO_NAME="$REPO_UI" INSTANCE="$target" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; stop_terminal_now "$REPO_NAME" "$INSTANCE"' >/dev/null 2>&1 || return 1
+    create_terminal "$REPO_UI" "$target" >/dev/null 2>&1 || return 1
+    g2="$(scope_invocation "$scope")"
+    [[ -n "$g1" && -n "$g2" && "$g1" != "$g2" ]] || return 1
+    : >"$release"
+    wait "$driver" || return 1
+
+    server_after="$(tmux -N -L "$SOCKET" display-message -p '#{pid}')"
+    systemctl --user is-active --quiet "$scope" \
+        && terminal_exists "$REPO_UI" "$target" \
+        && systemctl --user is-active --quiet "$sibling_scope" \
+        && terminal_exists "$REPO_UI" "$sibling" \
+        && [[ "$server_after" == "$server_before" ]] \
+        && grep -Fq 'terminal zmienił się' "$log" || return 1
+    tmux -L "$SOCKET" send-keys -t "=$session:" "printf FRESH >'$fresh_file'" Enter || return 1
+    wait_for_file "$fresh_file" || return 1
+    [[ "$(<"$fresh_file")" == FRESH ]] || return 1
+    hubi_env REPO_NAME="$REPO_UI" INSTANCE="$target" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; stop_terminal_now "$REPO_NAME" "$INSTANCE"' >/dev/null 2>&1 || return 1
+    hubi_env REPO_NAME="$REPO_UI" INSTANCE="$sibling" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; stop_terminal_now "$REPO_NAME" "$INSTANCE"' >/dev/null 2>&1
+}
+check "a stale orphan-terminal confirmation cannot stop its replacement generation" \
+    test_stale_orphan_terminal_confirmation
+
+test_stale_live_terminal_confirmation() {
+    local target=stale-live sibling=stale-live-sibling session scope sibling_scope
+    local ready="$TEST_ROOT/stale-live.ready" release="$TEST_ROOT/stale-live.release"
+    local log="$TEST_ROOT/stale-live.log" fresh_file="$TEST_ROOT/stale-live-fresh"
+    local g1 g2 server_before server_after driver
+    create_terminal "$REPO_UI" "$target" >/dev/null 2>&1 || return 1
+    create_terminal "$REPO_UI" "$sibling" >/dev/null 2>&1 || return 1
+    session="$(terminal_name "$REPO_UI" "$target")"
+    scope="$(terminal_scope "$REPO_UI" "$target")"
+    sibling_scope="$(terminal_scope "$REPO_UI" "$sibling")"
+    g1="$(scope_invocation "$scope")"
+    server_before="$(tmux -N -L "$SOCKET" display-message -p '#{pid}')"
+
+    hubi_env REPO_NAME="$REPO_UI" INSTANCE="$target" HUBI_FILE="$HUBI" \
+        HUBI_TEST_CONFIRM_READY="$ready" HUBI_TEST_CONFIRM_RELEASE="$release" \
+        HUBI_TEST_CONFIRM_PROMPT='Zakończyć terminal' \
+        HUBI_TEST_CONFIRM_REFUSAL='terminal zmienił się' \
+        python3 "$ROOT/tests/stale_confirmation_driver.py" bash -c \
+        'source "$HUBI_FILE"; kill_terminal "$REPO_NAME" "$INSTANCE"' >"$log" 2>&1 &
+    driver=$!
+    wait_for_file "$ready" || return 1
+    hubi_env REPO_NAME="$REPO_UI" INSTANCE="$target" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; stop_terminal_now "$REPO_NAME" "$INSTANCE"' >/dev/null 2>&1 || return 1
+    create_terminal "$REPO_UI" "$target" >/dev/null 2>&1 || return 1
+    g2="$(scope_invocation "$scope")"
+    [[ -n "$g1" && -n "$g2" && "$g1" != "$g2" ]] || return 1
+    : >"$release"
+    wait "$driver" || return 1
+
+    server_after="$(tmux -N -L "$SOCKET" display-message -p '#{pid}')"
+    systemctl --user is-active --quiet "$scope" \
+        && terminal_exists "$REPO_UI" "$target" \
+        && systemctl --user is-active --quiet "$sibling_scope" \
+        && terminal_exists "$REPO_UI" "$sibling" \
+        && [[ "$server_after" == "$server_before" ]] \
+        && grep -Fq 'terminal zmienił się' "$log" || return 1
+    tmux -L "$SOCKET" send-keys -t "=$session:" "printf FRESH >'$fresh_file'" Enter || return 1
+    wait_for_file "$fresh_file" || return 1
+    hubi_env REPO_NAME="$REPO_UI" INSTANCE="$target" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; stop_terminal_now "$REPO_NAME" "$INSTANCE"' >/dev/null 2>&1 || return 1
+    hubi_env REPO_NAME="$REPO_UI" INSTANCE="$sibling" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; stop_terminal_now "$REPO_NAME" "$INSTANCE"' >/dev/null 2>&1
+}
+check "a stale live-terminal confirmation cannot stop its replacement generation" \
+    test_stale_live_terminal_confirmation
+
 test_concurrent_terminal_start_start() {
     local instance=race-start barrier="$TEST_ROOT/barrier-start" session scope lock_file
     local first second first_marker second_marker first_pane second_pane server_pid cgroup pid rc1 rc2
@@ -503,11 +612,13 @@ test_concurrent_terminal_start_stop() {
     stop_marker=$BARRIER_MARKER
     : >"$stop_marker.release"
     wait "$stop_pid"; rc2=$?
-    (( rc2 == 0 )) \
-        && ! tmux -L "$SOCKET" has-session -t "=$session" 2>/dev/null \
-        && ! systemctl --user is-active --quiet "$scope" \
+    (( rc2 != 0 )) \
+        && tmux -L "$SOCKET" has-session -t "=$session" 2>/dev/null \
+        && systemctl --user is-active --quiet "$scope" \
         && systemctl --user is-active --quiet "$sibling_scope" \
         && terminal_exists "$REPO_TWO" "$sibling" || return 1
+    hubi_env REPO_NAME="$REPO_TWO" INSTANCE="$instance" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; stop_terminal_now "$REPO_NAME" "$INSTANCE"' >/dev/null 2>&1 || return 1
     hubi_env REPO_NAME="$REPO_TWO" INSTANCE="$sibling" HUBI_FILE="$HUBI" bash -c \
         'source "$HUBI_FILE"; stop_terminal_now "$REPO_NAME" "$INSTANCE"' >/dev/null 2>&1
 }
