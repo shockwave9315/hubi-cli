@@ -285,6 +285,28 @@ sanitize_tmux_environment() {
     tmux_cmd set-environment -gu HUBI_ACTIVE >/dev/null 2>&1 || true
 }
 
+seed_agent_session_environment() {
+    local session="$1" name
+    local -a allowlist=(
+        PATH
+        OPENAI_API_KEY ANTHROPIC_API_KEY
+        OPENAI_BASE_URL ANTHROPIC_BASE_URL
+        HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY
+        http_proxy https_proxy all_proxy no_proxy
+        SSL_CERT_FILE SSL_CERT_DIR NODE_EXTRA_CA_CERTS
+    )
+
+    for name in "${allowlist[@]}"; do
+        if [[ -v "$name" ]]; then
+            tmux_cmd set-environment -t "=$session" "$name" "${!name}" || return 1
+        else
+            # A remove marker is required: -u would expose a stale value from
+            # the long-lived server's global environment on the next spawn.
+            tmux_cmd set-environment -r -t "=$session" "$name" || return 1
+        fi
+    done
+}
+
 clear_screen() { printf '\033[2J\033[H'; }
 
 enable_safe_input() {
@@ -954,6 +976,12 @@ ensure_agent_session_locked() {
 
     if ! wait_for_pane_cwd "$pane" "$directory"; then
         printf 'Hubi: tmux nie zachował katalogu repozytorium %s; start został przerwany.\n' "$directory" >&2
+        tmux_cmd kill-session -t "=$session" >/dev/null 2>&1 || true
+        return 1
+    fi
+
+    if ! seed_agent_session_environment "$session"; then
+        printf 'Hubi: nie udało się zapisać środowiska nowej sesji %s.\n' "$session" >&2
         tmux_cmd kill-session -t "=$session" >/dev/null 2>&1 || true
         return 1
     fi
