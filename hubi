@@ -787,6 +787,51 @@ terminal_lifecycle_lock_file() {
     printf '%s/terminal-%s.lock' "$locks" "$digest"
 }
 
+agent_lifecycle_lock_file() {
+    local agent="$1" repo_key="$2" instance="$3" locks digest
+    case "$agent" in codex|claude) ;; *) return 2 ;; esac
+    validate_instance_name "$instance" || return 2
+    locks="$(lock_root)" || return 1
+    digest="$(printf '%s\0%s\0%s' "$agent" "$repo_key" "$instance" | sha256sum | awk '{print $1}')"
+    [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+    printf '%s/agent-%s.lock' "$locks" "$digest"
+}
+
+run_agent_lifecycle_locked() {
+    local operation="$1" agent="$2" repo_key="$3" instance="$4" lock_file worker output rc
+    shift 4
+    case "$operation" in
+        start) worker=__start-locked ;;
+        stop) worker=__agent-stop-locked ;;
+        *) return 2 ;;
+    esac
+    lock_file="$(agent_lifecycle_lock_file "$agent" "$repo_key" "$instance")" || {
+        printf 'Hubi: nie można przygotować blokady cyklu życia agenta.\n' >&2
+        return 1
+    }
+    if [[ ! "$HUBI_LOCK_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
+        printf 'Hubi: nieprawidłowy limit oczekiwania na blokadę: %s\n' "$HUBI_LOCK_TIMEOUT" >&2
+        return 1
+    fi
+    output="$("$FLOCK_BIN" --exclusive --close --wait "$HUBI_LOCK_TIMEOUT" \
+        --conflict-exit-code 75 "$lock_file" \
+        env -u HUBI_ACTIVE bash "$HUBI_SCRIPT_PATH" "$worker" \
+        "$agent" "$repo_key" "$instance" "$@" 2>&1)"
+    rc=$?
+    if (( rc == 75 )); then
+        printf 'Hubi: limit %ss oczekiwania na blokadę cyklu życia (lifecycle lock) %s/%s/%s został przekroczony.\n' \
+            "$HUBI_LOCK_TIMEOUT" "$agent" "$repo_key" "$instance" >&2
+        return 1
+    fi
+    if (( rc != 0 )); then
+        printf 'Hubi: operacja %s %s/%s/%s pod blokadą nie powiodła się (rc=%d).\n' \
+            "$operation" "$agent" "$repo_key" "$instance" "$rc" >&2
+        [[ -z "$output" ]] || printf '%s\n' "$output" >&2
+        return "$rc"
+    fi
+    [[ -z "$output" ]] || printf '%s\n' "$output" >&2
+}
+
 run_terminal_lifecycle_locked() {
     local operation="$1" repo_key="$2" instance="$3" lock_file output rc
     shift 3
@@ -824,7 +869,7 @@ ensure_agent_session() {
     local agent="$1" repo_key="$2" directory="$3" executable="$4"
     shift 4
     local -a arguments=("$@")
-    local instance="${HUBI_AGENT_INSTANCE:-primary}" session locks lock_file lock_identity output rc expected_repo_id
+    local instance="${HUBI_AGENT_INSTANCE:-primary}" session expected_repo_id
     ENSURED_SESSION=""
     if ! validate_instance_name "$instance"; then
         printf 'Hubi: nieprawidłowa nazwa instancji: %s\n' "$instance" >&2
@@ -834,36 +879,10 @@ ensure_agent_session() {
     expected_repo_id="$RESOLVED_REPO_ID"
     runtime_creation_preflight || return 1
     revalidate_repo_for_start "$repo_key" "$directory" "$expected_repo_id" || return 1
-    locks="$(lock_root)" || { printf 'Hubi: nie można utworzyć katalogu blokad startowych.\n' >&2; return 1; }
-    if [[ "$instance" == "primary" ]]; then
-        lock_identity="$agent:$repo_key"
-        lock_file="$locks/$(name_hash "$lock_identity").lock"
-    else
-        lock_file="$locks/$agent-$(instance_name_hash "$repo_key" "$instance").lock"
-    fi
-    if [[ ! "$HUBI_LOCK_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
-        printf 'Hubi: nieprawidłowy limit oczekiwania na blokadę: %s\n' "$HUBI_LOCK_TIMEOUT" >&2
-        return 1
-    fi
-
-    # flock owns the descriptor in a supervisor. --close guarantees that the
-    # worker, tmux server, agent and every descendant start without that fd.
-    output="$("$FLOCK_BIN" --exclusive --close --wait "$HUBI_LOCK_TIMEOUT" \
-        --conflict-exit-code 75 "$lock_file" \
-        env -u HUBI_ACTIVE bash "$HUBI_SCRIPT_PATH" __start-locked \
-        "$agent" "$repo_key" "$instance" "$directory" "$expected_repo_id" \
-        "$executable" "${arguments[@]}" 2>&1)"
-    rc=$?
-    if (( rc == 75 )); then
-        printf 'Hubi: limit %ss oczekiwania na blokadę startu (startup lock) %s/%s został przekroczony.\n' \
-            "$HUBI_LOCK_TIMEOUT" "$agent" "$repo_key" >&2
-        return 1
-    fi
-    if (( rc != 0 )); then
-        printf 'Hubi: start %s/%s pod blokadą nie powiódł się (rc=%d).\n' "$agent" "$repo_key" "$rc" >&2
-        [[ -z "$output" ]] || printf '%s\n' "$output" >&2
-        return "$rc"
-    fi
+    # The same tuple lock serializes start, stop and orphan reconciliation.
+    # flock --close keeps its descriptor out of tmux, the agent and descendants.
+    run_agent_lifecycle_locked start "$agent" "$repo_key" "$instance" \
+        "$directory" "$expected_repo_id" "$executable" "${arguments[@]}" || return $?
     ENSURED_SESSION="$session"
 }
 
@@ -1098,17 +1117,26 @@ terminate_scope() {
     fi
 }
 
-stop_agent_now() {
-    local agent="$1" repo_key="$2" instance="${3:-primary}" session="" scope configured_scope
+stop_agent_locked() {
+    local agent="$1" repo_key="$2" instance="$3" expected_generation="$4"
+    local session="" scope configured_scope current_generation
     if ! validate_instance_name "$instance"; then
         printf 'Hubi: nieprawidłowa nazwa instancji: %s\n' "$instance" >&2
         return 2
     fi
     scope="$(agent_scope_name "$agent" "$repo_key" "$instance")"
+    current_generation="$(scope_generation_token "$scope")" || {
+        printf 'Hubi: nie można potwierdzić bieżącej generacji scope %s; odmowa zatrzymania.\n' "$scope" >&2
+        return 1
+    }
+    if [[ "$current_generation" != "$expected_generation" ]]; then
+        printf 'Hubi: agent zmienił się podczas oczekiwania na potwierdzenie. Spróbuj ponownie z bieżącego stanu.\n' >&2
+        return 3
+    fi
     if ! find_agent_session "$agent" "$repo_key" "$instance"; then
         if scope_is_active "$scope"; then
             printf 'Hubi: czyszczenie osieroconego scope %s (brak sesji tmux).\n' "$scope" >&2
-            terminate_scope "$scope"
+            terminate_scope "$scope" "$expected_generation"
             return $?
         fi
         printf 'Hubi: %s dla %s nie działa.\n' "$agent" "$repo_key" >&2
@@ -1123,7 +1151,9 @@ stop_agent_now() {
             fi
             wait_scope_inactive "$scope" 30 || true
         fi
-        terminate_scope "$scope" || return 1
+        if [[ "$expected_generation" != inactive ]]; then
+            terminate_scope "$scope" "$expected_generation" || return 1
+        fi
     else
         printf 'Hubi: sesja %s nie ma zweryfikowanej granicy cgroup v5.\n' "$session" >&2
         printf 'Hubi: odmowa automatycznego zatrzymania; sesja i jej procesy pozostają bez zmian.\n' >&2
@@ -1135,23 +1165,46 @@ stop_agent_now() {
     fi
 }
 
-kill_agent() {
-    local agent="$1" repo_key="$2" instance="${3:-primary}" choice
+stop_agent_now() {
+    local agent="$1" repo_key="$2" instance="${3:-primary}" expected_generation="${4:-}"
+    local scope
     if ! validate_instance_name "$instance"; then
         printf 'Hubi: nieprawidłowa nazwa instancji: %s\n' "$instance" >&2
         return 2
     fi
+    scope="$(agent_scope_name "$agent" "$repo_key" "$instance")" || return 2
+    if [[ -z "$expected_generation" ]]; then
+        expected_generation="$(scope_generation_token "$scope")" || {
+            printf 'Hubi: nie można potwierdzić generacji scope %s; odmowa zatrzymania.\n' "$scope" >&2
+            return 1
+        }
+    fi
+    run_agent_lifecycle_locked stop "$agent" "$repo_key" "$instance" "$expected_generation"
+}
+
+kill_agent() {
+    local agent="$1" repo_key="$2" instance="${3:-primary}" choice scope expected_generation
+    if ! validate_instance_name "$instance"; then
+        printf 'Hubi: nieprawidłowa nazwa instancji: %s\n' "$instance" >&2
+        return 2
+    fi
+    scope="$(agent_scope_name "$agent" "$repo_key" "$instance")" || return 2
     if ! find_agent_session "$agent" "$repo_key" "$instance"; then
-        if ! scope_is_active "$(agent_scope_name "$agent" "$repo_key" "$instance")"; then
+        if ! scope_is_active "$scope"; then
             printf '\n  %s/%s dla %s nie działa.\n' "$agent" "$instance" "$repo_key"; pause_for_ack; return 0
         fi
         printf '\n  Wykryto ORPHANED scope bez sesji tmux.\n'
     fi
+    expected_generation="$(scope_generation_token "$scope")" || {
+        printf '\n  Nie można potwierdzić generacji scope; odmowa przygotowania zatrzymania.\n' >&2
+        pause_for_ack
+        return 1
+    }
     printf '\n  Zakończyć %s/%s dla %s i cały jego scope procesów?\n' "$agent" "$instance" "$repo_key"
     printf '  [y] Tak\n  [n] Nie\n  > '
     if ! read_choice choice; then return 0; fi
     case "$choice" in
-        y|Y) if ! stop_agent_now "$agent" "$repo_key" "$instance"; then pause_for_ack; return 1; fi ;;
+        y|Y) if ! stop_agent_now "$agent" "$repo_key" "$instance" "$expected_generation"; then pause_for_ack; return 1; fi ;;
         n|N) ;;
         *) printf '  Anulowano: nieznany wybór.\n'; pause_for_ack ;;
     esac
@@ -1729,6 +1782,16 @@ if [[ "${BASH_SOURCE[0]}" == "$0" && "${1:-}" == "__start-locked" ]]; then
         exit 2
     fi
     ensure_agent_session_locked "$@"
+    exit $?
+fi
+
+if [[ "${BASH_SOURCE[0]}" == "$0" && "${1:-}" == "__agent-stop-locked" ]]; then
+    shift
+    if (( $# != 4 )); then
+        printf 'Hubi: niepełne argumenty wewnętrznego zatrzymania agenta.\n' >&2
+        exit 2
+    fi
+    stop_agent_locked "$@"
     exit $?
 fi
 

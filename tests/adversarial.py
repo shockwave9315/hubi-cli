@@ -279,8 +279,11 @@ class HubiAdversarialTests(unittest.TestCase):
             os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
         )
         lock_dir = runtime / f"hubi-locks-{os.getuid()}"
-        digest = hashlib.sha256(f"{agent}:{self.repo_name}".encode()).hexdigest()[:12]
-        return lock_dir / f"{digest}.lock"
+        identity = b"\0".join(
+            (agent.encode(), self.repo_name.encode(), b"primary")
+        )
+        digest = hashlib.sha256(identity).hexdigest()
+        return lock_dir / f"agent-{digest}.lock"
 
     def session_name(self, agent: str = "codex") -> str:
         digest = hashlib.sha256(self.repo_name.encode()).hexdigest()[:12]

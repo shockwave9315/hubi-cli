@@ -8,14 +8,16 @@ HUBI="$ROOT/hubi"
 TEST_ROOT="$(mktemp -d)"
 REPOS="$TEST_ROOT/repos"
 REPO_NAME="multi-instance-$$"
+REPO_OTHER="multi-instance-other-$$"
 SOCKET="hubi-multi-instance-$$"
 SOCKET_PATH="/tmp/tmux-$UID/$SOCKET"
 TMUX_SERVICE="hubiv5-test-multi-$$.service"
 PASS_COUNT=0
 FAIL_COUNT=0
 
-mkdir -p "$REPOS/$REPO_NAME"
+mkdir -p "$REPOS/$REPO_NAME" "$REPOS/$REPO_OTHER"
 git init -q "$REPOS/$REPO_NAME"
+git init -q "$REPOS/$REPO_OTHER"
 
 cleanup() {
     local scope lock_dir agent instance identity digest
@@ -64,6 +66,7 @@ hubi_env() {
         HUBI_TMUX_SOCKET_PATH="$SOCKET_PATH" \
         HUBI_TMUX_SERVICE="$TMUX_SERVICE" \
         HUBI_TMUX_BIN="$TEST_ROOT/tmux-clean" \
+        HUBI_LOCK_ROOT="$TEST_ROOT/locks" \
         HUBI_CODEX_BIN="$TEST_ROOT/live-agent" \
         HUBI_CLAUDE_BIN="$TEST_ROOT/live-agent" \
         "$@"
@@ -115,6 +118,29 @@ start_instance() {
 scope_active() { systemctl --user is-active --quiet "$(scope_name "$1" "$2")"; }
 session_exists() { tmux -L "$SOCKET" has-session -t "$(session_name "$1" "$2")" 2>/dev/null; }
 
+wait_for_file() {
+    local path="$1"
+    for _ in {1..1500}; do [[ -e "$path" ]] && return 0; sleep 0.01; done
+    return 1
+}
+
+wait_for_flock_barrier() {
+    local directory="$1" marker
+    for _ in {1..1500}; do
+        marker="$(find "$directory" -maxdepth 1 -type f ! -name '*.release' -print -quit 2>/dev/null)"
+        if [[ -n "$marker" ]]; then
+            AGENT_BARRIER_MARKER="$marker"
+            return 0
+        fi
+        sleep 0.01
+    done
+    return 1
+}
+
+scope_invocation() {
+    systemctl --user show "$1" --property=InvocationID --value 2>/dev/null
+}
+
 test_naming() {
     local old_session old_scope primary_session primary_scope
     local codex_review codex_upstream claude_review
@@ -140,8 +166,7 @@ check "primary names are compatible and secondary identities are unique" test_na
 
 test_structural_identity_collision() {
     local primary_session secondary_session primary_scope secondary_scope
-    local primary_lock secondary_lock primary_hash secondary_hash
-    local lock_dir="${XDG_RUNTIME_DIR:-/tmp}/hubi-locks-$UID"
+    local primary_lock secondary_lock expected_primary_lock expected_secondary_lock
     local -a lock_paths=()
     git init -q "$REPOS/foo"
     git init -q "$REPOS/foo:bar"
@@ -158,9 +183,10 @@ EOF
         'source "$HUBI_FILE"; agent_scope_name codex "foo:bar" primary')"
     secondary_scope="$(hubi_env HUBI_FILE="$HUBI" bash -c \
         'source "$HUBI_FILE"; agent_scope_name codex foo bar')"
-    secondary_hash="$(hubi_env HUBI_FILE="$HUBI" bash -c \
-        'source "$HUBI_FILE"; instance_name_hash foo bar')"
-    primary_hash="$(printf '%s' 'codex:foo:bar' | sha256sum | cut -c1-12)"
+    expected_primary_lock="$(hubi_env HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; agent_lifecycle_lock_file codex "foo:bar" primary')"
+    expected_secondary_lock="$(hubi_env HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; agent_lifecycle_lock_file codex foo bar')"
     hubi_env HUBI_FLOCK_BIN="$TEST_ROOT/flock-recorder" LOCK_LOG="$TEST_ROOT/lock-paths" \
         HUBI_FILE="$HUBI" bash -c '
             source "$HUBI_FILE"; resolve_repo "foo:bar"
@@ -177,9 +203,8 @@ EOF
     secondary_lock="${lock_paths[1]:-}"
     [[ "$primary_session" != "$secondary_session" \
         && "$primary_scope" != "$secondary_scope" \
-        && "$primary_hash" != "$secondary_hash" \
-        && "$primary_lock" == "$lock_dir/$primary_hash.lock" \
-        && "$secondary_lock" == "$lock_dir/codex-$secondary_hash.lock" \
+        && "$primary_lock" == "$expected_primary_lock" \
+        && "$secondary_lock" == "$expected_secondary_lock" \
         && "$primary_lock" != "$secondary_lock" ]]
 }
 check "primary and secondary delimiter identities cannot collide" test_structural_identity_collision
@@ -389,6 +414,143 @@ EOF
 }
 check "orphaned secondary (tmux gone, scope alive) is discoverable and explicitly stoppable without touching siblings" \
     test_orphan_secondary_discovery
+
+test_agent_stop_start_generation_aba() {
+    local target=aba-target terminal=aba-terminal target_scope target_session terminal_scope
+    local other_scope other_session ready="$TEST_ROOT/agent-aba-term.ready"
+    local release="$TEST_ROOT/agent-aba-term.release" start_barrier="$TEST_ROOT/agent-aba-start"
+    local stop_log="$TEST_ROOT/agent-aba-stop.log" start_log="$TEST_ROOT/agent-aba-start.log"
+    local stopper starter start_marker g1 g2 pane
+    mkdir -p "$start_barrier"
+    cat >"$TEST_ROOT/aba-agent" <<'EOF'
+#!/usr/bin/env bash
+printf 'READY:G1\n'
+trap '' INT
+trap 'exit 0' TERM
+while :; do sleep 1; done
+EOF
+    chmod +x "$TEST_ROOT/aba-agent"
+
+    start_instance codex review aba-review >/dev/null 2>&1 || return 1
+    start_instance claude primary aba-claude >/dev/null 2>&1 || return 1
+    hubi_env REPO="$REPO_OTHER" HUBI_FILE="$HUBI" bash -c '
+        source "$HUBI_FILE"; resolve_repo "$REPO"
+        HUBI_AGENT_INSTANCE=primary ensure_agent_session codex \
+            "$RESOLVED_REPO_KEY" "$RESOLVED_REPO_DIR" "$HUBI_CODEX_BIN" other
+    ' >/dev/null 2>&1 || return 1
+    hubi_env REPO_NAME="$REPO_NAME" INSTANCE="$terminal" HUBI_FILE="$HUBI" bash -c '
+        source "$HUBI_FILE"
+        attach_session() { :; }
+        start_terminal "$REPO_NAME" "$INSTANCE"
+    ' >/dev/null 2>&1 || return 1
+    terminal_scope="$(hubi_env REPO_NAME="$REPO_NAME" INSTANCE="$terminal" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; terminal_scope_name "$REPO_NAME" "$INSTANCE"')"
+
+    hubi_env INSTANCE="$target" REPO_NAME="$REPO_NAME" HUBI_FILE="$HUBI" \
+        ABA_AGENT="$TEST_ROOT/aba-agent" bash -c '
+        source "$HUBI_FILE"; resolve_repo "$REPO_NAME"
+        HUBI_AGENT_INSTANCE="$INSTANCE" ensure_agent_session codex \
+            "$RESOLVED_REPO_KEY" "$RESOLVED_REPO_DIR" "$ABA_AGENT"
+    ' >/dev/null 2>&1 || return 1
+    target_scope="$(scope_name codex "$target")"
+    target_session="$(session_name codex "$target")"
+    g1="$(scope_invocation "$target_scope")"
+
+    hubi_env INSTANCE="$target" REPO_NAME="$REPO_NAME" HUBI_FILE="$HUBI" \
+        HUBI_SYSTEMCTL_BIN="$ROOT/tests/systemctl_term_barrier.sh" \
+        HUBI_TEST_SCOPE_BARRIER_UNIT="$target_scope" \
+        HUBI_TEST_SCOPE_BARRIER_READY="$ready" HUBI_TEST_SCOPE_BARRIER_RELEASE="$release" bash -c '
+        source "$HUBI_FILE"; stop_agent_now codex "$REPO_NAME" "$INSTANCE"
+    ' >"$stop_log" 2>&1 &
+    stopper=$!
+    wait_for_file "$ready" || return 1
+    for _ in {1..300}; do systemctl --user is-active --quiet "$target_scope" || break; sleep 0.01; done
+    ! systemctl --user is-active --quiet "$target_scope" || return 1
+
+    hubi_env INSTANCE="$target" REPO_NAME="$REPO_NAME" HUBI_FILE="$HUBI" \
+        HUBI_FLOCK_BIN="$ROOT/tests/flock_barrier_wrapper.sh" \
+        HUBI_TEST_FLOCK_BARRIER_DIR="$start_barrier" HUBI_LOCK_TIMEOUT=8 bash -c '
+        source "$HUBI_FILE"; resolve_repo "$REPO_NAME"
+        HUBI_AGENT_INSTANCE="$INSTANCE" ensure_agent_session codex \
+            "$RESOLVED_REPO_KEY" "$RESOLVED_REPO_DIR" "$HUBI_CODEX_BIN" G2
+    ' >"$start_log" 2>&1 &
+    starter=$!
+    [[ -z "$(find "$start_barrier" -maxdepth 1 -type f -print -quit)" ]] || return 1
+    : >"$release"
+    wait "$stopper" || return 1
+    wait_for_flock_barrier "$start_barrier" || return 1
+    start_marker=$AGENT_BARRIER_MARKER
+    : >"$start_marker.release"
+    wait "$starter" || return 1
+
+    g2="$(scope_invocation "$target_scope")"
+    pane="$(tmux -L "$SOCKET" show-option -qv -t "=$target_session:" @hubi-pane)"
+    other_scope="$(hubi_env REPO="$REPO_OTHER" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; agent_scope_name codex "$REPO" primary')"
+    other_session="$(hubi_env REPO="$REPO_OTHER" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; agent_session_name codex "$REPO" primary')"
+    [[ -n "$g1" && -n "$g2" && "$g1" != "$g2" \
+        && "$(tmux -L "$SOCKET" display-message -p -t "$pane" '#{pane_dead}')" != 1 \
+        && "$(tmux -L "$SOCKET" capture-pane -p -t "$pane")" == *'READY:G2'* ]] \
+        && systemctl --user is-active --quiet "$target_scope" \
+        && session_exists codex review && scope_active codex review \
+        && session_exists claude primary && scope_active claude primary \
+        && tmux -L "$SOCKET" has-session -t "=$other_session" 2>/dev/null \
+        && systemctl --user is-active --quiet "$other_scope" \
+        && systemctl --user is-active --quiet "$terminal_scope" || return 1
+
+    hubi_env REPO_NAME="$REPO_NAME" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; stop_agent_now codex "$REPO_NAME" aba-target' >/dev/null 2>&1 || return 1
+    hubi_env REPO_NAME="$REPO_NAME" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; stop_agent_now codex "$REPO_NAME" review' >/dev/null 2>&1 || return 1
+    hubi_env REPO_NAME="$REPO_NAME" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; stop_agent_now claude "$REPO_NAME" primary' >/dev/null 2>&1 || return 1
+    hubi_env REPO="$REPO_OTHER" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; stop_agent_now codex "$REPO" primary' >/dev/null 2>&1 || return 1
+    hubi_env REPO_NAME="$REPO_NAME" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; stop_terminal_now "$REPO_NAME" aba-terminal' >/dev/null 2>&1
+}
+check "agent lifecycle lock closes stop/start generation ABA and preserves all siblings" \
+    test_agent_stop_start_generation_aba
+
+test_stale_agent_confirmation() {
+    local target=stale-agent target_scope target_session ready="$TEST_ROOT/stale-agent.ready"
+    local release="$TEST_ROOT/stale-agent.release" log="$TEST_ROOT/stale-agent.log"
+    local driver g1 g2 pane
+    start_instance codex "$target" G1 >/dev/null 2>&1 || return 1
+    target_scope="$(scope_name codex "$target")"
+    target_session="$(session_name codex "$target")"
+    g1="$(scope_invocation "$target_scope")"
+
+    hubi_env REPO_NAME="$REPO_NAME" INSTANCE="$target" HUBI_FILE="$HUBI" \
+        HUBI_TEST_CONFIRM_READY="$ready" HUBI_TEST_CONFIRM_RELEASE="$release" \
+        HUBI_TEST_CONFIRM_PROMPT='Zakończyć codex' HUBI_TEST_CONFIRM_REFUSAL='agent zmienił się' \
+        python3 "$ROOT/tests/stale_confirmation_driver.py" bash -c \
+        'source "$HUBI_FILE"; kill_agent codex "$REPO_NAME" "$INSTANCE"' >"$log" 2>&1 &
+    driver=$!
+    wait_for_file "$ready" || return 1
+    hubi_env REPO_NAME="$REPO_NAME" INSTANCE="$target" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; stop_agent_now codex "$REPO_NAME" "$INSTANCE"' >/dev/null 2>&1 || return 1
+    start_instance codex "$target" G2 >/dev/null 2>&1 || return 1
+    g2="$(scope_invocation "$target_scope")"
+    [[ -n "$g1" && -n "$g2" && "$g1" != "$g2" ]] || return 1
+    : >"$release"
+    wait "$driver" || return 1
+
+    pane="$(tmux -L "$SOCKET" show-option -qv -t "=$target_session:" @hubi-pane)"
+    systemctl --user is-active --quiet "$target_scope" \
+        && tmux -L "$SOCKET" has-session -t "=$target_session" 2>/dev/null \
+        && [[ "$(tmux -L "$SOCKET" display-message -p -t "$pane" '#{pane_dead}')" != 1 \
+        && "$(tmux -L "$SOCKET" capture-pane -p -t "$pane")" == *'READY:G2'* ]] \
+        && session_exists codex primary && scope_active codex primary \
+        && session_exists codex upstream && scope_active codex upstream \
+        && session_exists claude review && scope_active claude review \
+        && grep -Fq 'agent zmienił się' "$log" || return 1
+    hubi_env REPO_NAME="$REPO_NAME" INSTANCE="$target" HUBI_FILE="$HUBI" bash -c \
+        'source "$HUBI_FILE"; stop_agent_now codex "$REPO_NAME" "$INSTANCE"' >/dev/null 2>&1
+}
+check "a stale agent confirmation cannot stop its replacement generation" \
+    test_stale_agent_confirmation
 
 test_new_resume_argv() {
     local spec agent instance mode expected file content executable
