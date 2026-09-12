@@ -209,6 +209,14 @@ New conversations invoke `codex` or
 `claude --permission-mode bypassPermissions`. Resume invokes `codex resume` or
 `claude --permission-mode bypassPermissions --resume`.
 
+When a new agent session is created, Hubi snapshots a narrow set of variables
+from that launcher: `PATH`, the OpenAI and Anthropic API key/base URL variables,
+upper- and lowercase HTTP proxy variables, and `SSL_CERT_FILE`, `SSL_CERT_DIR`,
+and `NODE_EXTRA_CA_CERTS`. A variable absent from the launcher is explicitly
+removed from the new session so a stale value from the long-lived tmux server
+cannot leak into the agent. This happens only at creation; later clients and
+attaches do not update an existing agent session.
+
 Run the isolated test suite with:
 
 ```bash
@@ -224,6 +232,7 @@ env -u HUBI_NOAUTO python3 tests/adversarial.py
 ./tests/v5_preflight.sh
 ./tests/v5_lifetime.sh
 ./tests/v5_scope_state.sh
+./tests/v5_agent_environment.sh
 ```
 
 At this revision the functional harness reports 18 tests and the adversarial
@@ -231,8 +240,9 @@ suite contains 31 tests. The focused multi-instance harness reports 14 tests;
 the focused persistent-terminal harness reports 22 tests. The v5 doctor,
 server, ownership, preflight, and login-scope lifetime harnesses report 9, 7,
 12, 6, and 2 tests respectively. The systemd scope-state fault-injection
-harness reports 9 tests. That is 130 behavior tests in total; every harness
-must be fully green for release review.
+harness reports 9 tests, and the agent-environment harness reports 6 tests.
+That is 136 behavior tests in total; every harness must be fully green for
+release review.
 
 The harnesses use unique private tmux sockets, disposable Git repositories and
 processes, and exact test-only systemd units/scopes. They never address the
