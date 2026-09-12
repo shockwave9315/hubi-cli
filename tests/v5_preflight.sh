@@ -62,7 +62,6 @@ printf 'loginctl %s\n' "$*" >>"$HUBI_TEST_LOG"
 [[ "${HUBI_TEST_LOGINCTL:-ok}" == ok ]] || exit 1
 case " $* " in
     *" --property=Linger --value "*) printf '%s\n' "${HUBI_TEST_LINGER:-yes}" ;;
-    *" --property=KillProcesses --value "*) printf '%s\n' "${HUBI_TEST_KILL_PROCESSES:-yes}" ;;
     *) exit 93 ;;
 esac
 EOF
@@ -92,7 +91,7 @@ run_preflight() {
 test_linger_yes() {
     : >"$LOG"
     set_cgroup hubi-tmux.service
-    run_preflight HUBI_TEST_LINGER=yes HUBI_TEST_KILL_PROCESSES=yes >/dev/null 2>&1 \
+    run_preflight HUBI_TEST_LINGER=yes >/dev/null 2>&1 \
         && ! grep -Fq -- '--property=KillProcesses' "$LOG"
 }
 check "Linger=yes permits creation and KillUserProcesses is not a gate" test_linger_yes

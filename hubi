@@ -8,6 +8,7 @@ TMUX_BIN="${HUBI_TMUX_BIN:-tmux}"
 SYSTEMD_RUN_BIN="${HUBI_SYSTEMD_RUN_BIN:-systemd-run}"
 SYSTEMCTL_BIN="${HUBI_SYSTEMCTL_BIN:-systemctl}"
 LOGINCTL_BIN="${HUBI_LOGINCTL_BIN:-loginctl}"
+BUSCTL_BIN="${HUBI_BUSCTL_BIN:-busctl}"
 FLOCK_BIN="${HUBI_FLOCK_BIN:-flock}"
 BASH_BIN="${HUBI_BASH_BIN:-bash}"
 HUBI_TMUX_SERVICE="${HUBI_TMUX_SERVICE:-hubi-tmux.service}"
@@ -53,11 +54,15 @@ linger_state() {
 }
 
 kill_user_processes_state() {
-    local user value
-    user="$(current_login_user)" || return 1
-    value="$("$LOGINCTL_BIN" show-user "$user" --property=KillProcesses --value 2>/dev/null)" || return 1
-    [[ -n "$value" ]] || return 1
-    printf '%s' "$value"
+    local value
+    value="$("$BUSCTL_BIN" --system get-property org.freedesktop.login1 \
+        /org/freedesktop/login1 org.freedesktop.login1.Manager \
+        KillUserProcesses 2>/dev/null)" || return 1
+    case "$value" in
+        'b true') printf 'yes' ;;
+        'b false') printf 'no' ;;
+        *) return 1 ;;
+    esac
 }
 
 user_manager_available() {
@@ -231,7 +236,7 @@ hubi_doctor() {
     printf '  tmux version:             %s\n' "$tmux_version"
     printf '  Hubi socket:              %s\n' "$(effective_hubi_socket)"
     printf '  Linger:                   %s\n' "$linger"
-    printf '  KillUserProcesses:        %s (information only)\n' "$kill_processes"
+    printf '  KillUserProcesses:        %s (login1 Manager; information only)\n' "$kill_processes"
     printf '  systemd user manager:     %s\n' "$manager"
     printf '  %s:      %s\n' "$HUBI_TMUX_SERVICE" "$service"
     printf '  tmux server PID:          %s\n' "$pid"

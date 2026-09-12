@@ -47,7 +47,8 @@ hubi doctor
 ```
 
 `hubi doctor` is a read-only readiness report. It displays the Hubi and tmux
-versions, dedicated socket, linger and informational `KillUserProcesses`
+versions, dedicated socket, linger and the live login1 Manager's informational
+`KillUserProcesses`
 states, user-manager reachability, service state, tmux PID and cgroup ownership,
 effective `exit-empty`, full-cgroup kill support, and managed-scope inventory.
 It uses tmux's no-start mode and never starts a server, service, session, or

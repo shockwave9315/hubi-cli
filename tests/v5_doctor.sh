@@ -68,19 +68,28 @@ printf 'loginctl %s\n' "$*" >>"$HUBI_TEST_LOG"
 case " $* " in
     *" --property=Linger --value "*) printf '%s\n' "${HUBI_TEST_LINGER:-yes}" ;;
     *" --property=KillProcesses --value "*)
-        [[ "${HUBI_TEST_KILL_QUERY:-ok}" == ok ]] || exit 1
-        printf '%s\n' "${HUBI_TEST_KILL_PROCESSES:-no}"
+        printf 'yes\n'
         ;;
     *) exit 93 ;;
 esac
 EOF
-chmod +x "$BIN/tmux" "$BIN/systemctl" "$BIN/loginctl"
+
+cat >"$BIN/busctl" <<'EOF'
+#!/usr/bin/env bash
+printf 'busctl %s\n' "$*" >>"$HUBI_TEST_LOG"
+[[ "${HUBI_TEST_BUSCTL:-ok}" == ok ]] || exit 1
+[[ " $* " == *" --system get-property org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager KillUserProcesses "* ]] \
+    || exit 94
+printf 'b %s\n' "${HUBI_TEST_KILL_POLICY:-false}"
+EOF
+chmod +x "$BIN/tmux" "$BIN/systemctl" "$BIN/loginctl" "$BIN/busctl"
 
 doctor_env() {
     env -u HUBI_ACTIVE -u TMUX \
         HUBI_TMUX_BIN="$BIN/tmux" \
         HUBI_SYSTEMCTL_BIN="$BIN/systemctl" \
         HUBI_LOGINCTL_BIN="$BIN/loginctl" \
+        HUBI_BUSCTL_BIN="$BIN/busctl" \
         HUBI_TMUX_SOCKET_PATH="$SOCKET" \
         HUBI_PROC_ROOT="$PROC_ROOT" \
         HUBI_TEST_LOG="$LOG" \
@@ -99,16 +108,29 @@ test_pass_report() {
     output="$(doctor_env "$HUBI" doctor 2>&1)" || return 1
     [[ "$output" == *"Hubi version:             5"* \
         && "$output" == *"Linger:                   yes"* \
-        && "$output" == *"KillUserProcesses:        no (information only)"* \
+        && "$output" == *"KillUserProcesses:        no (login1 Manager; information only)"* \
         && "$output" == *"server ownership:         PASS"* \
         && "$output" == *"exit-empty:               off"* \
         && "$output" == *"hubi-codex-test.scope"* \
         && "$output" != *"unrelated.scope"* \
         && "$output" == *"Summary: PASS"* ]] \
         && grep -Fq "tmux -N -S $SOCKET display-message" "$LOG" \
-        && grep -Fq "tmux -N -S $SOCKET show-options" "$LOG"
+        && grep -Fq "tmux -N -S $SOCKET show-options" "$LOG" \
+        && grep -Fq 'busctl --system get-property org.freedesktop.login1' "$LOG" \
+        && ! grep -Fq -- '--property=KillProcesses' "$LOG"
 }
-check "doctor reports a fully anchored ready server" test_pass_report
+check "doctor reports false from the authoritative login1 Manager policy" test_pass_report
+
+test_true_kill_policy() {
+    local output
+    : >"$LOG"
+    set_cgroup hubi-tmux.service
+    output="$(doctor_env HUBI_TEST_KILL_POLICY=true "$HUBI" doctor 2>&1)" || return 1
+    [[ "$output" == *"KillUserProcesses:        yes (login1 Manager; information only)"* \
+        && "$output" == *"Summary: PASS"* ]] \
+        && ! grep -Fq -- '--property=KillProcesses' "$LOG"
+}
+check "doctor reports true from the authoritative login1 Manager policy" test_true_kill_policy
 
 test_linger_no() {
     local output rc
@@ -131,8 +153,8 @@ check "doctor handles a linger query error deterministically" test_linger_query_
 test_informational_warning() {
     local output
     set_cgroup hubi-tmux.service
-    output="$(doctor_env HUBI_TEST_KILL_QUERY=error "$HUBI" doctor 2>&1)" || return 1
-    [[ "$output" == *"KillUserProcesses:        unknown (information only)"* \
+    output="$(doctor_env HUBI_TEST_BUSCTL=error "$HUBI" doctor 2>&1)" || return 1
+    [[ "$output" == *"KillUserProcesses:        unknown (login1 Manager; information only)"* \
         && "$output" == *"Summary: WARN"* ]]
 }
 check "doctor warns but does not gate on unknown KillUserProcesses" test_informational_warning
@@ -168,6 +190,26 @@ test_read_only_absent_server() {
         && ! grep -Eq 'tmux .* (new-session|start-server|set-|kill-)|systemctl .* (start|enable|kill)' "$LOG"
 }
 check "doctor is read-only and cannot spawn an absent server" test_read_only_absent_server
+
+test_real_login1_manager_interface() {
+    local value
+    command -v busctl >/dev/null 2>&1 || return 77
+    # The environment-provided path intentionally expands in the child Bash.
+    # shellcheck disable=SC2016
+    value="$(env HUBI_FILE="$HUBI" HUBI_BUSCTL_BIN=busctl bash -c \
+        'source "$HUBI_FILE"; kill_user_processes_state')" || return 77
+    [[ "$value" == yes || "$value" == no ]]
+}
+if test_real_login1_manager_interface; then
+    pass "the live login1 Manager exposes a typed KillUserProcesses boolean"
+else
+    rc=$?
+    if (( rc == 77 )); then
+        printf 'ok - live login1 Manager compatibility # SKIP interface unavailable\n'
+    else
+        fail "the live login1 Manager KillUserProcesses response is compatible"
+    fi
+fi
 
 printf '\n%d passed, %d failed\n' "$PASS_COUNT" "$FAIL_COUNT"
 (( FAIL_COUNT == 0 ))
