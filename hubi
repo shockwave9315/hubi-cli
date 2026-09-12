@@ -682,18 +682,23 @@ session_status() {
 }
 
 agent_status() {
-    local agent="$1" repo_key="$2" instance="${3:-primary}" scope
+    local agent="$1" repo_key="$2" instance="${3:-primary}" scope state
     scope="$(agent_scope_name "$agent" "$repo_key" "$instance")" || return 2
+    state="$(scope_state "$scope" 2>/dev/null)" || state=UNKNOWN
     if find_agent_session "$agent" "$repo_key" "$instance"; then
-        if session_is_dead "$FOUND_SESSION" && scope_is_active "$scope"; then
+        if [[ "$state" == UNKNOWN ]]; then
+            printf '⚠ SYSTEMD STATE UNKNOWN'
+        elif session_is_dead "$FOUND_SESSION" && [[ "$state" == ACTIVE ]]; then
             printf '⚠ EXITED / STALE SCOPE'
-        elif ! session_is_dead "$FOUND_SESSION" && ! scope_is_active "$scope"; then
+        elif ! session_is_dead "$FOUND_SESSION" && [[ "$state" == INACTIVE ]]; then
             printf '⚠ STALE SESSION'
         else
             session_status "$FOUND_SESSION"
         fi
-    elif scope_is_active "$scope"; then
+    elif [[ "$state" == ACTIVE ]]; then
         printf '⚠ ORPHANED'
+    elif [[ "$state" == UNKNOWN ]]; then
+        printf '⚠ SYSTEMD STATE UNKNOWN'
     else
         printf '○ STOPPED'
     fi
@@ -890,7 +895,7 @@ ensure_agent_session_locked() {
     local agent="$1" repo_key="$2" instance="$3" directory="$4" expected_repo_id="$5" executable="$6"
     shift 6
     local -a arguments=("$@")
-    local session scope output pane start_command stored_agent stored_repo stored_instance
+    local session scope output pane start_command stored_agent stored_repo stored_instance state
     validate_instance_name "$instance" || return 2
     session="$(agent_session_name "$agent" "$repo_key" "$instance")"
     scope="$(agent_scope_name "$agent" "$repo_key" "$instance")"
@@ -902,7 +907,12 @@ ensure_agent_session_locked() {
         [[ -n "$stored_instance" ]] || stored_instance="primary"
         if session_is_managed "$session" && [[ "$stored_agent" == "$agent" && "$stored_repo" == "$repo_key" \
             && "$stored_instance" == "$instance" ]] && agent_pane "$session"; then
-            return 0
+            if ! state="$(scope_state "$scope")"; then
+                printf 'Hubi: nie można potwierdzić stanu systemd scope %s; odmowa zmiany sesji.\n' \
+                    "$scope" >&2
+                return 1
+            fi
+            [[ "$state" == ACTIVE ]] && return 0
         fi
 
         # Recover only the exact bootstrap shape created by Hubi before it had
@@ -915,9 +925,16 @@ ensure_agent_session_locked() {
             printf 'Hubi: sesja %s istnieje bez zweryfikowanych metadanych v5; odmowa przejęcia.\n' "$session" >&2
             return 1
         fi
-    elif scope_is_active "$scope"; then
-        printf 'Hubi: znaleziono osierocony scope %s; bezpieczne czyszczenie przed restartem.\n' "$scope" >&2
-        terminate_scope "$scope" || return 1
+    else
+        if ! state="$(scope_state "$scope")"; then
+            printf 'Hubi: nie można potwierdzić stanu systemd scope %s; odmowa restartu.\n' \
+                "$scope" >&2
+            return 1
+        fi
+        if [[ "$state" == ACTIVE ]]; then
+            printf 'Hubi: znaleziono osierocony scope %s; bezpieczne czyszczenie przed restartem.\n' "$scope" >&2
+            terminate_scope "$scope" || return 1
+        fi
     fi
 
     # This is the last check before tmux receives -c and before systemd creates
@@ -1026,7 +1043,33 @@ start_agent() {
     attach_session "$ENSURED_SESSION"
 }
 
-scope_is_active() { "$SYSTEMCTL_BIN" --user is-active --quiet "$1" 2>/dev/null; }
+scope_state() {
+    local scope="$1" output key value active_state="" seen_active=0
+    output="$("$SYSTEMCTL_BIN" --user show "$scope" --no-pager \
+        --property=ActiveState 2>/dev/null)" || {
+        printf 'UNKNOWN'
+        return 2
+    }
+    while IFS='=' read -r key value; do
+        if [[ "$key" == ActiveState ]]; then
+            (( seen_active == 0 )) || {
+                printf 'UNKNOWN'
+                return 2
+            }
+            active_state="$value"
+            seen_active=1
+        fi
+    done <<<"$output"
+    (( seen_active == 1 )) || {
+        printf 'UNKNOWN'
+        return 2
+    }
+    case "$active_state" in
+        active|activating|reloading|deactivating|refreshing) printf 'ACTIVE' ;;
+        inactive|failed) printf 'INACTIVE' ;;
+        *) printf 'UNKNOWN'; return 2 ;;
+    esac
+}
 
 scope_invocation_id() {
     local scope="$1" output key value active_state="" invocation_id=""
@@ -1043,17 +1086,14 @@ scope_invocation_id() {
 }
 
 scope_generation_token() {
-    local scope="$1"
-    if scope_is_active "$scope"; then
-        scope_invocation_id "$scope"
-    else
-        printf 'inactive'
-    fi
+    local scope="$1" state
+    state="$(scope_state "$scope")" || return 1
+    if [[ "$state" == ACTIVE ]]; then scope_invocation_id "$scope"; else printf 'inactive'; fi
 }
 
 scope_generation_matches() {
     local scope="$1" expected="$2" current
-    current="$(scope_generation_token "$scope")" || return 1
+    current="$(scope_generation_token "$scope")" || return 2
     [[ "$current" == "$expected" ]]
 }
 
@@ -1071,10 +1111,15 @@ require_scope_kill_capability() {
 }
 
 signal_scope() {
-    local scope="$1" signal="$2" output
+    local scope="$1" signal="$2" output state
     require_scope_kill_capability || return 1
     if ! output="$("$SYSTEMCTL_BIN" --user kill --kill-whom=all --signal="$signal" "$scope" 2>&1)"; then
-        if scope_is_active "$scope"; then
+        if ! state="$(scope_state "$scope")"; then
+            printf 'Hubi: systemctl nie wysłał %s do pełnego scope %s i nie można potwierdzić jego stanu:\n%s\n' \
+                "$signal" "$scope" "$output" >&2
+            return 1
+        fi
+        if [[ "$state" == ACTIVE ]]; then
             printf 'Hubi: systemctl nie wysłał %s do pełnego scope %s:\n%s\n' "$signal" "$scope" "$output" >&2
             return 1
         fi
@@ -1082,44 +1127,73 @@ signal_scope() {
 }
 
 wait_scope_inactive() {
-    local scope="$1" attempts="$2" i
-    for ((i = 0; i < attempts; i++)); do scope_is_active "$scope" || return 0; sleep 0.1; done
+    local scope="$1" attempts="$2" i state
+    for ((i = 0; i < attempts; i++)); do
+        if ! state="$(scope_state "$scope")"; then
+            printf 'Hubi: nie można potwierdzić stanu systemd scope %s podczas oczekiwania na zatrzymanie.\n' \
+                "$scope" >&2
+            return 2
+        fi
+        [[ "$state" == INACTIVE ]] && return 0
+        sleep 0.1
+    done
     return 1
 }
 
 terminate_scope() {
-    local scope="$1" expected="${2:-}"
-    scope_is_active "$scope" || return 0
+    local scope="$1" expected="${2:-}" state wait_rc match_rc
+    if ! state="$(scope_state "$scope")"; then
+        printf 'Hubi: nie można potwierdzić stanu systemd scope %s; odmowa wysłania sygnału.\n' \
+            "$scope" >&2
+        return 1
+    fi
+    [[ "$state" == INACTIVE ]] && return 0
     if [[ -z "$expected" ]]; then
         expected="$(scope_invocation_id "$scope")" || {
             printf 'Hubi: nie można potwierdzić generacji scope %s; odmowa wysłania sygnału.\n' "$scope" >&2
             return 1
         }
     fi
-    if ! scope_generation_matches "$scope" "$expected"; then
+    scope_generation_matches "$scope" "$expected"
+    match_rc=$?
+    if (( match_rc != 0 )); then
+        if (( match_rc == 2 )); then
+            printf 'Hubi: nie można potwierdzić generacji scope %s; odmowa wysłania sygnału.\n' \
+                "$scope" >&2
+            return 1
+        fi
         printf 'Hubi: generacja scope %s zmieniła się; odmowa wysłania sygnału.\n' "$scope" >&2
         return 1
     fi
     signal_scope "$scope" TERM || return 1
-    wait_scope_inactive "$scope" 20 || true
-    if scope_is_active "$scope"; then
-        if ! scope_generation_matches "$scope" "$expected"; then
-            printf 'Hubi: generacja scope %s zmieniła się podczas zatrzymywania; odmowa KILL.\n' \
+    wait_scope_inactive "$scope" 20
+    wait_rc=$?
+    (( wait_rc == 0 )) && return 0
+    (( wait_rc == 2 )) && return 1
+    scope_generation_matches "$scope" "$expected"
+    match_rc=$?
+    if (( match_rc != 0 )); then
+        if (( match_rc == 2 )); then
+            printf 'Hubi: nie można potwierdzić generacji scope %s podczas zatrzymywania; odmowa KILL.\n' \
                 "$scope" >&2
             return 1
         fi
-        signal_scope "$scope" KILL || return 1
-        wait_scope_inactive "$scope" 20 || true
-    fi
-    if scope_is_active "$scope"; then
-        printf 'Hubi: scope %s nadal jest aktywny po TERM/KILL.\n' "$scope" >&2
+        printf 'Hubi: generacja scope %s zmieniła się podczas zatrzymywania; odmowa KILL.\n' \
+            "$scope" >&2
         return 1
     fi
+    signal_scope "$scope" KILL || return 1
+    wait_scope_inactive "$scope" 20
+    wait_rc=$?
+    (( wait_rc == 0 )) && return 0
+    (( wait_rc == 2 )) && return 1
+    printf 'Hubi: scope %s nadal jest aktywny po TERM/KILL.\n' "$scope" >&2
+    return 1
 }
 
 stop_agent_locked() {
     local agent="$1" repo_key="$2" instance="$3" expected_generation="$4"
-    local session="" scope configured_scope current_generation
+    local session="" scope configured_scope current_generation wait_rc
     if ! validate_instance_name "$instance"; then
         printf 'Hubi: nieprawidłowa nazwa instancji: %s\n' "$instance" >&2
         return 2
@@ -1134,7 +1208,7 @@ stop_agent_locked() {
         return 3
     fi
     if ! find_agent_session "$agent" "$repo_key" "$instance"; then
-        if scope_is_active "$scope"; then
+        if [[ "$current_generation" != inactive ]]; then
             printf 'Hubi: czyszczenie osieroconego scope %s (brak sesji tmux).\n' "$scope" >&2
             terminate_scope "$scope" "$expected_generation"
             return $?
@@ -1149,7 +1223,9 @@ stop_agent_locked() {
             if agent_pane "$session"; then
                 tmux_cmd send-keys -t "$FOUND_PANE" C-c >/dev/null 2>&1 || true
             fi
-            wait_scope_inactive "$scope" 30 || true
+            wait_scope_inactive "$scope" 30
+            wait_rc=$?
+            (( wait_rc == 2 )) && return 1
         fi
         if [[ "$expected_generation" != inactive ]]; then
             terminate_scope "$scope" "$expected_generation" || return 1
@@ -1183,14 +1259,19 @@ stop_agent_now() {
 }
 
 kill_agent() {
-    local agent="$1" repo_key="$2" instance="${3:-primary}" choice scope expected_generation
+    local agent="$1" repo_key="$2" instance="${3:-primary}" choice scope expected_generation state
     if ! validate_instance_name "$instance"; then
         printf 'Hubi: nieprawidłowa nazwa instancji: %s\n' "$instance" >&2
         return 2
     fi
     scope="$(agent_scope_name "$agent" "$repo_key" "$instance")" || return 2
     if ! find_agent_session "$agent" "$repo_key" "$instance"; then
-        if ! scope_is_active "$scope"; then
+        if ! state="$(scope_state "$scope")"; then
+            printf '\n  Nie można potwierdzić stanu systemd scope; odmowa przygotowania zatrzymania.\n' >&2
+            pause_for_ack
+            return 1
+        fi
+        if [[ "$state" == INACTIVE ]]; then
             printf '\n  %s/%s dla %s nie działa.\n' "$agent" "$instance" "$repo_key"; pause_for_ack; return 0
         fi
         printf '\n  Wykryto ORPHANED scope bez sesji tmux.\n'
@@ -1221,13 +1302,24 @@ project_shell() {
 }
 
 terminal_status() {
-    local repo_key="$1" instance="$2" clients scope
+    local repo_key="$1" instance="$2" clients scope state
     scope="$(terminal_scope_name "$repo_key" "$instance")" || return 2
+    state="$(scope_state "$scope" 2>/dev/null)" || state=UNKNOWN
     if ! find_terminal_session "$repo_key" "$instance"; then
-        if scope_is_active "$scope"; then printf '⚠ ORPHANED'; else printf '○ STOPPED'; fi
+        if [[ "$state" == ACTIVE ]]; then
+            printf '⚠ ORPHANED'
+        elif [[ "$state" == UNKNOWN ]]; then
+            printf '⚠ SYSTEMD STATE UNKNOWN'
+        else
+            printf '○ STOPPED'
+        fi
         return
     fi
-    if ! scope_is_active "$scope"; then
+    if [[ "$state" == UNKNOWN ]]; then
+        printf '⚠ SYSTEMD STATE UNKNOWN'
+        return
+    fi
+    if [[ "$state" == INACTIVE ]]; then
         printf '⚠ STALE SESSION'
         return
     fi
@@ -1237,7 +1329,7 @@ terminal_status() {
 
 start_terminal_locked() {
     local repo_key="$1" instance="$2" directory="$3" expected_repo_id="$4"
-    local session scope output pane
+    local session scope output pane state
     validate_instance_name "$instance" || return 2
     session="$(terminal_session_name "$repo_key" "$instance")" || return 2
     scope="$(terminal_scope_name "$repo_key" "$instance")" || return 2
@@ -1245,13 +1337,25 @@ start_terminal_locked() {
     # Both the exact session and exact scope are re-read only after acquiring
     # the tuple's lifecycle lock. No pre-lock observation drives cleanup.
     if find_terminal_session "$repo_key" "$instance"; then
-        if scope_is_active "$scope"; then return 0; fi
+        if ! state="$(scope_state "$scope")"; then
+            printf 'Hubi: nie można potwierdzić stanu systemd scope %s; odmowa restartu terminala.\n' \
+                "$scope" >&2
+            return 1
+        fi
+        [[ "$state" == ACTIVE ]] && return 0
         printf 'Hubi: usuwanie nieaktywnej sesji terminala %s przed restartem.\n' "$session" >&2
         tmux_cmd kill-session -t "=$session" || return 1
-    elif scope_is_active "$scope"; then
-        printf 'Hubi: znaleziono osierocony scope terminala %s; bezpieczne czyszczenie przed restartem.\n' \
-            "$scope" >&2
-        terminate_scope "$scope" || return 1
+    else
+        if ! state="$(scope_state "$scope")"; then
+            printf 'Hubi: nie można potwierdzić stanu systemd scope %s; odmowa restartu terminala.\n' \
+                "$scope" >&2
+            return 1
+        fi
+        if [[ "$state" == ACTIVE ]]; then
+            printf 'Hubi: znaleziono osierocony scope terminala %s; bezpieczne czyszczenie przed restartem.\n' \
+                "$scope" >&2
+            terminate_scope "$scope" || return 1
+        fi
     fi
 
     runtime_creation_preflight || return 1
@@ -1302,14 +1406,19 @@ start_terminal_locked() {
         return 1
     fi
     for _ in {1..20}; do
-        if scope_is_active "$scope" \
-            && [[ "$(tmux_cmd display-message -p -t "$pane" '#{pane_dead}' 2>/dev/null || true)" != "1" ]]; then
+        if ! state="$(scope_state "$scope")"; then
+            printf 'Hubi: nie można potwierdzić stanu systemd scope %s po starcie; sesja pozostaje bez zmian.\n' \
+                "$scope" >&2
+            return 1
+        fi
+        if [[ "$state" == ACTIVE \
+            && "$(tmux_cmd display-message -p -t "$pane" '#{pane_dead}' 2>/dev/null || true)" != "1" ]]; then
             return 0
         fi
         sleep 0.05
     done
     printf 'Hubi: terminal nie osiągnął aktywnego stanu w scope %s.\n' "$scope" >&2
-    terminate_scope "$scope" || true
+    terminate_scope "$scope" || return 1
     tmux_cmd kill-session -t "=$session" >/dev/null 2>&1 || true
     return 1
 }
@@ -1351,7 +1460,7 @@ stop_terminal_locked() {
         return 3
     fi
     if ! find_terminal_session "$repo_key" "$instance"; then
-        if scope_is_active "$scope"; then
+        if [[ "$current_generation" != inactive ]]; then
             printf 'Hubi: czyszczenie osieroconego scope terminala %s.\n' "$scope" >&2
             terminate_scope "$scope" "$expected_generation"
             return $?
@@ -1393,18 +1502,27 @@ stop_terminal_now() {
 }
 
 terminal_is_actionable() {
-    local repo_key="$1" instance="$2" scope
+    local repo_key="$1" instance="$2" scope state
     scope="$(terminal_scope_name "$repo_key" "$instance")" || return 2
-    find_terminal_session "$repo_key" "$instance" || scope_is_active "$scope"
+    find_terminal_session "$repo_key" "$instance" && return 0
+    state="$(scope_state "$scope" 2>/dev/null)" || return 0
+    [[ "$state" == ACTIVE ]]
 }
 
 kill_terminal() {
-    local repo_key="$1" instance="$2" choice scope expected_generation
+    local repo_key="$1" instance="$2" choice scope expected_generation state
     scope="$(terminal_scope_name "$repo_key" "$instance")" || return 2
-    if ! find_terminal_session "$repo_key" "$instance" && ! scope_is_active "$scope"; then
-        printf '\n  Terminal %s dla %s nie działa.\n' "$instance" "$repo_key"
-        pause_for_ack
-        return 0
+    if ! find_terminal_session "$repo_key" "$instance"; then
+        if ! state="$(scope_state "$scope")"; then
+            printf '\n  Nie można potwierdzić stanu systemd scope; odmowa przygotowania zatrzymania.\n' >&2
+            pause_for_ack
+            return 1
+        fi
+        if [[ "$state" == INACTIVE ]]; then
+            printf '\n  Terminal %s dla %s nie działa.\n' "$instance" "$repo_key"
+            pause_for_ack
+            return 0
+        fi
     fi
     if ! find_terminal_session "$repo_key" "$instance"; then
         printf '\n  Wykryto ORPHANED scope terminala bez sesji tmux.\n'

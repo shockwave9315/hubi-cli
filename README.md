@@ -148,7 +148,9 @@ and exact deterministic scope independently; an orphan scope can be safely
 cleaned and a restart can recover. Destructive confirmation records the
 scope's systemd `InvocationID` and refuses the action if that reusable scope
 name now refers to a replacement generation. No lifecycle lock is held while
-waiting for user input.
+waiting for user input. Scope lifecycle checks strictly parse systemd
+`ActiveState`; a query or parse failure is `UNKNOWN`, never `INACTIVE`, and
+destructive operations fail closed without removing the tmux session.
 
 Hubi preserves tmux and systemd diagnostics when startup or attachment fails.
 A failed/ended pane remains available as `EXITED` rather than disappearing.
@@ -221,14 +223,16 @@ env -u HUBI_NOAUTO python3 tests/adversarial.py
 ./tests/v5_ownership.sh
 ./tests/v5_preflight.sh
 ./tests/v5_lifetime.sh
+./tests/v5_scope_state.sh
 ```
 
 At this revision the functional harness reports 18 tests and the adversarial
 suite contains 31 tests. The focused multi-instance harness reports 14 tests;
 the focused persistent-terminal harness reports 22 tests. The v5 doctor,
 server, ownership, preflight, and login-scope lifetime harnesses report 9, 7,
-12, 6, and 2 tests respectively. That is 121 behavior tests in total; every
-harness must be fully green for release review.
+12, 6, and 2 tests respectively. The systemd scope-state fault-injection
+harness reports 9 tests. That is 130 behavior tests in total; every harness
+must be fully green for release review.
 
 The harnesses use unique private tmux sockets, disposable Git repositories and
 processes, and exact test-only systemd units/scopes. They never address the
