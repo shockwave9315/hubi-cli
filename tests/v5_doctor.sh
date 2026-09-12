@@ -45,7 +45,13 @@ cat >"$BIN/systemctl" <<'EOF'
 printf 'systemctl %s\n' "$*" >>"$HUBI_TEST_LOG"
 case " $* " in
     *" --user show-environment "*) [[ "${HUBI_TEST_MANAGER:-up}" == up ]] ;;
-    *" --user is-active --quiet "*) [[ "${HUBI_TEST_SERVICE:-active}" == active ]] ;;
+    *" --user show "*)
+        [[ "${HUBI_TEST_MANAGER:-up}" == up ]] || exit 1
+        printf 'MainPID=%s\nControlGroup=%s\nActiveState=%s\n' \
+            "${HUBI_TEST_MAIN_PID:-4242}" \
+            "${HUBI_TEST_CONTROL_GROUP:-/user.slice/user-$UID.slice/user@$UID.service/app.slice/hubi-tmux.service}" \
+            "${HUBI_TEST_SERVICE:-active}"
+        ;;
     *" kill --help "*) printf '%s\n' '  --kill-whom=WHOM --signal=SIGNAL';;
     *" --user list-units --all --type=scope --no-legend --plain "*)
         printf '%s\n' 'hubi-codex-test.scope loaded active running' \
@@ -153,7 +159,8 @@ test_read_only_absent_server() {
     local output rc before after
     : >"$LOG"
     before="$(find "$TEST_ROOT" -mindepth 1 -printf '%P %y\n' | sort)"
-    output="$(doctor_env HUBI_TEST_SERVICE=inactive HUBI_TEST_TMUX_STATE=down "$HUBI" doctor 2>&1)"; rc=$?
+    output="$(doctor_env HUBI_TEST_SERVICE=inactive HUBI_TEST_MAIN_PID=0 \
+        HUBI_TEST_CONTROL_GROUP= HUBI_TEST_TMUX_STATE=down "$HUBI" doctor 2>&1)"; rc=$?
     after="$(find "$TEST_ROOT" -mindepth 1 -printf '%P %y\n' | sort)"
     [[ $rc -ne 0 && "$output" == *"hubi-tmux.service:      inactive"* \
         && "$output" == *"Summary: FAIL"* && "$before" == "$after" \

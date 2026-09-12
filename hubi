@@ -71,10 +71,6 @@ scope_kill_capability_available() {
     [[ "$help" == *"--kill-whom=WHOM"* && "$help" == *"--signal=SIGNAL"* ]]
 }
 
-hubi_service_active() {
-    "$SYSTEMCTL_BIN" --user is-active --quiet "$HUBI_TMUX_SERVICE" 2>/dev/null
-}
-
 hubi_server_pid() {
     local pid
     pid="$(tmux_inspect_cmd display-message -p '#{pid}' 2>/dev/null)" || return 1
@@ -83,31 +79,84 @@ hubi_server_pid() {
 }
 
 server_cgroup_for_pid() {
-    local pid="$1" cgroup
+    local pid="$1" hierarchy controllers path cgroup=""
     [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
     [[ -r "$HUBI_PROC_ROOT/$pid/cgroup" ]] || return 1
-    cgroup="$(awk -F: '$1 == "0" { print $3; exit }' "$HUBI_PROC_ROOT/$pid/cgroup")"
-    [[ -n "$cgroup" ]] || return 1
+    while IFS=: read -r hierarchy controllers path; do
+        [[ "$hierarchy" == 0 && -z "$controllers" ]] || continue
+        [[ -z "$cgroup" ]] || return 1
+        cgroup="$path"
+    done <"$HUBI_PROC_ROOT/$pid/cgroup"
+    [[ "$cgroup" == /* ]] || return 1
     printf '%s' "$cgroup"
 }
 
+HUBI_SERVICE_ACTIVE_STATE=""
+HUBI_SERVICE_MAIN_PID=""
+HUBI_SERVICE_CONTROL_GROUP=""
 HUBI_SERVER_PID=""
 HUBI_SERVER_CGROUP=""
 HUBI_OWNERSHIP_VERDICT="FAIL"
 
+read_hubi_service_snapshot() {
+    local output key value seen_active=0 seen_pid=0 seen_cgroup=0
+    HUBI_SERVICE_ACTIVE_STATE=""
+    HUBI_SERVICE_MAIN_PID=""
+    HUBI_SERVICE_CONTROL_GROUP=""
+    output="$("$SYSTEMCTL_BIN" --user show "$HUBI_TMUX_SERVICE" --no-pager \
+        --property=ActiveState --property=MainPID --property=ControlGroup 2>/dev/null)" || return 1
+    while IFS='=' read -r key value; do
+        case "$key" in
+            ActiveState)
+                (( seen_active == 0 )) || return 1
+                HUBI_SERVICE_ACTIVE_STATE="$value"
+                seen_active=1
+                ;;
+            MainPID)
+                (( seen_pid == 0 )) || return 1
+                HUBI_SERVICE_MAIN_PID="$value"
+                seen_pid=1
+                ;;
+            ControlGroup)
+                (( seen_cgroup == 0 )) || return 1
+                HUBI_SERVICE_CONTROL_GROUP="$value"
+                seen_cgroup=1
+                ;;
+        esac
+    done <<<"$output"
+    (( seen_active == 1 && seen_pid == 1 && seen_cgroup == 1 ))
+}
+
 verify_hubi_server_ownership() {
-    local pid cgroup
+    local pid cgroup active_state main_pid control_group
+    HUBI_SERVICE_ACTIVE_STATE=""
+    HUBI_SERVICE_MAIN_PID=""
+    HUBI_SERVICE_CONTROL_GROUP=""
     HUBI_SERVER_PID=""
     HUBI_SERVER_CGROUP=""
     HUBI_OWNERSHIP_VERDICT="FAIL"
-    hubi_service_active || return 1
+
+    read_hubi_service_snapshot || return 1
+    active_state="$HUBI_SERVICE_ACTIVE_STATE"
+    main_pid="$HUBI_SERVICE_MAIN_PID"
+    control_group="$HUBI_SERVICE_CONTROL_GROUP"
+    [[ "$active_state" == active ]] || return 1
+    [[ "$main_pid" =~ ^[1-9][0-9]*$ ]] || return 1
+    [[ "$control_group" == /* && "$control_group" != / ]] || return 1
+
     pid="$(hubi_server_pid)" || return 1
-    cgroup="$(server_cgroup_for_pid "$pid")" || return 1
     HUBI_SERVER_PID="$pid"
+    [[ "$pid" == "$main_pid" ]] || return 1
+    cgroup="$(server_cgroup_for_pid "$main_pid")" || return 1
     HUBI_SERVER_CGROUP="$cgroup"
-    if [[ "$cgroup" != */"$HUBI_TMUX_SERVICE" ]]; then
-        return 1
-    fi
+    [[ "$cgroup" == "$control_group" ]] || return 1
+
+    # Bind the verdict to one stable service generation. If systemd reports a
+    # changed state, PID or cgroup after the socket/proc checks, fail closed.
+    read_hubi_service_snapshot || return 1
+    [[ "$HUBI_SERVICE_ACTIVE_STATE" == "$active_state" \
+        && "$HUBI_SERVICE_MAIN_PID" == "$main_pid" \
+        && "$HUBI_SERVICE_CONTROL_GROUP" == "$control_group" ]] || return 1
     HUBI_OWNERSHIP_VERDICT="PASS"
 }
 
@@ -151,7 +200,7 @@ hubi_scope_inventory() {
 
 hubi_doctor() {
     local linger="unknown" kill_processes="unknown" manager="unreachable"
-    local service="inactive" pid="unavailable" cgroup="unavailable" ownership="FAIL"
+    local service="unavailable" pid="unavailable" cgroup="unavailable" ownership="FAIL"
     local exit_empty="unavailable" kill_capability="unavailable" tmux_version inventory
     local failures=0 warnings=0
 
@@ -160,12 +209,13 @@ hubi_doctor() {
     kill_processes="$(kill_user_processes_state 2>/dev/null || printf 'unknown')"
     [[ "$kill_processes" == "unknown" ]] && ((warnings += 1))
     if user_manager_available; then manager="reachable"; else ((failures += 1)); fi
-    if hubi_service_active; then service="active"; else ((failures += 1)); fi
     if verify_hubi_server_ownership; then
+        service="$HUBI_SERVICE_ACTIVE_STATE"
         pid="$HUBI_SERVER_PID"
         cgroup="$HUBI_SERVER_CGROUP"
         ownership="$HUBI_OWNERSHIP_VERDICT"
     else
+        [[ -n "$HUBI_SERVICE_ACTIVE_STATE" ]] && service="$HUBI_SERVICE_ACTIVE_STATE"
         [[ -n "$HUBI_SERVER_PID" ]] && pid="$HUBI_SERVER_PID"
         [[ -n "$HUBI_SERVER_CGROUP" ]] && cgroup="$HUBI_SERVER_CGROUP"
         ((failures += 1))

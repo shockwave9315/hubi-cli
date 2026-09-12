@@ -45,7 +45,12 @@ cat >"$BIN/systemctl" <<'EOF'
 printf 'systemctl %s\n' "$*" >>"$HUBI_TEST_LOG"
 case " $* " in
     *" --user show-environment "*) [[ "${HUBI_TEST_MANAGER:-up}" == up ]] ;;
-    *" --user is-active --quiet "*) [[ "${HUBI_TEST_SERVICE:-active}" == active ]] ;;
+    *" --user show "*)
+        [[ "${HUBI_TEST_MANAGER:-up}" == up ]] || exit 1
+        printf 'ControlGroup=%s\nActiveState=%s\nMainPID=%s\n' \
+            "${HUBI_TEST_CONTROL_GROUP:-/user.slice/user-$UID.slice/user@$UID.service/app.slice/hubi-tmux.service}" \
+            "${HUBI_TEST_SERVICE:-active}" "${HUBI_TEST_MAIN_PID:-4242}"
+        ;;
     *" kill --help "*) printf '%s\n' '  --kill-whom=WHOM --signal=SIGNAL' ;;
     *) exit 92 ;;
 esac
@@ -129,7 +134,8 @@ test_inactive_service() {
     local output rc
     : >"$LOG"
     set_cgroup hubi-tmux.service
-    output="$(run_preflight HUBI_TEST_SERVICE=inactive 2>&1)"; rc=$?
+    output="$(run_preflight HUBI_TEST_SERVICE=inactive HUBI_TEST_MAIN_PID=0 \
+        HUBI_TEST_CONTROL_GROUP= 2>&1)"; rc=$?
     [[ $rc -ne 0 && "$output" == *"dedykowany serwer tmux"* ]] \
         && ! grep -Fq 'display-message' "$LOG"
 }

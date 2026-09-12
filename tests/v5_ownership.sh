@@ -6,6 +6,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HUBI="$ROOT/hubi"
 TEST_ROOT="$(mktemp -d)"
+BIN="$TEST_ROOT/bin"
 REPOS="$TEST_ROOT/repos"
 REPO_NAME="ownership-repo-$$"
 SOCKET_ROOT="$TEST_ROOT/runtime"
@@ -17,8 +18,31 @@ PASS_COUNT=0
 FAIL_COUNT=0
 UNANCHORED_PID=""
 
-mkdir -p "$REPOS/$REPO_NAME" "$SOCKET_ROOT"
+mkdir -p "$BIN" "$REPOS/$REPO_NAME" "$SOCKET_ROOT"
 git init -q "$REPOS/$REPO_NAME"
+
+cat >"$BIN/fixture-systemctl" <<'EOF'
+#!/usr/bin/env bash
+[[ " $* " == *" --user show $HUBI_TMUX_SERVICE "* ]] || exit 90
+active="${HUBI_TEST_ACTIVE_STATE:-active}"
+main_pid="${HUBI_TEST_MAIN_PID:-4242}"
+control_group="${HUBI_TEST_CONTROL_GROUP:-/user.slice/test.slice/hubi-tmux.service}"
+if [[ -n "${HUBI_TEST_CHANGE_FILE:-}" ]]; then
+    if [[ -e "$HUBI_TEST_CHANGE_FILE" ]]; then
+        main_pid="${HUBI_TEST_SECOND_MAIN_PID:-4343}"
+    else
+        : >"$HUBI_TEST_CHANGE_FILE"
+    fi
+fi
+printf 'ControlGroup=%s\nActiveState=%s\nMainPID=%s\n' "$control_group" "$active" "$main_pid"
+EOF
+
+cat >"$BIN/fixture-tmux" <<'EOF'
+#!/usr/bin/env bash
+[[ " $* " == *" -N -S $HUBI_TMUX_SOCKET_PATH display-message -p #{pid} "* ]] || exit 91
+printf '%s\n' "${HUBI_TEST_SOCKET_PID:-4242}"
+EOF
+chmod +x "$BIN/fixture-systemctl" "$BIN/fixture-tmux"
 
 # The path is resolved from the runtime repository root.
 # shellcheck disable=SC1091
@@ -80,6 +104,24 @@ attempt_creation() {
     '
 }
 
+ownership_fixture() {
+    local proc_root="$1"
+    shift
+    env -u HUBI_ACTIVE -u HUBI_AGENT_INSTANCE -u HUBI_TMUX_SOCKET -u TMUX \
+        HUBI_SYSTEMCTL_BIN="$BIN/fixture-systemctl" \
+        HUBI_TMUX_BIN="$BIN/fixture-tmux" \
+        HUBI_TMUX_SOCKET_PATH="$SOCKET_ROOT/fixture/hubi" \
+        HUBI_TMUX_SERVICE=hubi-tmux.service \
+        HUBI_PROC_ROOT="$proc_root" HUBI_FILE="$HUBI" "$@" bash -c \
+        'source "$HUBI_FILE"; verify_hubi_server_ownership'
+}
+
+set_fixture_cgroup() {
+    local proc_root="$1" pid="$2" path="$3"
+    mkdir -p "$proc_root/$pid"
+    printf '0::%s\n' "$path" >"$proc_root/$pid/cgroup"
+}
+
 test_correct_owner_allows_creation() {
     local socket="$SOCKET_ROOT/good/hubi" session scope
     v5_test_server_start_path "$GOOD_SERVICE" "$socket" || return 1
@@ -133,18 +175,66 @@ test_wrong_unanchored_server_refuses_creation() {
 }
 check "an active wrong service cannot claim an unanchored server" test_wrong_unanchored_server_refuses_creation
 
-test_exact_cgroup_match() {
-    local proc="$TEST_ROOT/fake-proc" output rc socket="$SOCKET_ROOT/good/hubi"
-    mkdir -p "$proc/4242"
-    printf '0::/user.slice/hubi-tmux.service/not-the-owner.service\n' >"$proc/4242/cgroup"
-    output="$(hubi_env "$socket" "$GOOD_SERVICE" HUBI_PROC_ROOT="$proc" HUBI_FILE="$HUBI" bash -c '
-        source "$HUBI_FILE"
-        hubi_server_pid() { printf 4242; }
-        require_anchored_server
-    ' 2>&1)"; rc=$?
-    [[ $rc -ne 0 && "$output" == *"odmowa utworzenia pracy"* ]]
+test_exact_snapshot_passes() {
+    local proc="$TEST_ROOT/fixture-pass" cgroup=/user.slice/test.slice/hubi-tmux.service
+    set_fixture_cgroup "$proc" 4242 "$cgroup"
+    ownership_fixture "$proc" HUBI_TEST_CONTROL_GROUP="$cgroup"
 }
-check "ownership requires the exact final cgroup service component" test_exact_cgroup_match
+check "matching ActiveState MainPID ControlGroup socket PID and proc cgroup pass" \
+    test_exact_snapshot_passes
+
+test_wrong_parent_suffix_fails() {
+    local proc="$TEST_ROOT/fixture-wrong-parent"
+    local expected=/user.slice/test.slice/hubi-tmux.service
+    set_fixture_cgroup "$proc" 4242 /user.slice/test.slice/unrelated.scope/hubi-tmux.service
+    ! ownership_fixture "$proc" HUBI_TEST_CONTROL_GROUP="$expected"
+}
+check "a wrong parent ending in the expected service name fails exact ownership" \
+    test_wrong_parent_suffix_fails
+
+test_socket_pid_must_equal_main_pid() {
+    local proc="$TEST_ROOT/fixture-wrong-pid" cgroup=/user.slice/test.slice/hubi-tmux.service
+    set_fixture_cgroup "$proc" 4242 "$cgroup"
+    set_fixture_cgroup "$proc" 4343 "$cgroup"
+    ! ownership_fixture "$proc" HUBI_TEST_CONTROL_GROUP="$cgroup" HUBI_TEST_SOCKET_PID=4343
+}
+check "a different socket PID in the same service cgroup fails ownership" \
+    test_socket_pid_must_equal_main_pid
+
+test_zero_main_pid_fails() {
+    local proc="$TEST_ROOT/fixture-zero-pid"
+    ! ownership_fixture "$proc" HUBI_TEST_MAIN_PID=0 \
+        HUBI_TEST_CONTROL_GROUP=/user.slice/test.slice/hubi-tmux.service
+}
+check "MainPID zero fails ownership" test_zero_main_pid_fails
+
+test_inactive_or_failed_state_fails() {
+    local proc="$TEST_ROOT/fixture-inactive" state cgroup=/user.slice/test.slice/hubi-tmux.service
+    set_fixture_cgroup "$proc" 4242 "$cgroup"
+    for state in inactive failed; do
+        ! ownership_fixture "$proc" HUBI_TEST_ACTIVE_STATE="$state" \
+            HUBI_TEST_CONTROL_GROUP="$cgroup" || return 1
+    done
+}
+check "inactive and failed service states fail ownership" test_inactive_or_failed_state_fails
+
+test_control_group_mismatch_fails() {
+    local proc="$TEST_ROOT/fixture-cgroup-mismatch"
+    set_fixture_cgroup "$proc" 4242 /user.slice/test.slice/other.service
+    ! ownership_fixture "$proc" \
+        HUBI_TEST_CONTROL_GROUP=/user.slice/test.slice/hubi-tmux.service
+}
+check "systemd and proc ControlGroup mismatch fails ownership" test_control_group_mismatch_fails
+
+test_service_change_during_verification_fails() {
+    local proc="$TEST_ROOT/fixture-service-change" cgroup=/user.slice/test.slice/hubi-tmux.service
+    local marker="$TEST_ROOT/service-change.marker"
+    set_fixture_cgroup "$proc" 4242 "$cgroup"
+    ! ownership_fixture "$proc" HUBI_TEST_CONTROL_GROUP="$cgroup" \
+        HUBI_TEST_CHANGE_FILE="$marker" HUBI_TEST_SECOND_MAIN_PID=4343
+}
+check "a service generation change during ownership verification fails closed" \
+    test_service_change_during_verification_fails
 
 test_server_death_race_cannot_autospawn() {
     local socket="$SOCKET_ROOT/race/hubi" rc
