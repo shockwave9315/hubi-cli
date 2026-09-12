@@ -19,7 +19,8 @@ def main() -> int:
         environment = os.environ.copy()
         environment.pop("TMUX", None)
         environment.setdefault("TERM", "xterm-256color")
-        command = ["tmux", "-L", socket, "attach-session"]
+        socket_flag = "-S" if "/" in socket else "-L"
+        command = ["tmux", "-N", socket_flag, socket, "attach-session"]
         if mode == "readonly":
             command.append("-r")
         command.extend(["-t", session])

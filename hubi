@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-HUBI_VERSION=4
+HUBI_VERSION=5
 HUBI_SCRIPT_PATH="$(realpath -e -- "${BASH_SOURCE[0]}")"
 REPOS_ROOT="${HUBI_REPOS:-$HOME/repos}"
 TMUX_BIN="${HUBI_TMUX_BIN:-tmux}"
 SYSTEMD_RUN_BIN="${HUBI_SYSTEMD_RUN_BIN:-systemd-run}"
 SYSTEMCTL_BIN="${HUBI_SYSTEMCTL_BIN:-systemctl}"
+LOGINCTL_BIN="${HUBI_LOGINCTL_BIN:-loginctl}"
+BUSCTL_BIN="${HUBI_BUSCTL_BIN:-busctl}"
 FLOCK_BIN="${HUBI_FLOCK_BIN:-flock}"
+BASH_BIN="${HUBI_BASH_BIN:-bash}"
+HUBI_TMUX_SERVICE="${HUBI_TMUX_SERVICE:-hubi-tmux.service}"
+HUBI_PROC_ROOT="${HUBI_PROC_ROOT:-/proc}"
 
 CODEX_BIN="${HUBI_CODEX_BIN:-$HOME/.npm-global/bin/codex}"
 [[ -x "$CODEX_BIN" ]] || CODEX_BIN="$(command -v codex 2>/dev/null || true)"
@@ -19,19 +24,249 @@ RESOLVED_REPO_DIR=""
 RESOLVED_REPO_KEY=""
 RESOLVED_REPO_ID=""
 FOUND_SESSION=""
-FOUND_SESSION_KIND=""
 FOUND_PANE=""
 ENSURED_SESSION=""
 ATTACH_MODE=""
 HUBI_LOCK_TIMEOUT="${HUBI_LOCK_TIMEOUT:-3}"
 HUBI_PASTE_TIMEOUT="${HUBI_PASTE_TIMEOUT:-5}"
 
-tmux_cmd() {
-    if [[ -n "${HUBI_TMUX_SOCKET:-}" ]]; then
-        command env -u HUBI_ACTIVE "$TMUX_BIN" -L "$HUBI_TMUX_SOCKET" "$@"
+effective_hubi_socket() {
+    if [[ -n "${HUBI_TMUX_SOCKET_PATH:-}" ]]; then
+        printf '%s' "$HUBI_TMUX_SOCKET_PATH"
     else
-        command env -u HUBI_ACTIVE "$TMUX_BIN" "$@"
+        printf '%s/tmux-%s/hubi' "${XDG_RUNTIME_DIR:-/run/user/$UID}" "$UID"
     fi
+}
+
+# Inspection of the dedicated v5 server must never turn into server creation.
+# tmux 3.6b's global -N option makes that guarantee explicit.
+tmux_inspect_cmd() {
+    tmux_cmd "$@"
+}
+
+current_login_user() { id -un; }
+
+linger_state() {
+    local user value
+    user="$(current_login_user)" || return 1
+    value="$("$LOGINCTL_BIN" show-user "$user" --property=Linger --value 2>/dev/null)" || return 1
+    case "$value" in yes|no) printf '%s' "$value" ;; *) return 1 ;; esac
+}
+
+kill_user_processes_state() {
+    local value
+    value="$("$BUSCTL_BIN" --system get-property org.freedesktop.login1 \
+        /org/freedesktop/login1 org.freedesktop.login1.Manager \
+        KillUserProcesses 2>/dev/null)" || return 1
+    case "$value" in
+        'b true') printf 'yes' ;;
+        'b false') printf 'no' ;;
+        *) return 1 ;;
+    esac
+}
+
+user_manager_available() {
+    "$SYSTEMCTL_BIN" --user show-environment >/dev/null 2>&1
+}
+
+scope_kill_capability_available() {
+    local help
+    user_manager_available || return 1
+    help="$("$SYSTEMCTL_BIN" kill --help 2>&1 || true)"
+    [[ "$help" == *"--kill-whom=WHOM"* && "$help" == *"--signal=SIGNAL"* ]]
+}
+
+hubi_server_pid() {
+    local pid
+    pid="$(tmux_inspect_cmd display-message -p '#{pid}' 2>/dev/null)" || return 1
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+    printf '%s' "$pid"
+}
+
+server_cgroup_for_pid() {
+    local pid="$1" hierarchy controllers path cgroup=""
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+    [[ -r "$HUBI_PROC_ROOT/$pid/cgroup" ]] || return 1
+    while IFS=: read -r hierarchy controllers path; do
+        [[ "$hierarchy" == 0 && -z "$controllers" ]] || continue
+        [[ -z "$cgroup" ]] || return 1
+        cgroup="$path"
+    done <"$HUBI_PROC_ROOT/$pid/cgroup"
+    [[ "$cgroup" == /* ]] || return 1
+    printf '%s' "$cgroup"
+}
+
+HUBI_SERVICE_ACTIVE_STATE=""
+HUBI_SERVICE_MAIN_PID=""
+HUBI_SERVICE_CONTROL_GROUP=""
+HUBI_SERVER_PID=""
+HUBI_SERVER_CGROUP=""
+HUBI_OWNERSHIP_VERDICT="FAIL"
+
+read_hubi_service_snapshot() {
+    local output key value seen_active=0 seen_pid=0 seen_cgroup=0
+    HUBI_SERVICE_ACTIVE_STATE=""
+    HUBI_SERVICE_MAIN_PID=""
+    HUBI_SERVICE_CONTROL_GROUP=""
+    output="$("$SYSTEMCTL_BIN" --user show "$HUBI_TMUX_SERVICE" --no-pager \
+        --property=ActiveState --property=MainPID --property=ControlGroup 2>/dev/null)" || return 1
+    while IFS='=' read -r key value; do
+        case "$key" in
+            ActiveState)
+                (( seen_active == 0 )) || return 1
+                HUBI_SERVICE_ACTIVE_STATE="$value"
+                seen_active=1
+                ;;
+            MainPID)
+                (( seen_pid == 0 )) || return 1
+                HUBI_SERVICE_MAIN_PID="$value"
+                seen_pid=1
+                ;;
+            ControlGroup)
+                (( seen_cgroup == 0 )) || return 1
+                HUBI_SERVICE_CONTROL_GROUP="$value"
+                seen_cgroup=1
+                ;;
+        esac
+    done <<<"$output"
+    (( seen_active == 1 && seen_pid == 1 && seen_cgroup == 1 ))
+}
+
+verify_hubi_server_ownership() {
+    local pid cgroup active_state main_pid control_group
+    HUBI_SERVICE_ACTIVE_STATE=""
+    HUBI_SERVICE_MAIN_PID=""
+    HUBI_SERVICE_CONTROL_GROUP=""
+    HUBI_SERVER_PID=""
+    HUBI_SERVER_CGROUP=""
+    HUBI_OWNERSHIP_VERDICT="FAIL"
+
+    read_hubi_service_snapshot || return 1
+    active_state="$HUBI_SERVICE_ACTIVE_STATE"
+    main_pid="$HUBI_SERVICE_MAIN_PID"
+    control_group="$HUBI_SERVICE_CONTROL_GROUP"
+    [[ "$active_state" == active ]] || return 1
+    [[ "$main_pid" =~ ^[1-9][0-9]*$ ]] || return 1
+    [[ "$control_group" == /* && "$control_group" != / ]] || return 1
+
+    pid="$(hubi_server_pid)" || return 1
+    HUBI_SERVER_PID="$pid"
+    [[ "$pid" == "$main_pid" ]] || return 1
+    cgroup="$(server_cgroup_for_pid "$main_pid")" || return 1
+    HUBI_SERVER_CGROUP="$cgroup"
+    [[ "$cgroup" == "$control_group" ]] || return 1
+
+    # Bind the verdict to one stable service generation. If systemd reports a
+    # changed state, PID or cgroup after the socket/proc checks, fail closed.
+    read_hubi_service_snapshot || return 1
+    [[ "$HUBI_SERVICE_ACTIVE_STATE" == "$active_state" \
+        && "$HUBI_SERVICE_MAIN_PID" == "$main_pid" \
+        && "$HUBI_SERVICE_CONTROL_GROUP" == "$control_group" ]] || return 1
+    HUBI_OWNERSHIP_VERDICT="PASS"
+}
+
+require_anchored_server() {
+    if verify_hubi_server_ownership; then return 0; fi
+    printf 'Hubi: dedykowany serwer tmux nie jest aktywnym serwerem należącym dokładnie do %s.\n' \
+        "$HUBI_TMUX_SERVICE" >&2
+    printf 'Hubi: odmowa utworzenia pracy; uruchom "hubi doctor" po poprawnej instalacji usługi.\n' >&2
+    return 1
+}
+
+require_linger() {
+    local state user
+    user="$(current_login_user 2>/dev/null || printf USER)"
+    if ! state="$(linger_state)"; then
+        printf 'Hubi: nie można potwierdzić stanu Linger dla użytkownika %s; odmowa utworzenia pracy.\n' \
+            "$user" >&2
+        return 1
+    fi
+    if [[ "$state" != "yes" ]]; then
+        printf 'Hubi: Linger=no dla użytkownika %s; odmowa utworzenia pracy.\n' "$user" >&2
+        printf 'Hubi: uruchom z odpowiednimi uprawnieniami: loginctl enable-linger %s\n' "$user" >&2
+        return 1
+    fi
+}
+
+runtime_creation_preflight() {
+    if ! user_manager_available; then
+        printf 'Hubi: magistrala systemd --user jest niedostępna; odmowa utworzenia pracy.\n' >&2
+        return 1
+    fi
+    require_linger || return 1
+    require_scope_kill_capability || return 1
+    require_anchored_server || return 1
+}
+
+hubi_scope_inventory() {
+    "$SYSTEMCTL_BIN" --user list-units --all --type=scope --no-legend --plain 2>/dev/null \
+        | awk '$1 ~ /^hubi-(codex|claude|terminal)-.*\.scope$/ { print $1 " " $3 " " $4 }'
+}
+
+hubi_doctor() {
+    local linger="unknown" kill_processes="unknown" manager="unreachable"
+    local service="unavailable" pid="unavailable" cgroup="unavailable" ownership="FAIL"
+    local exit_empty="unavailable" kill_capability="unavailable" tmux_version inventory
+    local failures=0 warnings=0
+
+    tmux_version="$("$TMUX_BIN" -V 2>/dev/null || printf 'unavailable')"
+    linger="$(linger_state 2>/dev/null || printf 'unknown')"
+    kill_processes="$(kill_user_processes_state 2>/dev/null || printf 'unknown')"
+    [[ "$kill_processes" == "unknown" ]] && ((warnings += 1))
+    if user_manager_available; then manager="reachable"; else ((failures += 1)); fi
+    if verify_hubi_server_ownership; then
+        service="$HUBI_SERVICE_ACTIVE_STATE"
+        pid="$HUBI_SERVER_PID"
+        cgroup="$HUBI_SERVER_CGROUP"
+        ownership="$HUBI_OWNERSHIP_VERDICT"
+    else
+        [[ -n "$HUBI_SERVICE_ACTIVE_STATE" ]] && service="$HUBI_SERVICE_ACTIVE_STATE"
+        [[ -n "$HUBI_SERVER_PID" ]] && pid="$HUBI_SERVER_PID"
+        [[ -n "$HUBI_SERVER_CGROUP" ]] && cgroup="$HUBI_SERVER_CGROUP"
+        ((failures += 1))
+    fi
+    exit_empty="$(tmux_inspect_cmd show-options -gv exit-empty 2>/dev/null || printf 'unavailable')"
+    [[ "$exit_empty" == "off" ]] || ((failures += 1))
+    if scope_kill_capability_available; then kill_capability="available"; else ((failures += 1)); fi
+    [[ "$linger" == "yes" ]] || ((failures += 1))
+    inventory="$(hubi_scope_inventory || true)"
+
+    printf 'Hubi doctor\n'
+    printf '  Hubi version:             %s\n' "$HUBI_VERSION"
+    printf '  tmux version:             %s\n' "$tmux_version"
+    printf '  Hubi socket:              %s\n' "$(effective_hubi_socket)"
+    printf '  Linger:                   %s\n' "$linger"
+    printf '  KillUserProcesses:        %s (login1 Manager; information only)\n' "$kill_processes"
+    printf '  systemd user manager:     %s\n' "$manager"
+    printf '  %s:      %s\n' "$HUBI_TMUX_SERVICE" "$service"
+    printf '  tmux server PID:          %s\n' "$pid"
+    printf '  tmux server cgroup:       %s\n' "$cgroup"
+    printf '  server ownership:         %s\n' "$ownership"
+    printf '  exit-empty:               %s\n' "$exit_empty"
+    printf '  full-cgroup kill:         %s\n' "$kill_capability"
+    printf '  managed scopes:\n'
+    if [[ -n "$inventory" ]]; then printf '%s\n' "$inventory" | sed 's/^/    /'; else printf '    (none)\n'; fi
+
+    if [[ "$linger" == "no" ]]; then
+        printf '  Remediation: loginctl enable-linger %s (run with appropriate privileges)\n' \
+            "$(current_login_user 2>/dev/null || printf USER)"
+    elif [[ "$linger" == "unknown" ]]; then
+        printf '  Linger could not be verified; creation must fail closed.\n'
+    fi
+    if (( failures == 0 )); then
+        if (( warnings > 0 )); then
+            printf 'Summary: WARN - ready for creation with %d informational warning(s).\n' "$warnings"
+            return 0
+        fi
+        printf 'Summary: PASS - ready to create Hubi-managed work.\n'
+        return 0
+    fi
+    printf 'Summary: FAIL - not ready to create Hubi-managed work (%d failed checks).\n' "$failures"
+    return 1
+}
+
+tmux_cmd() {
+    command env -u HUBI_ACTIVE "$TMUX_BIN" -N -S "$(effective_hubi_socket)" "$@"
 }
 
 wait_for_pane_cwd() {
@@ -48,6 +283,28 @@ wait_for_pane_cwd() {
 
 sanitize_tmux_environment() {
     tmux_cmd set-environment -gu HUBI_ACTIVE >/dev/null 2>&1 || true
+}
+
+seed_agent_session_environment() {
+    local session="$1" name
+    local -a allowlist=(
+        PATH
+        OPENAI_API_KEY ANTHROPIC_API_KEY
+        OPENAI_BASE_URL ANTHROPIC_BASE_URL
+        HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY
+        http_proxy https_proxy all_proxy no_proxy
+        SSL_CERT_FILE SSL_CERT_DIR NODE_EXTRA_CA_CERTS
+    )
+
+    for name in "${allowlist[@]}"; do
+        if [[ -v "$name" ]]; then
+            tmux_cmd set-environment -t "=$session" "$name" "${!name}" || return 1
+        else
+            # A remove marker is required: -u would expose a stale value from
+            # the long-lived server's global environment on the next spawn.
+            tmux_cmd set-environment -r -t "=$session" "$name" || return 1
+        fi
+    done
 }
 
 clear_screen() { printf '\033[2J\033[H'; }
@@ -279,18 +536,40 @@ terminal_session_name() {
         "$(safe_slug "$instance")" "$(instance_name_hash "$repo_key" "$instance")"
 }
 
+terminal_scope_name() {
+    local repo_key="$1" instance="$2"
+    validate_instance_name "$instance" || return 2
+    printf 'hubi-terminal-%s-%s.scope' "$(name_hash "$repo_key")" "$instance"
+}
+
+terminal_scope_instances() {
+    local repo_key="$1" prefix scope instance
+    prefix="hubi-terminal-$(name_hash "$repo_key")-"
+    "$SYSTEMCTL_BIN" --user list-units --type=scope --state=active --no-legend --plain 2>/dev/null \
+        | awk '{print $1}' \
+        | while IFS= read -r scope; do
+            [[ -n "$scope" && "$scope" == "$prefix"*.scope ]] || continue
+            instance="${scope#"$prefix"}"
+            instance="${instance%.scope}"
+            validate_instance_name "$instance" || continue
+            printf '%s\n' "$instance"
+        done
+}
+
 find_terminal_session() {
-    local repo_key="$1" instance="$2" session managed kind stored_repo stored_instance
+    local repo_key="$1" instance="$2" session scope managed kind stored_repo stored_instance stored_scope
     FOUND_SESSION=""
     validate_instance_name "$instance" || return 2
     session="$(terminal_session_name "$repo_key" "$instance")" || return 2
+    scope="$(terminal_scope_name "$repo_key" "$instance")" || return 2
     tmux_cmd has-session -t "=$session" 2>/dev/null || return 1
     managed="$(tmux_cmd show-option -qv -t "=$session:" @hubi-managed 2>/dev/null || true)"
     kind="$(tmux_cmd show-option -qv -t "=$session:" @hubi-kind 2>/dev/null || true)"
     stored_repo="$(tmux_cmd show-option -qv -t "=$session:" @hubi-repo 2>/dev/null || true)"
     stored_instance="$(tmux_cmd show-option -qv -t "=$session:" @hubi-instance 2>/dev/null || true)"
-    if [[ "$managed" == "v4" && "$kind" == "terminal" && "$stored_repo" == "$repo_key" \
-        && "$stored_instance" == "$instance" ]]; then
+    stored_scope="$(tmux_cmd show-option -qv -t "=$session:" @hubi-scope 2>/dev/null || true)"
+    if [[ "$managed" == "v5" && "$kind" == "terminal" && "$stored_repo" == "$repo_key" \
+        && "$stored_instance" == "$instance" && "$stored_scope" == "$scope" ]]; then
         FOUND_SESSION="$session"
         return 0
     fi
@@ -298,18 +577,27 @@ find_terminal_session() {
 }
 
 terminal_list() {
-    local repo_key="$1" session managed kind stored_repo instance
+    local repo_key="$1" session managed kind stored_repo instance stored_scope expected_scope
+    local -A found=()
     while IFS= read -r session; do
         [[ -n "$session" ]] || continue
         managed="$(tmux_cmd show-option -qv -t "=$session:" @hubi-managed 2>/dev/null || true)"
         kind="$(tmux_cmd show-option -qv -t "=$session:" @hubi-kind 2>/dev/null || true)"
         stored_repo="$(tmux_cmd show-option -qv -t "=$session:" @hubi-repo 2>/dev/null || true)"
         instance="$(tmux_cmd show-option -qv -t "=$session:" @hubi-instance 2>/dev/null || true)"
-        if [[ "$managed" == "v4" && "$kind" == "terminal" && "$stored_repo" == "$repo_key" ]] \
-            && validate_instance_name "$instance"; then
+        stored_scope="$(tmux_cmd show-option -qv -t "=$session:" @hubi-scope 2>/dev/null || true)"
+        expected_scope="$(terminal_scope_name "$repo_key" "$instance" 2>/dev/null || true)"
+        if [[ "$managed" == "v5" && "$kind" == "terminal" && "$stored_repo" == "$repo_key" ]] \
+            && validate_instance_name "$instance" && [[ "$stored_scope" == "$expected_scope" ]]; then
             printf '%s\n' "$instance"
+            found["$instance"]=1
         fi
     done < <(tmux_cmd list-sessions -F '#S' 2>/dev/null | sort || true)
+    while IFS= read -r instance; do
+        [[ -n "$instance" && -z "${found[$instance]:-}" ]] || continue
+        printf '%s\n' "$instance"
+        found["$instance"]=1
+    done < <(terminal_scope_instances "$repo_key" | sort -u)
 }
 
 agent_scope_name() {
@@ -346,15 +634,10 @@ secondary_scope_instances() {
         done
 }
 
-legacy_session_name() {
-    if [[ "$2" != */* && "$2" =~ ^[[:alnum:]_.-]+$ ]]; then printf '%s-%s' "$1" "$2"; fi
-}
-
 find_agent_session() {
     local agent="$1" repo_key="$2" instance="${3:-primary}"
-    local session legacy managed stored_agent stored_repo stored_instance
+    local session managed stored_agent stored_repo stored_instance
     FOUND_SESSION=""
-    FOUND_SESSION_KIND=""
     validate_instance_name "$instance" || return 2
     session="$(agent_session_name "$agent" "$repo_key" "$instance")"
     if tmux_cmd has-session -t "=$session" 2>/dev/null; then
@@ -362,19 +645,9 @@ find_agent_session() {
         stored_agent="$(tmux_cmd show-option -qv -t "=$session:" @hubi-agent 2>/dev/null || true)"
         stored_repo="$(tmux_cmd show-option -qv -t "=$session:" @hubi-repo 2>/dev/null || true)"
         stored_instance="$(tmux_cmd show-option -qv -t "=$session:" @hubi-instance 2>/dev/null || true)"
-        [[ -n "$stored_instance" ]] || stored_instance="primary"
-        if [[ "$managed" == "v4" && "$stored_agent" == "$agent" && "$stored_repo" == "$repo_key" \
+        if [[ "$managed" == "v5" && "$stored_agent" == "$agent" && "$stored_repo" == "$repo_key" \
             && "$stored_instance" == "$instance" ]]; then
             FOUND_SESSION="$session"
-            FOUND_SESSION_KIND="managed"
-            return 0
-        fi
-    fi
-    if [[ "$instance" == "primary" ]]; then
-        legacy="$(legacy_session_name "$agent" "$repo_key")"
-        if [[ -n "$legacy" ]] && tmux_cmd has-session -t "$legacy" 2>/dev/null; then
-            FOUND_SESSION="$legacy"
-            FOUND_SESSION_KIND="legacy"
             return 0
         fi
     fi
@@ -404,7 +677,7 @@ agent_pane() {
 }
 
 session_is_managed() {
-    [[ "$(tmux_cmd show-option -qv -t "=$1:" @hubi-managed 2>/dev/null || true)" == "v4" ]]
+    [[ "$(tmux_cmd show-option -qv -t "=$1:" @hubi-managed 2>/dev/null || true)" == "v5" ]]
 }
 
 session_is_dead() {
@@ -431,20 +704,23 @@ session_status() {
 }
 
 agent_status() {
-    local agent="$1" repo_key="$2" instance="${3:-primary}" scope
+    local agent="$1" repo_key="$2" instance="${3:-primary}" scope state
     scope="$(agent_scope_name "$agent" "$repo_key" "$instance")" || return 2
+    state="$(scope_state "$scope" 2>/dev/null)" || state=UNKNOWN
     if find_agent_session "$agent" "$repo_key" "$instance"; then
-        if [[ "$FOUND_SESSION_KIND" == "legacy" ]]; then
-            printf '⚠ LEGACY/UNMANAGED'
-        elif session_is_dead "$FOUND_SESSION" && scope_is_active "$scope"; then
+        if [[ "$state" == UNKNOWN ]]; then
+            printf '⚠ SYSTEMD STATE UNKNOWN'
+        elif session_is_dead "$FOUND_SESSION" && [[ "$state" == ACTIVE ]]; then
             printf '⚠ EXITED / STALE SCOPE'
-        elif ! session_is_dead "$FOUND_SESSION" && ! scope_is_active "$scope"; then
+        elif ! session_is_dead "$FOUND_SESSION" && [[ "$state" == INACTIVE ]]; then
             printf '⚠ STALE SESSION'
         else
             session_status "$FOUND_SESSION"
         fi
-    elif scope_is_active "$scope"; then
+    elif [[ "$state" == ACTIVE ]]; then
         printf '⚠ ORPHANED'
+    elif [[ "$state" == UNKNOWN ]]; then
+        printf '⚠ SYSTEMD STATE UNKNOWN'
     else
         printf '○ STOPPED'
     fi
@@ -524,16 +800,103 @@ attach_session() {
 }
 
 lock_root() {
-    local root="${XDG_RUNTIME_DIR:-/tmp}/hubi-locks-${UID}"
+    local root="${HUBI_LOCK_ROOT:-${XDG_RUNTIME_DIR:-/tmp}/hubi-locks-${UID}}"
     if [[ ! -d "$root" ]]; then install -d -m 700 -- "$root" || return 1; fi
     printf '%s' "$root"
+}
+
+terminal_lifecycle_lock_file() {
+    local repo_key="$1" instance="$2" locks digest
+    validate_instance_name "$instance" || return 2
+    locks="$(lock_root)" || return 1
+    digest="$(printf '%s\0%s' "$repo_key" "$instance" | sha256sum | awk '{print $1}')"
+    [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+    printf '%s/terminal-%s.lock' "$locks" "$digest"
+}
+
+agent_lifecycle_lock_file() {
+    local agent="$1" repo_key="$2" instance="$3" locks digest
+    case "$agent" in codex|claude) ;; *) return 2 ;; esac
+    validate_instance_name "$instance" || return 2
+    locks="$(lock_root)" || return 1
+    digest="$(printf '%s\0%s\0%s' "$agent" "$repo_key" "$instance" | sha256sum | awk '{print $1}')"
+    [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+    printf '%s/agent-%s.lock' "$locks" "$digest"
+}
+
+run_agent_lifecycle_locked() {
+    local operation="$1" agent="$2" repo_key="$3" instance="$4" lock_file worker output rc
+    shift 4
+    case "$operation" in
+        start) worker=__start-locked ;;
+        stop) worker=__agent-stop-locked ;;
+        *) return 2 ;;
+    esac
+    lock_file="$(agent_lifecycle_lock_file "$agent" "$repo_key" "$instance")" || {
+        printf 'Hubi: nie można przygotować blokady cyklu życia agenta.\n' >&2
+        return 1
+    }
+    if [[ ! "$HUBI_LOCK_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
+        printf 'Hubi: nieprawidłowy limit oczekiwania na blokadę: %s\n' "$HUBI_LOCK_TIMEOUT" >&2
+        return 1
+    fi
+    output="$("$FLOCK_BIN" --exclusive --close --wait "$HUBI_LOCK_TIMEOUT" \
+        --conflict-exit-code 75 "$lock_file" \
+        env -u HUBI_ACTIVE bash "$HUBI_SCRIPT_PATH" "$worker" \
+        "$agent" "$repo_key" "$instance" "$@" 2>&1)"
+    rc=$?
+    if (( rc == 75 )); then
+        printf 'Hubi: limit %ss oczekiwania na blokadę cyklu życia (lifecycle lock) %s/%s/%s został przekroczony.\n' \
+            "$HUBI_LOCK_TIMEOUT" "$agent" "$repo_key" "$instance" >&2
+        return 1
+    fi
+    if (( rc != 0 )); then
+        printf 'Hubi: operacja %s %s/%s/%s pod blokadą nie powiodła się (rc=%d).\n' \
+            "$operation" "$agent" "$repo_key" "$instance" "$rc" >&2
+        [[ -z "$output" ]] || printf '%s\n' "$output" >&2
+        return "$rc"
+    fi
+    [[ -z "$output" ]] || printf '%s\n' "$output" >&2
+}
+
+run_terminal_lifecycle_locked() {
+    local operation="$1" repo_key="$2" instance="$3" lock_file output rc
+    shift 3
+    case "$operation" in start|stop) ;; *) return 2 ;; esac
+    lock_file="$(terminal_lifecycle_lock_file "$repo_key" "$instance")" || {
+        printf 'Hubi: nie można przygotować blokady cyklu życia terminala.\n' >&2
+        return 1
+    }
+    if [[ ! "$HUBI_LOCK_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
+        printf 'Hubi: nieprawidłowy limit oczekiwania na blokadę: %s\n' "$HUBI_LOCK_TIMEOUT" >&2
+        return 1
+    fi
+    # The flock supervisor owns the descriptor. --close prevents the worker,
+    # tmux server, scoped Bash and every descendant from inheriting it.
+    output="$("$FLOCK_BIN" --exclusive --close --wait "$HUBI_LOCK_TIMEOUT" \
+        --conflict-exit-code 75 "$lock_file" \
+        env -u HUBI_ACTIVE bash "$HUBI_SCRIPT_PATH" "__terminal-${operation}-locked" \
+        "$repo_key" "$instance" "$@" 2>&1)"
+    rc=$?
+    if (( rc == 75 )); then
+        printf 'Hubi: limit %ss oczekiwania na blokadę cyklu życia terminala %s/%s został przekroczony.\n' \
+            "$HUBI_LOCK_TIMEOUT" "$repo_key" "$instance" >&2
+        return 1
+    fi
+    if (( rc != 0 )); then
+        printf 'Hubi: operacja %s terminala %s/%s pod blokadą nie powiodła się (rc=%d).\n' \
+            "$operation" "$repo_key" "$instance" "$rc" >&2
+        [[ -z "$output" ]] || printf '%s\n' "$output" >&2
+        return "$rc"
+    fi
+    [[ -z "$output" ]] || printf '%s\n' "$output" >&2
 }
 
 ensure_agent_session() {
     local agent="$1" repo_key="$2" directory="$3" executable="$4"
     shift 4
     local -a arguments=("$@")
-    local instance="${HUBI_AGENT_INSTANCE:-primary}" session locks lock_file lock_identity output rc expected_repo_id
+    local instance="${HUBI_AGENT_INSTANCE:-primary}" session expected_repo_id
     ENSURED_SESSION=""
     if ! validate_instance_name "$instance"; then
         printf 'Hubi: nieprawidłowa nazwa instancji: %s\n' "$instance" >&2
@@ -541,38 +904,12 @@ ensure_agent_session() {
     fi
     session="$(agent_session_name "$agent" "$repo_key" "$instance")"
     expected_repo_id="$RESOLVED_REPO_ID"
-    require_scope_kill_capability || return 1
+    runtime_creation_preflight || return 1
     revalidate_repo_for_start "$repo_key" "$directory" "$expected_repo_id" || return 1
-    locks="$(lock_root)" || { printf 'Hubi: nie można utworzyć katalogu blokad startowych.\n' >&2; return 1; }
-    if [[ "$instance" == "primary" ]]; then
-        lock_identity="$agent:$repo_key"
-        lock_file="$locks/$(name_hash "$lock_identity").lock"
-    else
-        lock_file="$locks/$agent-$(instance_name_hash "$repo_key" "$instance").lock"
-    fi
-    if [[ ! "$HUBI_LOCK_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
-        printf 'Hubi: nieprawidłowy limit oczekiwania na blokadę: %s\n' "$HUBI_LOCK_TIMEOUT" >&2
-        return 1
-    fi
-
-    # flock owns the descriptor in a supervisor. --close guarantees that the
-    # worker, tmux server, agent and every descendant start without that fd.
-    output="$("$FLOCK_BIN" --exclusive --close --wait "$HUBI_LOCK_TIMEOUT" \
-        --conflict-exit-code 75 "$lock_file" \
-        env -u HUBI_ACTIVE bash "$HUBI_SCRIPT_PATH" __start-locked \
-        "$agent" "$repo_key" "$instance" "$directory" "$expected_repo_id" \
-        "$executable" "${arguments[@]}" 2>&1)"
-    rc=$?
-    if (( rc == 75 )); then
-        printf 'Hubi: limit %ss oczekiwania na blokadę startu (startup lock) %s/%s został przekroczony.\n' \
-            "$HUBI_LOCK_TIMEOUT" "$agent" "$repo_key" >&2
-        return 1
-    fi
-    if (( rc != 0 )); then
-        printf 'Hubi: start %s/%s pod blokadą nie powiódł się (rc=%d).\n' "$agent" "$repo_key" "$rc" >&2
-        [[ -z "$output" ]] || printf '%s\n' "$output" >&2
-        return "$rc"
-    fi
+    # The same tuple lock serializes start, stop and orphan reconciliation.
+    # flock --close keeps its descriptor out of tmux, the agent and descendants.
+    run_agent_lifecycle_locked start "$agent" "$repo_key" "$instance" \
+        "$directory" "$expected_repo_id" "$executable" "${arguments[@]}" || return $?
     ENSURED_SESSION="$session"
 }
 
@@ -580,7 +917,7 @@ ensure_agent_session_locked() {
     local agent="$1" repo_key="$2" instance="$3" directory="$4" expected_repo_id="$5" executable="$6"
     shift 6
     local -a arguments=("$@")
-    local session scope output pane start_command stored_agent stored_repo stored_instance
+    local session scope output pane start_command stored_agent stored_repo stored_instance state
     validate_instance_name "$instance" || return 2
     session="$(agent_session_name "$agent" "$repo_key" "$instance")"
     scope="$(agent_scope_name "$agent" "$repo_key" "$instance")"
@@ -592,27 +929,40 @@ ensure_agent_session_locked() {
         [[ -n "$stored_instance" ]] || stored_instance="primary"
         if session_is_managed "$session" && [[ "$stored_agent" == "$agent" && "$stored_repo" == "$repo_key" \
             && "$stored_instance" == "$instance" ]] && agent_pane "$session"; then
-            return 0
+            if ! state="$(scope_state "$scope")"; then
+                printf 'Hubi: nie można potwierdzić stanu systemd scope %s; odmowa zmiany sesji.\n' \
+                    "$scope" >&2
+                return 1
+            fi
+            [[ "$state" == ACTIVE ]] && return 0
         fi
 
         # Recover only the exact bootstrap shape created by Hubi before it had
         # a chance to persist metadata. Never claim an arbitrary lookalike.
         start_command="$(tmux_cmd display-message -p -t "=$session:" '#{pane_start_command}' 2>/dev/null || true)"
-        if [[ "$start_command" == "sleep 30" || "$(tmux_cmd show-option -qv -t "=$session:" @hubi-managed 2>/dev/null || true)" == "v4" ]]; then
+        if [[ "$start_command" == "sleep 30" || "$(tmux_cmd show-option -qv -t "=$session:" @hubi-managed 2>/dev/null || true)" == "v5" ]]; then
             terminate_scope "$scope" || return 1
             tmux_cmd kill-session -t "=$session" || return 1
         else
-            printf 'Hubi: sesja %s istnieje bez zweryfikowanych metadanych v4; odmowa przejęcia.\n' "$session" >&2
+            printf 'Hubi: sesja %s istnieje bez zweryfikowanych metadanych v5; odmowa przejęcia.\n' "$session" >&2
             return 1
         fi
-    elif scope_is_active "$scope"; then
-        printf 'Hubi: znaleziono osierocony scope %s; bezpieczne czyszczenie przed restartem.\n' "$scope" >&2
-        terminate_scope "$scope" || return 1
+    else
+        if ! state="$(scope_state "$scope")"; then
+            printf 'Hubi: nie można potwierdzić stanu systemd scope %s; odmowa restartu.\n' \
+                "$scope" >&2
+            return 1
+        fi
+        if [[ "$state" == ACTIVE ]]; then
+            printf 'Hubi: znaleziono osierocony scope %s; bezpieczne czyszczenie przed restartem.\n' "$scope" >&2
+            terminate_scope "$scope" || return 1
+        fi
     fi
 
     # This is the last check before tmux receives -c and before systemd creates
     # a scope. It also detects replacement of a repository at the same path.
     revalidate_repo_for_start "$repo_key" "$directory" "$expected_repo_id" || return 1
+    require_anchored_server || return 1
 
     if ! output="$(tmux_cmd new-session -d -P -F '#{pane_id}' -s "$session" -c "$directory" -- sleep 30 2>&1)"; then
         printf 'Hubi: tmux nie utworzył sesji %s:\n%s\n' "$session" "$output" >&2
@@ -630,8 +980,14 @@ ensure_agent_session_locked() {
         return 1
     fi
 
+    if ! seed_agent_session_environment "$session"; then
+        printf 'Hubi: nie udało się zapisać środowiska nowej sesji %s.\n' "$session" >&2
+        tmux_cmd kill-session -t "=$session" >/dev/null 2>&1 || true
+        return 1
+    fi
+
     sanitize_tmux_environment
-    if ! tmux_cmd set-option -t "=$session:" @hubi-managed v4 \
+    if ! tmux_cmd set-option -t "=$session:" @hubi-managed v5 \
         || ! tmux_cmd set-option -t "=$session:" @hubi-agent "$agent" \
         || ! tmux_cmd set-option -t "=$session:" @hubi-repo "$repo_key" \
         || ! tmux_cmd set-option -t "=$session:" @hubi-instance "$instance" \
@@ -685,14 +1041,6 @@ start_agent() {
     # Existing RUNNING/ATTACHED/EXITED sessions remain inspectable even if the
     # agent executable was subsequently moved or removed.
     if find_agent_session "$agent" "$RESOLVED_REPO_KEY" "$instance"; then
-        if [[ "$FOUND_SESSION_KIND" == "legacy" ]]; then
-            printf '\n  Uwaga: %s jest sesją legacy/unmanaged; dostępna jest tylko bezpieczna funkcja attach.\n' "$FOUND_SESSION" >&2
-            printf '  [a] Podłącz legacy/unmanaged\n  [b] Anuluj\n  > '
-            local legacy_choice
-            if ! read_choice legacy_choice || [[ "$legacy_choice" != "a" && "$legacy_choice" != "A" ]]; then
-                return 0
-            fi
-        fi
         attach_session "$FOUND_SESSION"
         return $?
     fi
@@ -723,10 +1071,66 @@ start_agent() {
     attach_session "$ENSURED_SESSION"
 }
 
-scope_is_active() { "$SYSTEMCTL_BIN" --user is-active --quiet "$1" 2>/dev/null; }
+scope_state() {
+    local scope="$1" output key value active_state="" seen_active=0
+    output="$("$SYSTEMCTL_BIN" --user show "$scope" --no-pager \
+        --property=ActiveState 2>/dev/null)" || {
+        printf 'UNKNOWN'
+        return 2
+    }
+    while IFS='=' read -r key value; do
+        if [[ "$key" == ActiveState ]]; then
+            (( seen_active == 0 )) || {
+                printf 'UNKNOWN'
+                return 2
+            }
+            active_state="$value"
+            seen_active=1
+        fi
+    done <<<"$output"
+    (( seen_active == 1 )) || {
+        printf 'UNKNOWN'
+        return 2
+    }
+    case "$active_state" in
+        active|activating|reloading|deactivating|refreshing) printf 'ACTIVE' ;;
+        inactive|failed) printf 'INACTIVE' ;;
+        *) printf 'UNKNOWN'; return 2 ;;
+    esac
+}
+
+scope_invocation_id() {
+    local scope="$1" output key value active_state="" invocation_id=""
+    output="$("$SYSTEMCTL_BIN" --user show "$scope" --no-pager \
+        --property=ActiveState --property=InvocationID 2>/dev/null)" || return 1
+    while IFS='=' read -r key value; do
+        case "$key" in
+            ActiveState) active_state="$value" ;;
+            InvocationID) invocation_id="$value" ;;
+        esac
+    done <<<"$output"
+    [[ "$active_state" == active && "$invocation_id" =~ ^[0-9a-fA-F]{32}$ ]] || return 1
+    printf '%s' "${invocation_id,,}"
+}
+
+scope_generation_token() {
+    local scope="$1" state
+    state="$(scope_state "$scope")" || return 1
+    if [[ "$state" == ACTIVE ]]; then scope_invocation_id "$scope"; else printf 'inactive'; fi
+}
+
+scope_generation_matches() {
+    local scope="$1" expected="$2" current
+    current="$(scope_generation_token "$scope")" || return 2
+    [[ "$current" == "$expected" ]]
+}
 
 require_scope_kill_capability() {
     local help
+    if ! user_manager_available; then
+        printf 'Hubi: magistrala systemd --user jest niedostępna; nie można zagwarantować pełnego kill cgroup.\n' >&2
+        return 1
+    fi
     help="$("$SYSTEMCTL_BIN" kill --help 2>&1 || true)"
     if [[ "$help" != *"--kill-whom=WHOM"* || "$help" != *"--signal=SIGNAL"* ]]; then
         printf 'Hubi: ten systemctl nie obsługuje wymaganego zabijania pełnego cgroup (--kill-whom=all).\n' >&2
@@ -735,10 +1139,15 @@ require_scope_kill_capability() {
 }
 
 signal_scope() {
-    local scope="$1" signal="$2" output
+    local scope="$1" signal="$2" output state
     require_scope_kill_capability || return 1
     if ! output="$("$SYSTEMCTL_BIN" --user kill --kill-whom=all --signal="$signal" "$scope" 2>&1)"; then
-        if scope_is_active "$scope"; then
+        if ! state="$(scope_state "$scope")"; then
+            printf 'Hubi: systemctl nie wysłał %s do pełnego scope %s i nie można potwierdzić jego stanu:\n%s\n' \
+                "$signal" "$scope" "$output" >&2
+            return 1
+        fi
+        if [[ "$state" == ACTIVE ]]; then
             printf 'Hubi: systemctl nie wysłał %s do pełnego scope %s:\n%s\n' "$signal" "$scope" "$output" >&2
             return 1
         fi
@@ -746,59 +1155,111 @@ signal_scope() {
 }
 
 wait_scope_inactive() {
-    local scope="$1" attempts="$2" i
-    for ((i = 0; i < attempts; i++)); do scope_is_active "$scope" || return 0; sleep 0.1; done
+    local scope="$1" attempts="$2" i state
+    for ((i = 0; i < attempts; i++)); do
+        if ! state="$(scope_state "$scope")"; then
+            printf 'Hubi: nie można potwierdzić stanu systemd scope %s podczas oczekiwania na zatrzymanie.\n' \
+                "$scope" >&2
+            return 2
+        fi
+        [[ "$state" == INACTIVE ]] && return 0
+        sleep 0.1
+    done
     return 1
 }
 
 terminate_scope() {
-    local scope="$1"
-    scope_is_active "$scope" || return 0
-    signal_scope "$scope" TERM || return 1
-    wait_scope_inactive "$scope" 20 || true
-    if scope_is_active "$scope"; then
-        signal_scope "$scope" KILL || return 1
-        wait_scope_inactive "$scope" 20 || true
-    fi
-    if scope_is_active "$scope"; then
-        printf 'Hubi: scope %s nadal jest aktywny po TERM/KILL.\n' "$scope" >&2
+    local scope="$1" expected="${2:-}" state wait_rc match_rc
+    if ! state="$(scope_state "$scope")"; then
+        printf 'Hubi: nie można potwierdzić stanu systemd scope %s; odmowa wysłania sygnału.\n' \
+            "$scope" >&2
         return 1
     fi
+    [[ "$state" == INACTIVE ]] && return 0
+    if [[ -z "$expected" ]]; then
+        expected="$(scope_invocation_id "$scope")" || {
+            printf 'Hubi: nie można potwierdzić generacji scope %s; odmowa wysłania sygnału.\n' "$scope" >&2
+            return 1
+        }
+    fi
+    scope_generation_matches "$scope" "$expected"
+    match_rc=$?
+    if (( match_rc != 0 )); then
+        if (( match_rc == 2 )); then
+            printf 'Hubi: nie można potwierdzić generacji scope %s; odmowa wysłania sygnału.\n' \
+                "$scope" >&2
+            return 1
+        fi
+        printf 'Hubi: generacja scope %s zmieniła się; odmowa wysłania sygnału.\n' "$scope" >&2
+        return 1
+    fi
+    signal_scope "$scope" TERM || return 1
+    wait_scope_inactive "$scope" 20
+    wait_rc=$?
+    (( wait_rc == 0 )) && return 0
+    (( wait_rc == 2 )) && return 1
+    scope_generation_matches "$scope" "$expected"
+    match_rc=$?
+    if (( match_rc != 0 )); then
+        if (( match_rc == 2 )); then
+            printf 'Hubi: nie można potwierdzić generacji scope %s podczas zatrzymywania; odmowa KILL.\n' \
+                "$scope" >&2
+            return 1
+        fi
+        printf 'Hubi: generacja scope %s zmieniła się podczas zatrzymywania; odmowa KILL.\n' \
+            "$scope" >&2
+        return 1
+    fi
+    signal_scope "$scope" KILL || return 1
+    wait_scope_inactive "$scope" 20
+    wait_rc=$?
+    (( wait_rc == 0 )) && return 0
+    (( wait_rc == 2 )) && return 1
+    printf 'Hubi: scope %s nadal jest aktywny po TERM/KILL.\n' "$scope" >&2
+    return 1
 }
 
-stop_agent_now() {
-    local agent="$1" repo_key="$2" instance="${3:-primary}" session="" scope configured_scope
+stop_agent_locked() {
+    local agent="$1" repo_key="$2" instance="$3" expected_generation="$4"
+    local session="" scope configured_scope current_generation wait_rc
     if ! validate_instance_name "$instance"; then
         printf 'Hubi: nieprawidłowa nazwa instancji: %s\n' "$instance" >&2
         return 2
     fi
     scope="$(agent_scope_name "$agent" "$repo_key" "$instance")"
+    current_generation="$(scope_generation_token "$scope")" || {
+        printf 'Hubi: nie można potwierdzić bieżącej generacji scope %s; odmowa zatrzymania.\n' "$scope" >&2
+        return 1
+    }
+    if [[ "$current_generation" != "$expected_generation" ]]; then
+        printf 'Hubi: agent zmienił się podczas oczekiwania na potwierdzenie. Spróbuj ponownie z bieżącego stanu.\n' >&2
+        return 3
+    fi
     if ! find_agent_session "$agent" "$repo_key" "$instance"; then
-        if scope_is_active "$scope"; then
+        if [[ "$current_generation" != inactive ]]; then
             printf 'Hubi: czyszczenie osieroconego scope %s (brak sesji tmux).\n' "$scope" >&2
-            terminate_scope "$scope"
+            terminate_scope "$scope" "$expected_generation"
             return $?
         fi
         printf 'Hubi: %s dla %s nie działa.\n' "$agent" "$repo_key" >&2
         return 1
     fi
     session="$FOUND_SESSION"
-    if [[ "$FOUND_SESSION_KIND" != "managed" ]]; then
-        printf 'Hubi: sesja %s jest legacy/unmanaged i nie ma bezpiecznej granicy cgroup.\n' "$session" >&2
-        printf 'Hubi: odmowa automatycznego zatrzymania; sesja i jej procesy pozostają bez zmian.\n' >&2
-        return 1
-    fi
     configured_scope="$(tmux_cmd show-option -qv -t "=$session:" @hubi-scope 2>/dev/null || true)"
     if [[ -n "$configured_scope" && "$configured_scope" == "$scope" ]]; then
         if ! session_is_dead "$session"; then
             if agent_pane "$session"; then
                 tmux_cmd send-keys -t "$FOUND_PANE" C-c >/dev/null 2>&1 || true
             fi
-            wait_scope_inactive "$scope" 30 || true
+            wait_scope_inactive "$scope" 30
+            wait_rc=$?
+            (( wait_rc == 2 )) && return 1
         fi
-        terminate_scope "$scope" || return 1
+        if [[ "$expected_generation" != inactive ]]; then
+            terminate_scope "$scope" "$expected_generation" || return 1
+        fi
     else
-        printf 'Hubi: sesja %s pochodzi sprzed v4 i nie ma bezpiecznej granicy cgroup.\n' "$session" >&2
+        printf 'Hubi: sesja %s nie ma zweryfikowanej granicy cgroup v5.\n' "$session" >&2
         printf 'Hubi: odmowa automatycznego zatrzymania; sesja i jej procesy pozostają bez zmian.\n' >&2
         return 1
     fi
@@ -808,23 +1269,51 @@ stop_agent_now() {
     fi
 }
 
-kill_agent() {
-    local agent="$1" repo_key="$2" instance="${3:-primary}" choice
+stop_agent_now() {
+    local agent="$1" repo_key="$2" instance="${3:-primary}" expected_generation="${4:-}"
+    local scope
     if ! validate_instance_name "$instance"; then
         printf 'Hubi: nieprawidłowa nazwa instancji: %s\n' "$instance" >&2
         return 2
     fi
+    scope="$(agent_scope_name "$agent" "$repo_key" "$instance")" || return 2
+    if [[ -z "$expected_generation" ]]; then
+        expected_generation="$(scope_generation_token "$scope")" || {
+            printf 'Hubi: nie można potwierdzić generacji scope %s; odmowa zatrzymania.\n' "$scope" >&2
+            return 1
+        }
+    fi
+    run_agent_lifecycle_locked stop "$agent" "$repo_key" "$instance" "$expected_generation"
+}
+
+kill_agent() {
+    local agent="$1" repo_key="$2" instance="${3:-primary}" choice scope expected_generation state
+    if ! validate_instance_name "$instance"; then
+        printf 'Hubi: nieprawidłowa nazwa instancji: %s\n' "$instance" >&2
+        return 2
+    fi
+    scope="$(agent_scope_name "$agent" "$repo_key" "$instance")" || return 2
     if ! find_agent_session "$agent" "$repo_key" "$instance"; then
-        if ! scope_is_active "$(agent_scope_name "$agent" "$repo_key" "$instance")"; then
+        if ! state="$(scope_state "$scope")"; then
+            printf '\n  Nie można potwierdzić stanu systemd scope; odmowa przygotowania zatrzymania.\n' >&2
+            pause_for_ack
+            return 1
+        fi
+        if [[ "$state" == INACTIVE ]]; then
             printf '\n  %s/%s dla %s nie działa.\n' "$agent" "$instance" "$repo_key"; pause_for_ack; return 0
         fi
         printf '\n  Wykryto ORPHANED scope bez sesji tmux.\n'
     fi
+    expected_generation="$(scope_generation_token "$scope")" || {
+        printf '\n  Nie można potwierdzić generacji scope; odmowa przygotowania zatrzymania.\n' >&2
+        pause_for_ack
+        return 1
+    }
     printf '\n  Zakończyć %s/%s dla %s i cały jego scope procesów?\n' "$agent" "$instance" "$repo_key"
     printf '  [y] Tak\n  [n] Nie\n  > '
     if ! read_choice choice; then return 0; fi
     case "$choice" in
-        y|Y) if ! stop_agent_now "$agent" "$repo_key" "$instance"; then pause_for_ack; return 1; fi ;;
+        y|Y) if ! stop_agent_now "$agent" "$repo_key" "$instance" "$expected_generation"; then pause_for_ack; return 1; fi ;;
         n|N) ;;
         *) printf '  Anulowano: nieznany wybór.\n'; pause_for_ack ;;
     esac
@@ -841,17 +1330,129 @@ project_shell() {
 }
 
 terminal_status() {
-    local repo_key="$1" instance="$2" clients
+    local repo_key="$1" instance="$2" clients scope state
+    scope="$(terminal_scope_name "$repo_key" "$instance")" || return 2
+    state="$(scope_state "$scope" 2>/dev/null)" || state=UNKNOWN
     if ! find_terminal_session "$repo_key" "$instance"; then
-        printf '○ STOPPED'
+        if [[ "$state" == ACTIVE ]]; then
+            printf '⚠ ORPHANED'
+        elif [[ "$state" == UNKNOWN ]]; then
+            printf '⚠ SYSTEMD STATE UNKNOWN'
+        else
+            printf '○ STOPPED'
+        fi
+        return
+    fi
+    if [[ "$state" == UNKNOWN ]]; then
+        printf '⚠ SYSTEMD STATE UNKNOWN'
+        return
+    fi
+    if [[ "$state" == INACTIVE ]]; then
+        printf '⚠ STALE SESSION'
         return
     fi
     clients="$(session_clients "$FOUND_SESSION")"
     if (( clients > 0 )); then printf '● ATTACHED (%d)' "$clients"; else printf '● RUNNING'; fi
 }
 
+start_terminal_locked() {
+    local repo_key="$1" instance="$2" directory="$3" expected_repo_id="$4"
+    local session scope output pane state
+    validate_instance_name "$instance" || return 2
+    session="$(terminal_session_name "$repo_key" "$instance")" || return 2
+    scope="$(terminal_scope_name "$repo_key" "$instance")" || return 2
+
+    # Both the exact session and exact scope are re-read only after acquiring
+    # the tuple's lifecycle lock. No pre-lock observation drives cleanup.
+    if find_terminal_session "$repo_key" "$instance"; then
+        if ! state="$(scope_state "$scope")"; then
+            printf 'Hubi: nie można potwierdzić stanu systemd scope %s; odmowa restartu terminala.\n' \
+                "$scope" >&2
+            return 1
+        fi
+        [[ "$state" == ACTIVE ]] && return 0
+        printf 'Hubi: usuwanie nieaktywnej sesji terminala %s przed restartem.\n' "$session" >&2
+        tmux_cmd kill-session -t "=$session" || return 1
+    else
+        if ! state="$(scope_state "$scope")"; then
+            printf 'Hubi: nie można potwierdzić stanu systemd scope %s; odmowa restartu terminala.\n' \
+                "$scope" >&2
+            return 1
+        fi
+        if [[ "$state" == ACTIVE ]]; then
+            printf 'Hubi: znaleziono osierocony scope terminala %s; bezpieczne czyszczenie przed restartem.\n' \
+                "$scope" >&2
+            terminate_scope "$scope" || return 1
+        fi
+    fi
+
+    runtime_creation_preflight || return 1
+    sanitize_tmux_environment
+    revalidate_repo_for_start "$repo_key" "$directory" "$expected_repo_id" || return 1
+    require_anchored_server || return 1
+    if ! output="$(tmux_cmd new-session -d -P -F '#{pane_id}' -s "$session" -c "$directory" -- sleep 30 2>&1)"; then
+        printf 'Hubi: tmux nie utworzył terminala %s:\n%s\n' "$session" "$output" >&2
+        return 1
+    fi
+    pane="$output"
+    if [[ "$pane" != %* ]]; then
+        printf 'Hubi: tmux nie zwrócił identyfikatora panelu terminala: %s\n' "$pane" >&2
+        tmux_cmd kill-session -t "=$session" >/dev/null 2>&1 || true
+        return 1
+    fi
+    if ! revalidate_repo_for_start "$repo_key" "$directory" "$expected_repo_id"; then
+        tmux_cmd kill-session -t "=$session" >/dev/null 2>&1 || true
+        return 1
+    fi
+    if ! wait_for_pane_cwd "$pane" "$directory"; then
+        printf 'Hubi: tmux nie zachował katalogu repozytorium %s; start został przerwany.\n' "$directory" >&2
+        tmux_cmd kill-session -t "=$session" >/dev/null 2>&1 || true
+        return 1
+    fi
+    if ! tmux_cmd set-option -t "=$session:" @hubi-managed v5 \
+        || ! tmux_cmd set-option -t "=$session:" @hubi-kind terminal \
+        || ! tmux_cmd set-option -t "=$session:" @hubi-repo "$repo_key" \
+        || ! tmux_cmd set-option -t "=$session:" @hubi-instance "$instance" \
+        || ! tmux_cmd set-option -t "=$session:" @hubi-scope "$scope" \
+        || ! tmux_cmd set-option -t "=$session:" @hubi-pane "$pane" \
+        || ! tmux_cmd set-window-option -t "=$session:" window-size largest \
+        || ! tmux_cmd set-hook -t "=$session:" after-new-window \
+            'set-window-option window-size largest'; then
+        printf 'Hubi: nie udało się zapisać metadanych terminala %s.\n' "$session" >&2
+        tmux_cmd kill-session -t "=$session" >/dev/null 2>&1 || true
+        return 1
+    fi
+    if ! revalidate_repo_for_start "$repo_key" "$directory" "$expected_repo_id"; then
+        tmux_cmd kill-session -t "=$session" >/dev/null 2>&1 || true
+        return 1
+    fi
+    if ! output="$(tmux_cmd respawn-pane -k -t "$pane" -- \
+        "$SYSTEMD_RUN_BIN" --user --scope --quiet --collect --unit="$scope" -- \
+        "$BASH_BIN" 2>&1)"; then
+        printf 'Hubi: nie można uruchomić terminala w scope %s:\n%s\n' "$scope" "$output" >&2
+        tmux_cmd kill-session -t "=$session" >/dev/null 2>&1 || true
+        return 1
+    fi
+    for _ in {1..20}; do
+        if ! state="$(scope_state "$scope")"; then
+            printf 'Hubi: nie można potwierdzić stanu systemd scope %s po starcie; sesja pozostaje bez zmian.\n' \
+                "$scope" >&2
+            return 1
+        fi
+        if [[ "$state" == ACTIVE \
+            && "$(tmux_cmd display-message -p -t "$pane" '#{pane_dead}' 2>/dev/null || true)" != "1" ]]; then
+            return 0
+        fi
+        sleep 0.05
+    done
+    printf 'Hubi: terminal nie osiągnął aktywnego stanu w scope %s.\n' "$scope" >&2
+    terminate_scope "$scope" || return 1
+    tmux_cmd kill-session -t "=$session" >/dev/null 2>&1 || true
+    return 1
+}
+
 start_terminal() {
-    local repo_key="$1" instance="$2" session output directory expected_repo_id
+    local repo_key="$1" instance="$2" session directory expected_repo_id
     if ! validate_instance_name "$instance"; then
         printf 'Hubi: nieprawidłowa nazwa terminala: %s\n' "$instance" >&2
         return 2
@@ -860,83 +1461,136 @@ start_terminal() {
     repo_key="$RESOLVED_REPO_KEY"
     directory="$RESOLVED_REPO_DIR"
     expected_repo_id="$RESOLVED_REPO_ID"
+    session="$(terminal_session_name "$repo_key" "$instance")" || return 2
+    if ! run_terminal_lifecycle_locked start "$repo_key" "$instance" "$directory" "$expected_repo_id"; then
+        pause_for_ack
+        return 1
+    fi
     if find_terminal_session "$repo_key" "$instance"; then
         attach_session "$FOUND_SESSION"
-        return
+        return $?
     fi
-    session="$(terminal_session_name "$repo_key" "$instance")" || return 2
-    sanitize_tmux_environment
-    revalidate_repo_for_start "$repo_key" "$directory" "$expected_repo_id" \
-        || { pause_for_ack; return 1; }
-    if ! output="$(tmux_cmd new-session -d -s "$session" -c "$directory" -- bash 2>&1)"; then
-        printf 'Hubi: tmux nie utworzył terminala %s:\n%s\n' "$session" "$output" >&2
-        pause_for_ack
-        return 1
-    fi
-    if ! revalidate_repo_for_start "$repo_key" "$directory" "$expected_repo_id"; then
-        tmux_cmd kill-session -t "=$session" >/dev/null 2>&1 || true
-        pause_for_ack
-        return 1
-    fi
-    if ! wait_for_pane_cwd "=$session:" "$directory"; then
-        printf 'Hubi: tmux nie zachował katalogu repozytorium %s; start został przerwany.\n' "$directory" >&2
-        tmux_cmd kill-session -t "=$session" >/dev/null 2>&1 || true
-        pause_for_ack
-        return 1
-    fi
-    if ! tmux_cmd set-option -t "=$session:" @hubi-managed v4 \
-        || ! tmux_cmd set-option -t "=$session:" @hubi-kind terminal \
-        || ! tmux_cmd set-option -t "=$session:" @hubi-repo "$repo_key" \
-        || ! tmux_cmd set-option -t "=$session:" @hubi-instance "$instance" \
-        || ! tmux_cmd set-window-option -t "=$session:" window-size largest \
-        || ! tmux_cmd set-hook -t "=$session:" after-new-window \
-            'set-window-option window-size largest'; then
-        printf 'Hubi: nie udało się zapisać metadanych terminala %s.\n' "$session" >&2
-        tmux_cmd kill-session -t "=$session" >/dev/null 2>&1 || true
-        pause_for_ack
-        return 1
-    fi
-    attach_session "$session"
+    printf 'Hubi: terminal %s zakończył się przed podłączeniem.\n' "$session" >&2
+    pause_for_ack
+    return 1
 }
 
-stop_terminal_now() {
-    local repo_key="$1" instance="$2" session
+stop_terminal_locked() {
+    local repo_key="$1" instance="$2" expected_generation="$3"
+    local session="" scope configured_scope current_generation
+    scope="$(terminal_scope_name "$repo_key" "$instance")" || return 2
+    current_generation="$(scope_generation_token "$scope")" || {
+        printf 'Hubi: nie można potwierdzić bieżącej generacji scope %s; odmowa zatrzymania.\n' "$scope" >&2
+        return 1
+    }
+    if [[ "$current_generation" != "$expected_generation" ]]; then
+        printf 'Hubi: terminal zmienił się podczas oczekiwania na potwierdzenie. Spróbuj ponownie z bieżącego stanu.\n' >&2
+        return 3
+    fi
     if ! find_terminal_session "$repo_key" "$instance"; then
+        if [[ "$current_generation" != inactive ]]; then
+            printf 'Hubi: czyszczenie osieroconego scope terminala %s.\n' "$scope" >&2
+            terminate_scope "$scope" "$expected_generation"
+            return $?
+        fi
         printf 'Hubi: terminal %s dla %s nie działa.\n' "$instance" "$repo_key" >&2
         return 1
     fi
     session="$FOUND_SESSION"
-    tmux_cmd kill-session -t "=$session"
+    configured_scope="$(tmux_cmd show-option -qv -t "=$session:" @hubi-scope 2>/dev/null || true)"
+    if [[ "$configured_scope" != "$scope" ]]; then
+        printf 'Hubi: terminal %s nie ma zweryfikowanej granicy cgroup v5; odmowa zatrzymania.\n' \
+            "$session" >&2
+        return 1
+    fi
+    if [[ "$expected_generation" != inactive ]]; then
+        terminate_scope "$scope" "$expected_generation" || return 1
+    fi
+    # With remain-on-exit disabled, tmux may remove the terminal session as
+    # soon as its scoped Bash exits. Otherwise remove that exact session now.
+    if tmux_cmd has-session -t "=$session" 2>/dev/null \
+        && ! tmux_cmd kill-session -t "=$session"; then
+        printf 'Hubi: scope terminala zatrzymany, ale nie udało się usunąć sesji tmux %s.\n' \
+            "$session" >&2
+        return 1
+    fi
+}
+
+stop_terminal_now() {
+    local repo_key="$1" instance="$2" expected_generation="${3:-}" scope
+    validate_instance_name "$instance" || return 2
+    scope="$(terminal_scope_name "$repo_key" "$instance")" || return 2
+    if [[ -z "$expected_generation" ]]; then
+        expected_generation="$(scope_generation_token "$scope")" || {
+            printf 'Hubi: nie można potwierdzić generacji scope %s; odmowa zatrzymania.\n' "$scope" >&2
+            return 1
+        }
+    fi
+    run_terminal_lifecycle_locked stop "$repo_key" "$instance" "$expected_generation"
+}
+
+terminal_is_actionable() {
+    local repo_key="$1" instance="$2" scope state
+    scope="$(terminal_scope_name "$repo_key" "$instance")" || return 2
+    find_terminal_session "$repo_key" "$instance" && return 0
+    state="$(scope_state "$scope" 2>/dev/null)" || return 0
+    [[ "$state" == ACTIVE ]]
 }
 
 kill_terminal() {
-    local repo_key="$1" instance="$2" choice
+    local repo_key="$1" instance="$2" choice scope expected_generation state
+    scope="$(terminal_scope_name "$repo_key" "$instance")" || return 2
     if ! find_terminal_session "$repo_key" "$instance"; then
-        printf '\n  Terminal %s dla %s nie działa.\n' "$instance" "$repo_key"
-        pause_for_ack
-        return 0
+        if ! state="$(scope_state "$scope")"; then
+            printf '\n  Nie można potwierdzić stanu systemd scope; odmowa przygotowania zatrzymania.\n' >&2
+            pause_for_ack
+            return 1
+        fi
+        if [[ "$state" == INACTIVE ]]; then
+            printf '\n  Terminal %s dla %s nie działa.\n' "$instance" "$repo_key"
+            pause_for_ack
+            return 0
+        fi
     fi
-    printf '\n  Zakończyć terminal %s dla %s?\n' "$instance" "$repo_key"
+    if ! find_terminal_session "$repo_key" "$instance"; then
+        printf '\n  Wykryto ORPHANED scope terminala bez sesji tmux.\n'
+    fi
+    expected_generation="$(scope_generation_token "$scope")" || {
+        printf '\n  Nie można potwierdzić generacji scope; odmowa przygotowania zatrzymania.\n' >&2
+        pause_for_ack
+        return 1
+    }
+    printf '\n  Zakończyć terminal %s dla %s i cały jego scope procesów?\n' "$instance" "$repo_key"
     printf '  [y] Tak\n  [n] Nie\n  > '
     if ! read_choice choice; then return 0; fi
     case "$choice" in
-        y|Y) stop_terminal_now "$repo_key" "$instance" || { pause_for_ack; return 1; } ;;
+        y|Y) stop_terminal_now "$repo_key" "$instance" "$expected_generation" \
+            || { pause_for_ack; return 1; } ;;
         n|N) ;;
         *) printf '  Anulowano: nieznany wybór.\n'; pause_for_ack ;;
     esac
 }
 
 terminal_menu() {
-    local repo_key="$1" instance="$2" choice
-    while find_terminal_session "$repo_key" "$instance"; do
+    local repo_key="$1" instance="$2" choice has_session
+    while terminal_is_actionable "$repo_key" "$instance"; do
         clear_screen
         printf '\n  TERMINAL — %s\n  ──────────────────────────────────\n\n' "$instance"
         printf '  Projekt: %s\n  Status:  %s\n\n' "$repo_key" "$(terminal_status "$repo_key" "$instance")"
         show_hint
-        printf '  [a] Podłącz\n  [x] Zakończ terminal\n  [b] Powrót\n  > '
+        has_session=0
+        find_terminal_session "$repo_key" "$instance" && has_session=1
+        if (( has_session )); then printf '  [a] Podłącz\n'; fi
+        printf '  [x] Zakończ terminal\n  [b] Powrót\n  > '
         if ! read_choice choice; then return; fi
         case "$choice" in
-            a|A) if find_terminal_session "$repo_key" "$instance"; then attach_session "$FOUND_SESSION" || true; fi ;;
+            a|A)
+                if (( has_session )) && find_terminal_session "$repo_key" "$instance"; then
+                    attach_session "$FOUND_SESSION" || true
+                else
+                    MENU_HINT="Terminal nie ma aktywnej sesji tmux."
+                fi
+                ;;
             x|X) kill_terminal "$repo_key" "$instance" || true ;;
             b|B) return ;;
             *) unknown_key ;;
@@ -1053,8 +1707,7 @@ instance_list() {
             stored_agent="$(tmux_cmd show-option -qv -t "=$session:" @hubi-agent 2>/dev/null || true)"
             stored_repo="$(tmux_cmd show-option -qv -t "=$session:" @hubi-repo 2>/dev/null || true)"
             instance="$(tmux_cmd show-option -qv -t "=$session:" @hubi-instance 2>/dev/null || true)"
-            [[ -n "$instance" ]] || instance="primary"
-            if [[ "$managed" == "v4" && "$stored_agent" == "$agent" && "$stored_repo" == "$repo_key" \
+            if [[ "$managed" == "v5" && "$stored_agent" == "$agent" && "$stored_repo" == "$repo_key" \
                 && "$instance" != "primary" ]] && validate_instance_name "$instance"; then
                 printf '%s|%s\n' "$agent" "$instance"
                 found["$instance"]=1
@@ -1238,7 +1891,8 @@ main_menu() {
 
 usage() {
     printf '%s\n' 'Użycie:' '  hubi' '  hubi codex REPO [INSTANCE [new|resume]]' \
-        '  hubi claude REPO [INSTANCE [new|resume]]' '  hubi shell REPO' '  hubi sessions'
+        '  hubi claude REPO [INSTANCE [new|resume]]' '  hubi shell REPO' '  hubi sessions' \
+        '  hubi doctor'
 }
 
 hubi_main() {
@@ -1261,6 +1915,7 @@ hubi_main() {
             ;;
         shell) if (( $# != 2 )); then usage >&2; rc=2; else project_shell "$2" || rc=$?; fi ;;
         sessions) if (( $# != 1 )); then usage >&2; rc=2; else sessions_menu || rc=$?; fi ;;
+        doctor) if (( $# != 1 )); then usage >&2; rc=2; else hubi_doctor || rc=$?; fi ;;
         *) usage >&2; rc=2 ;;
     esac
     return "$rc"
@@ -1273,6 +1928,36 @@ if [[ "${BASH_SOURCE[0]}" == "$0" && "${1:-}" == "__start-locked" ]]; then
         exit 2
     fi
     ensure_agent_session_locked "$@"
+    exit $?
+fi
+
+if [[ "${BASH_SOURCE[0]}" == "$0" && "${1:-}" == "__agent-stop-locked" ]]; then
+    shift
+    if (( $# != 4 )); then
+        printf 'Hubi: niepełne argumenty wewnętrznego zatrzymania agenta.\n' >&2
+        exit 2
+    fi
+    stop_agent_locked "$@"
+    exit $?
+fi
+
+if [[ "${BASH_SOURCE[0]}" == "$0" && "${1:-}" == "__terminal-start-locked" ]]; then
+    shift
+    if (( $# != 4 )); then
+        printf 'Hubi: niepełne argumenty wewnętrznego startu terminala.\n' >&2
+        exit 2
+    fi
+    start_terminal_locked "$@"
+    exit $?
+fi
+
+if [[ "${BASH_SOURCE[0]}" == "$0" && "${1:-}" == "__terminal-stop-locked" ]]; then
+    shift
+    if (( $# != 3 )); then
+        printf 'Hubi: niepełne argumenty wewnętrznego zatrzymania terminala.\n' >&2
+        exit 2
+    fi
+    stop_terminal_locked "$@"
     exit $?
 fi
 

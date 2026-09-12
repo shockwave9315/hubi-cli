@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""High-fidelity release-gate regressions for Hubi v4.
+"""High-fidelity release-gate regressions for Hubi v5.
 
 Every test uses a unique tmux socket, temporary repositories, fake agents, and
 real disposable systemd user scopes. It never addresses the default tmux
@@ -13,6 +13,7 @@ import hashlib
 import os
 import pty
 import select
+import shlex
 import shutil
 import signal
 import subprocess
@@ -125,6 +126,8 @@ class HubiAdversarialTests(unittest.TestCase):
         self.runtime.mkdir(mode=0o700)
         self.unique = f"red{os.getpid()}-{time.time_ns() % 1_000_000_000}"
         self.socket = f"hubi-adversarial-{self.unique}"
+        self.socket_path = f"/tmp/tmux-{os.getuid()}/{self.socket}"
+        self.tmux_service = f"hubiv5-test-adv-{self.unique}.service"
         self.repo_name = f"{self.unique}-repo"
         self.repo = self.repos / self.repo_name
         subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
@@ -139,16 +142,52 @@ class HubiAdversarialTests(unittest.TestCase):
             "#!/usr/bin/env bash\n"
             "printf 'AGENT_READY\\n'\n"
             "trap 'exit 0' INT TERM\n"
-            "while IFS= read -r line; do printf '%s\\n' \"$line\" >>\"$AGENT_INPUT_LOG\"; done\n"
+            f"while IFS= read -r line; do printf '%s\\n' \"$line\" >>"
+            f"{shlex.quote(str(self.input_log))}; done\n"
         )
         self.fake_agent.chmod(0o755)
+        subprocess.run(
+            [
+                "systemd-run",
+                "--user",
+                "--quiet",
+                "--collect",
+                "--service-type=simple",
+                f"--unit={self.tmux_service}",
+                "--",
+                REAL_TMUX,
+                "-f",
+                "/dev/null",
+                "-L",
+                self.socket,
+                "-D",
+            ],
+            check=True,
+        )
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            probe = subprocess.run(
+                [REAL_TMUX, "-N", "-L", self.socket, "display-message", "-p", "#{pid}"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            active = subprocess.run(
+                ["systemctl", "--user", "is-active", "--quiet", self.tmux_service]
+            )
+            if probe.returncode == 0 and active.returncode == 0:
+                break
+            time.sleep(0.02)
+        else:
+            self.fail("isolated systemd-owned tmux server did not start")
         self.env = os.environ.copy()
         self.env.pop("TMUX", None)
         self.env.pop("HUBI_ACTIVE", None)
+        self.env.pop("HUBI_AGENT_INSTANCE", None)
         self.env.update(
             {
                 "HUBI_REPOS": str(self.repos),
-                "HUBI_TMUX_SOCKET": self.socket,
+                "HUBI_TMUX_SOCKET_PATH": self.socket_path,
+                "HUBI_TMUX_SERVICE": self.tmux_service,
                 "HUBI_TMUX_BIN": str(self.tmux_wrapper),
                 "HUBI_CODEX_BIN": str(self.fake_agent),
                 "HUBI_CLAUDE_BIN": str(self.fake_agent),
@@ -194,6 +233,11 @@ class HubiAdversarialTests(unittest.TestCase):
                 stderr=subprocess.DEVNULL,
             )
         self.tmux("kill-server", check=False)
+        subprocess.run(
+            ["systemctl", "--user", "stop", self.tmux_service],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
         for agent in ("codex", "claude"):
             try:
                 self.lock_path(agent).unlink()
@@ -208,7 +252,7 @@ class HubiAdversarialTests(unittest.TestCase):
 
     def tmux(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [REAL_TMUX, "-f", "/dev/null", "-L", self.socket, *args],
+            [REAL_TMUX, "-f", "/dev/null", "-N", "-L", self.socket, *args],
             text=True,
             capture_output=True,
             check=check,
@@ -235,8 +279,11 @@ class HubiAdversarialTests(unittest.TestCase):
             os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
         )
         lock_dir = runtime / f"hubi-locks-{os.getuid()}"
-        digest = hashlib.sha256(f"{agent}:{self.repo_name}".encode()).hexdigest()[:12]
-        return lock_dir / f"{digest}.lock"
+        identity = b"\0".join(
+            (agent.encode(), self.repo_name.encode(), b"primary")
+        )
+        digest = hashlib.sha256(identity).hexdigest()
+        return lock_dir / f"agent-{digest}.lock"
 
     def session_name(self, agent: str = "codex") -> str:
         digest = hashlib.sha256(self.repo_name.encode()).hexdigest()[:12]
@@ -378,7 +425,7 @@ class HubiAdversarialTests(unittest.TestCase):
             "if [[ \" $* \" == *\" new-session \"* ]]; then\n"
             f"  {REAL_TMUX} -f /dev/null \"$@\"\n"
             "  rc=$?\n"
-            "  : >\"$LOCK_MARKER\"\n"
+            f"  : >{shlex.quote(str(marker))}\n"
             "  sleep 60\n"
             "  exit \"$rc\"\n"
             "fi\n"
@@ -476,7 +523,7 @@ class HubiAdversarialTests(unittest.TestCase):
         unsupported.write_text(
             "#!/usr/bin/env bash\n"
             "if [[ \"$1\" == kill && \"$2\" == --help ]]; then echo 'no cgroup kill'; exit 0; fi\n"
-            "exit 1\n"
+            "exec /usr/bin/systemctl \"$@\"\n"
         )
         unsupported.chmod(0o755)
         result = self.bash(
@@ -649,7 +696,7 @@ class HubiAdversarialTests(unittest.TestCase):
         env_agent = self.temp / "env-agent"
         env_agent.write_text(
             "#!/usr/bin/env bash\n"
-            "printf '%s' \"${HUBI_ACTIVE-unset}\" >\"$AGENT_ENV_FILE\"\n"
+            f"printf '%s' \"${{HUBI_ACTIVE-unset}}\" >{shlex.quote(str(agent_env))}\n"
             "trap 'exit 0' INT TERM\n"
             "while :; do sleep 1; done\n"
         )
@@ -817,7 +864,7 @@ class HubiAdversarialTests(unittest.TestCase):
         foreground_agent.write_text(
             "#!/usr/bin/env bash\n"
             "echo AGENT_FOREGROUND_READY\n"
-            "trap 'echo INT >\"$FOREGROUND_MARKER\"; exit 0' INT\n"
+            f"trap 'echo INT >{shlex.quote(str(marker))}; exit 0' INT\n"
             "while :; do sleep 1; done\n"
         )
         foreground_agent.chmod(0o755)
@@ -840,7 +887,7 @@ class HubiAdversarialTests(unittest.TestCase):
         process.send(b"\x02d")
         self.assertEqual(process.wait(), 0)
 
-    def test_legacy_session_is_attachable_but_never_managed(self) -> None:
+    def test_v5_clean_start_does_not_route_to_a_v4_legacy_name(self) -> None:
         legacy = f"codex-{self.repo_name}"
         self.tmux(
             "new-session",
@@ -854,33 +901,18 @@ class HubiAdversarialTests(unittest.TestCase):
             "-c",
             "echo LEGACY_READY; while :; do sleep 1; done",
         )
-        process = PtyProcess([str(HUBI), "codex", self.repo_name], self.env)
-        self.ptys.append(process)
-        process.wait_for(b"legacy/unmanaged")
-        process.send(b"a\n")
-        process.wait_for(b"LEGACY_READY")
-        deadline = time.monotonic() + 2
-        clients = []
-        while time.monotonic() < deadline:
-            clients = self.tmux(
-                "list-clients", "-t", legacy, "-F", "#{client_name}", check=False
-            ).stdout.splitlines()
-            if clients:
-                break
-            time.sleep(0.05)
-        self.assertTrue(clients, "legacy tmux client was not fully attached")
-        time.sleep(0.1)
-        process.send(b"\x02d")
-        self.assertEqual(process.wait(), 0)
+        self.start_agent()
         result = self.bash(
-            'source "$HUBI_FILE"; printf "STATUS=%s\\n" '
-            '"$(agent_status codex "$REPO_NAME")"; stop_agent_now codex "$REPO_NAME"',
-            check=False,
+            'source "$HUBI_FILE"; find_agent_session codex "$REPO_NAME"; '
+            'printf "%s\\n" "$FOUND_SESSION"',
             env={**self.env, "REPO_NAME": self.repo_name},
         )
-        self.assertIn("LEGACY/UNMANAGED", result.stdout)
-        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), self.session_name())
         self.assertEqual(self.tmux("has-session", "-t", legacy, check=False).returncode, 0)
+        self.assertEqual(
+            self.tmux("has-session", "-t", self.session_name(), check=False).returncode,
+            0,
+        )
 
     def test_laptop_and_phone_keep_second_window_at_largest_size(self) -> None:
         self.start_agent()
@@ -918,7 +950,7 @@ class HubiAdversarialTests(unittest.TestCase):
         argv_agent = self.temp / "argv-agent"
         argv_agent.write_text(
             "#!/usr/bin/env bash\n"
-            "printf '%s\\n' \"$#\" \"$@\" >\"$ARGV_FILE\"\n"
+            f"printf '%s\\n' \"$#\" \"$@\" >{shlex.quote(str(argv_file))}\n"
             "echo ARGV_READY\n"
             "trap 'exit 0' INT TERM\n"
             "while :; do sleep 1; done\n"
@@ -950,7 +982,8 @@ class HubiAdversarialTests(unittest.TestCase):
         restart_agent = self.temp / "restart-agent"
         restart_agent.write_text(
             "#!/usr/bin/env bash\n"
-            "if [[ ! -e \"$FIRST_RUN\" ]]; then : >\"$FIRST_RUN\"; echo FIRST_CRASH; exit 17; fi\n"
+            f"if [[ ! -e {shlex.quote(str(first_run))} ]]; then "
+            f": >{shlex.quote(str(first_run))}; echo FIRST_CRASH; exit 17; fi\n"
             "echo RESTART_RUNNING\n"
             "trap 'exit 0' INT TERM\n"
             "while :; do sleep 1; done\n"

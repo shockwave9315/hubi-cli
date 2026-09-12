@@ -1,0 +1,12 @@
+[Unit]
+Description=Hubi tmux server
+
+[Service]
+Type=simple
+ExecStartPre=/usr/bin/install -d -m 700 %t/tmux-%U
+ExecStart=/usr/bin/tmux -f %h/.config/hubi/tmux-server.conf -S %t/tmux-%U/hubi -D
+ExecStopPost=-/bin/rm -f %t/tmux-%U/hubi
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
