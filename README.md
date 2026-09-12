@@ -138,14 +138,17 @@ scope with TERM and finally KILL if necessary. This cgroup boundary includes
 descendants that create new process groups. Codex and Claude use separate tmux
 sessions and separate scopes.
 
-Agent startup and each persistent terminal's complete start/stop/reconciliation
-lifecycle use bounded command-mode `flock --close`. Each lock is owned by a
-short-lived supervisor and its descriptor is closed before the worker can
-create tmux or systemd processes. Terminal locks are deterministic per exact
-repository and instance, so siblings remain independent. A busy lock produces
-a diagnostic after three seconds instead of freezing the menu. Under the lock,
-Hubi rechecks the tmux session and exact deterministic scope independently; an
-orphan scope can be safely cleaned and a restart can recover.
+Each agent and persistent terminal has one bounded command-mode
+`flock --close` lifecycle lock for its exact repository/type/instance identity.
+Each lock is owned by a short-lived supervisor and its descriptor is closed
+before the worker can create tmux or systemd processes. Sibling identities
+remain independent. A busy lock produces a diagnostic after three seconds
+instead of freezing the menu. Under the lock, Hubi rechecks the tmux session
+and exact deterministic scope independently; an orphan scope can be safely
+cleaned and a restart can recover. Destructive confirmation records the
+scope's systemd `InvocationID` and refuses the action if that reusable scope
+name now refers to a replacement generation. No lifecycle lock is held while
+waiting for user input.
 
 Hubi preserves tmux and systemd diagnostics when startup or attachment fails.
 A failed/ended pane remains available as `EXITED` rather than disappearing.
@@ -221,10 +224,10 @@ env -u HUBI_NOAUTO python3 tests/adversarial.py
 ```
 
 At this revision the functional harness reports 18 tests and the adversarial
-suite contains 31 tests. The focused multi-instance harness reports 12 tests;
-the focused persistent-terminal harness reports 20 tests. The v5 doctor,
+suite contains 31 tests. The focused multi-instance harness reports 14 tests;
+the focused persistent-terminal harness reports 22 tests. The v5 doctor,
 server, ownership, preflight, and login-scope lifetime harnesses report 9, 7,
-12, 6, and 1 tests respectively. That is 116 behavior tests in total; every
+12, 6, and 2 tests respectively. That is 121 behavior tests in total; every
 harness must be fully green for release review.
 
 The harnesses use unique private tmux sockets, disposable Git repositories and
