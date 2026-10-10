@@ -114,6 +114,9 @@ class CoreTests(unittest.TestCase):
         for text in (base+"ActiveState=inactive\n", base.replace("active", "nonsense"),
                      base.replace("a"*32, ""), base.replace("ControlGroup=/x.scope\n", ""), "Id=x.scope\n"):
             self.assertEqual(parse_units(text)["x.scope"].active, "unknown")
+        for text in (base.replace("Id=x.scope\n", ""), base+"\n"+base):
+            with self.assertRaises(HubiError):
+                parse_units(text)
 
     def test_runtime_path_fallback_F9(self):
         with patch.dict(os.environ, {}, clear=True):

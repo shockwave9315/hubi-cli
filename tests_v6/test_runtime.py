@@ -267,6 +267,11 @@ class RuntimeTests(unittest.TestCase):
             with self.assertRaises(HubiError):
                 self.app.stop(r.id)
         self.assertEqual(self.app.find(r.id).state, State.RUNNING)
+        with patch.object(self.app.systemd, "inventory", side_effect=HubiError("Malformed batch")):
+            self.assertEqual(self.app.find(r.id).state, State.UNKNOWN)
+            with self.assertRaises(HubiError):
+                self.app.stop(r.id)
+        self.assertEqual(self.app.find(r.id).state, State.RUNNING)
 
     def test_agent_argv_literal_and_resume(self):
         literal = ["space arg", "#(touch ARGV_BROKEN)", "$(touch ARGV_BROKEN)", "`touch ARGV_BROKEN`", "*?[]", "é"]

@@ -10,6 +10,8 @@ PROPERTIES = "Id,LoadState,ActiveState,InvocationID,ControlGroup,MainPID,Descrip
 def parse_units(output: str) -> dict[str, Unit]:
     units = {}
     for block in output.strip().split("\n\n"):
+        if not block.strip():
+            continue
         fields = {}
         valid = True
         for line in block.splitlines():
@@ -18,8 +20,8 @@ def parse_units(output: str) -> dict[str, Unit]:
                 valid = False
             fields[key] = value
         name = fields.get("Id", "")
-        if not name:
-            continue
+        if not name or name in units:
+            raise HubiError("Malformed systemd inventory: missing or duplicate unit identity")
         active = fields.get("ActiveState", "unknown")
         if not {"Id", "LoadState", "ActiveState", "InvocationID", "ControlGroup", "Description"}.issubset(fields):
             valid = False
