@@ -106,4 +106,5 @@ class Tmux:
             args.append("-d")
         elif mode not in ("normal", "shared"):
             raise HubiError("Unknown attach mode")
-        return self.command(*args, "-t", "="+record.session, interactive=True).returncode
+        code = self.command(*args, "-t", "="+record.session, interactive=True, check=False).returncode
+        return 128-code if code < 0 else code
