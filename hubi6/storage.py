@@ -1,0 +1,97 @@
+from contextlib import contextmanager
+import fcntl
+import json
+import os
+from pathlib import Path
+import stat
+import tempfile
+import time
+
+from .config import private_dir
+from .core.model import HubiError, Record, HEX20
+
+
+def atomic_json(path: Path, data):
+    fd, temp = tempfile.mkstemp(prefix=".hubi6-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, ensure_ascii=True)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        Path(temp).unlink(missing_ok=True)
+
+
+def private_json(path: Path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    with os.fdopen(fd) as f:
+        s = os.fstat(f.fileno())
+        if s.st_uid != os.getuid() or not stat.S_ISREG(s.st_mode) or s.st_mode & 0o077 or s.st_size > 1048576:
+            raise HubiError("Unsafe metadata file")
+        return json.load(f)
+
+
+class Store:
+    def __init__(self, config):
+        self.c = config
+
+    def path(self, record):
+        return self.c.records/(record.id+".json")
+
+    def save(self, record):
+        atomic_json(self.path(record), record.data())
+
+    def load(self, path):
+        return Record.parse(private_json(path), self.c.runtime_id, os.getuid())
+
+    def all(self):
+        records, errors = {}, []
+        if not self.c.records.exists():
+            return records, errors
+        try:
+            private_dir(self.c.records)
+            for path in self.c.records.glob("*.json"):
+                try:
+                    r = self.load(path)
+                    if path.name != r.id+".json":
+                        raise HubiError("Metadata filename disagrees with identity")
+                    records[r.id] = r
+                except (HubiError, OSError, ValueError) as e:
+                    errors.append(f"{path.name}: {type(e).__name__}; use reconcile")
+        except HubiError as e:
+            errors.append(str(e))
+        return records, errors
+
+    def remove(self, record):
+        self.path(record).unlink(missing_ok=True)
+        for suffix in ("payload", "cancel"):
+            (self.c.runtime/(record.id+"."+suffix)).unlink(missing_ok=True)
+
+    @contextmanager
+    def lock(self, key):
+        if not HEX20.fullmatch(key):
+            raise HubiError("Invalid lock identity")
+        self.c.prepare()
+        fd = os.open(self.c.runtime/"locks"/key, os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+        try:
+            s = os.fstat(fd)
+            if s.st_uid != os.getuid() or not stat.S_ISREG(s.st_mode) or s.st_mode & 0o077:
+                raise HubiError("Unsafe lifecycle lock")
+            end = time.monotonic()+self.c.lock_timeout
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= end:
+                        raise HubiError("Workload busy: lifecycle lock timed out")
+                    time.sleep(0.02)
+            yield
+        finally:
+            os.close(fd)

@@ -1,0 +1,11 @@
+repos_root = "~/repos"
+
+[agents]
+codex = ["codex"]
+claude = ["claude", "--permission-mode", "bypassPermissions"]
+terminal = ["/bin/bash", "--noprofile", "--norc", "-i"]
+
+[github]
+# Empty owner lists repositories owned by the authenticated user.
+owner = ""
+cache_ttl = 600

@@ -1,0 +1,17 @@
+[Unit]
+Description=Hubi v6 tmux runtime
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+UMask=0077
+ExecStartPre=/usr/bin/install -d -m 700 %t/hubi6
+ExecStart=/usr/bin/tmux -f %h/.config/hubi6/tmux.conf -S %t/hubi6/tmux.sock -D
+ExecStopPost=-/usr/bin/rm -f %t/hubi6/tmux.sock
+Restart=always
+RestartSec=0.2
+KillMode=control-group
+UnsetEnvironment=TMUX TMUX_PANE HUBI_ACTIVE HUBI6_ACTIVE OPENAI_API_KEY ANTHROPIC_API_KEY GH_TOKEN GITHUB_TOKEN
+
+[Install]
+WantedBy=default.target
