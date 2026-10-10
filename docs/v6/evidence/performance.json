@@ -1,0 +1,39 @@
+{
+  "snapshots": [
+    {
+      "median_ms": 10.825716890394688,
+      "p95_ms": 11.749351397156715,
+      "subprocesses": 2,
+      "repos": 7,
+      "workloads": 0
+    },
+    {
+      "median_ms": 27.636677026748657,
+      "p95_ms": 28.95109262317419,
+      "subprocesses": 2,
+      "repos": 7,
+      "workloads": 6
+    },
+    {
+      "median_ms": 36.80193983018398,
+      "p95_ms": 39.79926183819771,
+      "subprocesses": 2,
+      "repos": 200,
+      "workloads": 0
+    },
+    {
+      "median_ms": 143.1787544861436,
+      "p95_ms": 152.96189859509468,
+      "subprocesses": 2,
+      "repos": 1000,
+      "workloads": 0
+    },
+    {
+      "median_ms": 272.49401807785034,
+      "p95_ms": 278.8150114938617,
+      "subprocesses": 2,
+      "repos": 1000,
+      "workloads": 50
+    }
+  ]
+}

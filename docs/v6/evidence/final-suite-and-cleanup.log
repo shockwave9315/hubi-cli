@@ -1,0 +1,130 @@
+Running as unit: hubi6-test-driver.service; invocation ID: d0a5b27c749d417ca54bb0b87222090f
+test_clone_term_sigkill_and_staging_recovery (test_clone_runtime.CloneRuntimeTests.test_clone_term_sigkill_and_staging_recovery) ... ok
+test_private_clone_real_git_and_service (test_clone_runtime.CloneRuntimeTests.test_private_clone_real_git_and_service) ... ok
+test_control_characters_F15 (test_core.CoreTests.test_control_characters_F15) ... ok
+test_git_optional_locks_F8 (test_core.CoreTests.test_git_optional_locks_F8) ... ok
+test_git_origin_matching (test_core.CoreTests.test_git_origin_matching) ... ok
+test_instances_ascii_in_all_locales_F10 (test_core.CoreTests.test_instances_ascii_in_all_locales_F10) ... ok
+test_invalid_identity (test_core.CoreTests.test_invalid_identity) ... ok
+test_metadata_rejects_foreign_or_malformed_F11 (test_core.CoreTests.test_metadata_rejects_foreign_or_malformed_F11) ... ok
+test_metadata_roundtrip (test_core.CoreTests.test_metadata_roundtrip) ... ok
+test_namespace_and_generation (test_core.CoreTests.test_namespace_and_generation) ... ok
+test_private_directories_and_metadata (test_core.CoreTests.test_private_directories_and_metadata) ... ok
+test_repo_identity_replacement_and_invalid_F5_F6 (test_core.CoreTests.test_repo_identity_replacement_and_invalid_F5_F6) ... ok
+test_runtime_path_fallback_F9 (test_core.CoreTests.test_runtime_path_fallback_F9) ... ok
+test_state_matrix (test_core.CoreTests.test_state_matrix) ... ok
+test_systemd_unknown_parsing (test_core.CoreTests.test_systemd_unknown_parsing) ... ok
+test_tmux_escaping_F1 (test_core.CoreTests.test_tmux_escaping_F1) ... ok
+test_transition_rules_and_actions (test_core.CoreTests.test_transition_rules_and_actions) ... ok
+test_arrows_and_escapes (test_core.InputTests.test_arrows_and_escapes) ... ok
+test_backspace (test_core.InputTests.test_backspace) ... ok
+test_incomplete_paste_times_out_without_enter (test_core.InputTests.test_incomplete_paste_times_out_without_enter) ... ok
+test_line_and_eof (test_core.InputTests.test_line_and_eof) ... ok
+test_multiline_bracketed_paste (test_core.InputTests.test_multiline_bracketed_paste) ... ok
+test_accessible_collaborator_and_org_pagination (test_github.GitHubTests.test_accessible_collaborator_and_org_pagination) ... ok
+test_cache_ttl_offline (test_github.GitHubTests.test_cache_ttl_offline) ... ok
+test_clone_atomic_https_existing_auth (test_github.GitHubTests.test_clone_atomic_https_existing_auth) ... ok
+test_clone_destination_collision (test_github.GitHubTests.test_clone_destination_collision) ... ok
+test_clone_interruption_cleanup (test_github.GitHubTests.test_clone_interruption_cleanup) ... ok
+test_corrupt_cache (test_github.GitHubTests.test_corrupt_cache) ... ok
+test_discovery_pagination_private_forks_archived (test_github.GitHubTests.test_discovery_pagination_private_forks_archived) ... ok
+test_invalid_names (test_github.GitHubTests.test_invalid_names) ... ok
+test_local_is_origin_not_directory (test_github.GitHubTests.test_local_is_origin_not_directory) ... ok
+test_no_cache_offline_and_auth_failure (test_github.GitHubTests.test_no_cache_offline_and_auth_failure) ... ok
+test_no_replace_directory_or_symlink (test_github.GitHubTests.test_no_replace_directory_or_symlink) ... ok
+test_publish_collision_race (test_github.GitHubTests.test_publish_collision_race) ... ok
+test_sigkill_staging_recovery (test_github.GitHubTests.test_sigkill_staging_recovery) ... ok
+test_owner_signals_sockets_and_cgroups_denied (test_isolation.IsolationTests.test_owner_signals_sockets_and_cgroups_denied) ... Isolation: 28 owner PIDs deny signals; sockets/cgroup writes denied
+ok
+test_absent_environment_and_frozen_on_attach (test_runtime.RuntimeTests.test_absent_environment_and_frozen_on_attach) ... ok
+test_adversarial_repo_names_F1 (test_runtime.RuntimeTests.test_adversarial_repo_names_F1) ... ok
+test_agent_argv_literal_and_resume (test_runtime.RuntimeTests.test_agent_argv_literal_and_resume) ... ok
+test_bare_tmux_cannot_kill_runtime_F2 (test_runtime.RuntimeTests.test_bare_tmux_cannot_kill_runtime_F2) ... ok
+test_client_loss_multiattach_takeover_and_races (test_runtime.RuntimeTests.test_client_loss_multiattach_takeover_and_races) ... ok
+test_concurrent_stops_do_not_touch_successor (test_runtime.RuntimeTests.test_concurrent_stops_do_not_touch_successor) ... ok
+test_concurrent_workloads_and_independent_locks (test_runtime.RuntimeTests.test_concurrent_workloads_and_independent_locks) ... ok
+test_corrupt_metadata_repair_F11 (test_runtime.RuntimeTests.test_corrupt_metadata_repair_F11) ... ok
+test_environment_secret_not_argv_F2_F7 (test_runtime.RuntimeTests.test_environment_secret_not_argv_F2_F7) ... ok
+test_full_cgroup_stop_setsid_and_sibling (test_runtime.RuntimeTests.test_full_cgroup_stop_setsid_and_sibling) ... ok
+test_interrupted_start_recovery_100 (test_runtime.RuntimeTests.test_interrupted_start_recovery_100) ... Interrupted starts: 100/100 recovered
+ok
+test_lock_timeout_and_no_descriptor_leak (test_runtime.RuntimeTests.test_lock_timeout_and_no_descriptor_leak) ... ok
+test_missing_replaced_invalid_repo_stoppable_F5_F6 (test_runtime.RuntimeTests.test_missing_replaced_invalid_repo_stoppable_F5_F6) ... ok
+test_no_alternate_server_and_readonly_doctor (test_runtime.RuntimeTests.test_no_alternate_server_and_readonly_doctor) ... ok
+test_preflight_unknown_linger_and_missing_kill_capability (test_runtime.RuntimeTests.test_preflight_unknown_linger_and_missing_kill_capability) ... ok
+test_real_ssh_disconnect_and_launcher_death (test_runtime.RuntimeTests.test_real_ssh_disconnect_and_launcher_death) ... ok
+test_render_exception_restores_terminal_and_json_on_tty (test_runtime.RuntimeTests.test_render_exception_restores_terminal_and_json_on_tty) ... ok
+test_revalidate_repo_before_external_workload (test_runtime.RuntimeTests.test_revalidate_repo_before_external_workload) ... ok
+test_runtime_namespace_F4 (test_runtime.RuntimeTests.test_runtime_namespace_F4) ... ok
+test_scope_generation_stale_confirmation (test_runtime.RuntimeTests.test_scope_generation_stale_confirmation) ... ok
+test_scope_without_session_and_lost_receipt (test_runtime.RuntimeTests.test_scope_without_session_and_lost_receipt) ... ok
+test_session_without_scope_and_exited_output (test_runtime.RuntimeTests.test_session_without_scope_and_exited_output) ... ok
+test_source_file_and_restart_policy_F3 (test_runtime.RuntimeTests.test_source_file_and_restart_policy_F3) ... ok
+test_source_file_last_stop_without_preflight_F3 (test_runtime.RuntimeTests.test_source_file_last_stop_without_preflight_F3) ... ok
+test_systemd_unknown_fails_closed (test_runtime.RuntimeTests.test_systemd_unknown_fails_closed) ... ok
+test_tmux_server_crash_restarts_without_touching_sibling_runtime_F2 (test_runtime.RuntimeTests.test_tmux_server_crash_restarts_without_touching_sibling_runtime_F2) ... ok
+test_tui_signals_eof_and_terminal_restoration (test_runtime.RuntimeTests.test_tui_signals_eof_and_terminal_restoration) ... ok
+test_types_unified_view_and_cli_json_F14 (test_runtime.RuntimeTests.test_types_unified_view_and_cli_json_F14) ... ok
+
+----------------------------------------------------------------------
+Ran 64 tests in 100.089s
+
+OK
+Finished with result: success
+Main processes terminated with: code=exited, status=0/SUCCESS
+Service runtime: 1min 40.173s
+CPU time consumed: 40.389s
+Memory peak: 73.9M (swap: 0B)
+Running as unit: hubi6-benchmark.service; invocation ID: f4f235b8d3804ab39b4a06a2b220cb41
+{
+  "snapshots": [
+    {
+      "median_ms": 10.825716890394688,
+      "p95_ms": 11.749351397156715,
+      "subprocesses": 2,
+      "repos": 7,
+      "workloads": 0
+    },
+    {
+      "median_ms": 27.636677026748657,
+      "p95_ms": 28.95109262317419,
+      "subprocesses": 2,
+      "repos": 7,
+      "workloads": 6
+    },
+    {
+      "median_ms": 36.80193983018398,
+      "p95_ms": 39.79926183819771,
+      "subprocesses": 2,
+      "repos": 200,
+      "workloads": 0
+    },
+    {
+      "median_ms": 143.1787544861436,
+      "p95_ms": 152.96189859509468,
+      "subprocesses": 2,
+      "repos": 1000,
+      "workloads": 0
+    },
+    {
+      "median_ms": 272.49401807785034,
+      "p95_ms": 278.8150114938617,
+      "subprocesses": 2,
+      "repos": 1000,
+      "workloads": 50
+    }
+  ]
+}
+Finished with result: success
+Main processes terminated with: code=exited, status=0/SUCCESS
+Service runtime: 37.578s
+CPU time consumed: 14.301s
+Memory peak: 145.8M (swap: 0B)
+{"user": "hubi6test", "uid": 1001, "home": "/home/hubi6test"}
+Pre-cleanup workload scopes: none
+Removed '/run/systemd/system.control/user-1001.slice.d/50-CPUWeight.conf'.
+Removed '/run/systemd/system.control/user-1001.slice.d/50-MemoryMax.conf'.
+Removed '/run/systemd/system.control/user-1001.slice.d/50-TasksMax.conf'.
+Removed '/run/systemd/system.control/user-1001.slice.d'.
+userdel: hubi6test mail spool (/var/mail/hubi6test) not found
+CLEAN: uid 1001; no processes, home, runtime, linger or slice overrides

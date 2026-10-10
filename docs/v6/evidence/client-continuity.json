@@ -1,0 +1,12 @@
+{
+  "before_source": "Initial read-only ps -u 1000 at 2026-10-10 15:39:38 UTC (tool transcript)",
+  "before": [
+    "1544604\t/dev/pts/3\thubi-claude-hubi-cli-83de655a3d27",
+    "2098447\t/dev/pts/4\thubi-codex-hubi-cli-83de655a3d27"
+  ],
+  "after": [
+    "1544604\t/dev/pts/3\thubi-claude-hubi-cli-83de655a3d27",
+    "2098447\t/dev/pts/4\thubi-codex-hubi-cli-83de655a3d27"
+  ],
+  "same_clients": true
+}

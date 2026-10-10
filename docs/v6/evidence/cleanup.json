@@ -1,0 +1,18 @@
+{
+  "all_clean": true,
+  "checks": {
+    "user_removed": true,
+    "group_removed": true,
+    "home_removed": true,
+    "runtime_removed": true,
+    "linger_removed": true,
+    "cgroup_removed": true,
+    "slice_overrides_removed": true,
+    "ssh_transient_removed": true,
+    "no_test_processes": true,
+    "/etc/subuid_clean": true,
+    "/etc/subgid_clean": true,
+    "no_test_tmp_paths": true
+  },
+  "test_pids": []
+}
