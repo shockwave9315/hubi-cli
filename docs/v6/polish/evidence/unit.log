@@ -1,0 +1,108 @@
+test_auth_error_redaction_timeout_and_path (test_clone_runtime.CloneRuntimeTests.test_auth_error_redaction_timeout_and_path) ... skipped 'requires disposable UID'
+test_clone_term_sigkill_and_staging_recovery (test_clone_runtime.CloneRuntimeTests.test_clone_term_sigkill_and_staging_recovery) ... skipped 'requires disposable UID'
+test_private_clone_real_git_and_service (test_clone_runtime.CloneRuntimeTests.test_private_clone_real_git_and_service) ... skipped 'requires disposable UID'
+test_control_characters_F15 (test_core.CoreTests.test_control_characters_F15) ... ok
+test_git_optional_locks_F8 (test_core.CoreTests.test_git_optional_locks_F8) ... ok
+test_git_origin_matching (test_core.CoreTests.test_git_origin_matching) ... ok
+test_instances_ascii_in_all_locales_F10 (test_core.CoreTests.test_instances_ascii_in_all_locales_F10) ... ok
+test_invalid_identity (test_core.CoreTests.test_invalid_identity) ... ok
+test_metadata_rejects_foreign_or_malformed_F11 (test_core.CoreTests.test_metadata_rejects_foreign_or_malformed_F11) ... ok
+test_metadata_roundtrip (test_core.CoreTests.test_metadata_roundtrip) ... ok
+test_namespace_and_generation (test_core.CoreTests.test_namespace_and_generation) ... ok
+test_private_directories_and_metadata (test_core.CoreTests.test_private_directories_and_metadata) ... ok
+test_repo_identity_replacement_and_invalid_F5_F6 (test_core.CoreTests.test_repo_identity_replacement_and_invalid_F5_F6) ... ok
+test_runtime_path_fallback_F9 (test_core.CoreTests.test_runtime_path_fallback_F9) ... ok
+test_state_matrix (test_core.CoreTests.test_state_matrix) ... ok
+test_systemd_unknown_parsing (test_core.CoreTests.test_systemd_unknown_parsing) ... ok
+test_tmux_escaping_F1 (test_core.CoreTests.test_tmux_escaping_F1) ... ok
+test_transition_rules_and_actions (test_core.CoreTests.test_transition_rules_and_actions) ... ok
+test_arrows_and_escapes (test_core.InputTests.test_arrows_and_escapes) ... ok
+test_backspace (test_core.InputTests.test_backspace) ... ok
+test_incomplete_paste_times_out_without_enter (test_core.InputTests.test_incomplete_paste_times_out_without_enter) ... ok
+test_line_and_eof (test_core.InputTests.test_line_and_eof) ... ok
+test_multiline_bracketed_paste (test_core.InputTests.test_multiline_bracketed_paste) ... ok
+test_all_receipts_lost_and_foreign_journal_remain_fail_closed (test_fixset.FixsetRuntimeTests.test_all_receipts_lost_and_foreign_journal_remain_fail_closed) ... skipped 'requires disposable UID; never run lifecycle as owner'
+test_bad_entries_do_not_block_inventory_or_lifecycle (test_fixset.FixsetRuntimeTests.test_bad_entries_do_not_block_inventory_or_lifecycle) ... skipped 'requires disposable UID; never run lifecycle as owner'
+test_closed_stdin_and_real_pty_hangup_exit_codes (test_fixset.FixsetRuntimeTests.test_closed_stdin_and_real_pty_hangup_exit_codes) ... skipped 'requires disposable UID; never run lifecycle as owner'
+test_custom_state_home_worker_and_interrupted_recovery (test_fixset.FixsetRuntimeTests.test_custom_state_home_worker_and_interrupted_recovery) ... skipped 'requires disposable UID; never run lifecycle as owner'
+test_exited_start_fails_and_reports_exit_status (test_fixset.FixsetRuntimeTests.test_exited_start_fails_and_reports_exit_status) ... skipped 'requires disposable UID; never run lifecycle as owner'
+test_extra_pane_repair_and_binding_reassertion (test_fixset.FixsetRuntimeTests.test_extra_pane_repair_and_binding_reassertion) ... skipped 'requires disposable UID; never run lifecycle as owner'
+test_git_read_status_write_deterministic_F8 (test_fixset.FixsetRuntimeTests.test_git_read_status_write_deterministic_F8) ... skipped 'requires disposable UID; never run lifecycle as owner'
+test_github_clone_confirmation_progress_and_cancel (test_fixset.FixsetRuntimeTests.test_github_clone_confirmation_progress_and_cancel) ... skipped 'requires disposable UID; never run lifecycle as owner'
+test_live_scope_tmux_unavailable_is_unknown_and_closed (test_fixset.FixsetRuntimeTests.test_live_scope_tmux_unavailable_is_unknown_and_closed) ... skipped 'requires disposable UID; never run lifecycle as owner'
+test_main_view_shows_unhealthy_workspace_even_when_not_discovered (test_fixset.FixsetRuntimeTests.test_main_view_shows_unhealthy_workspace_even_when_not_discovered) ... skipped 'requires disposable UID; never run lifecycle as owner'
+test_moved_workspace_does_not_duplicate_agent (test_fixset.FixsetRuntimeTests.test_moved_workspace_does_not_duplicate_agent) ... skipped 'requires disposable UID; never run lifecycle as owner'
+test_normal_terminal_rc_environment_and_nested_refusal (test_fixset.FixsetRuntimeTests.test_normal_terminal_rc_environment_and_nested_refusal) ... skipped 'requires disposable UID; never run lifecycle as owner'
+test_paste_after_real_tmux_detach_and_bracketed_paste (test_fixset.FixsetRuntimeTests.test_paste_after_real_tmux_detach_and_bracketed_paste) ... skipped 'requires disposable UID; never run lifecycle as owner'
+test_raw_paste_burst_cannot_cross_screens_or_confirm_stop (test_fixset.FixsetRuntimeTests.test_raw_paste_burst_cannot_cross_screens_or_confirm_stop) ... skipped 'requires disposable UID; never run lifecycle as owner'
+test_slow_graceful_agent_shutdown (test_fixset.FixsetRuntimeTests.test_slow_graceful_agent_shutdown) ... skipped 'requires disposable UID; never run lifecycle as owner'
+test_stale_journal_hidden_after_runtime_generation_change (test_fixset.FixsetRuntimeTests.test_stale_journal_hidden_after_runtime_generation_change) ... skipped 'requires disposable UID; never run lifecycle as owner'
+test_worker_wrong_layout_refused_and_private_temp_cleanup (test_fixset.FixsetRuntimeTests.test_worker_wrong_layout_refused_and_private_temp_cleanup) ... skipped 'requires disposable UID; never run lifecycle as owner'
+test_config_errors_are_actionable (test_fixset.FixsetUnitTests.test_config_errors_are_actionable) ... ok
+test_debug_traceback (test_fixset.FixsetUnitTests.test_debug_traceback) ... ok
+test_discovery_isolates_stat_errors_without_error_path_probe (test_fixset.FixsetUnitTests.test_discovery_isolates_stat_errors_without_error_path_probe) ... ok
+test_doctor_warn_fail_and_json_semantics (test_fixset.FixsetUnitTests.test_doctor_warn_fail_and_json_semantics) ... ok
+test_empty_short_and_ambiguous_prefixes (test_fixset.FixsetUnitTests.test_empty_short_and_ambiguous_prefixes) ... ok
+test_fresh_build_no_stale_files_and_dirty_identity (test_fixset.FixsetUnitTests.test_fresh_build_no_stale_files_and_dirty_identity) ... ok
+test_origin_common_github_hosts (test_fixset.FixsetUnitTests.test_origin_common_github_hosts) ... ok
+test_accessible_collaborator_and_org_pagination (test_github.GitHubTests.test_accessible_collaborator_and_org_pagination) ... ok
+test_cache_ttl_offline (test_github.GitHubTests.test_cache_ttl_offline) ... ok
+test_clone_atomic_https_existing_auth (test_github.GitHubTests.test_clone_atomic_https_existing_auth) ... ok
+test_clone_destination_collision (test_github.GitHubTests.test_clone_destination_collision) ... ok
+test_clone_interruption_cleanup (test_github.GitHubTests.test_clone_interruption_cleanup) ... ok
+test_corrupt_cache (test_github.GitHubTests.test_corrupt_cache) ... ok
+test_discovery_pagination_private_forks_archived (test_github.GitHubTests.test_discovery_pagination_private_forks_archived) ... ok
+test_invalid_names (test_github.GitHubTests.test_invalid_names) ... ok
+test_local_is_origin_not_directory (test_github.GitHubTests.test_local_is_origin_not_directory) ... ok
+test_no_cache_offline_and_auth_failure (test_github.GitHubTests.test_no_cache_offline_and_auth_failure) ... ok
+test_no_replace_directory_or_symlink (test_github.GitHubTests.test_no_replace_directory_or_symlink) ... ok
+test_publish_collision_race (test_github.GitHubTests.test_publish_collision_race) ... ok
+test_sigkill_staging_recovery (test_github.GitHubTests.test_sigkill_staging_recovery) ... ok
+test_fresh_bundle_install_workflows_and_uninstall (test_install.InstallTests.test_fresh_bundle_install_workflows_and_uninstall) ... skipped 'installation requires disposable UID'
+test_uninstall_preserves_changed_unit_and_can_retry (test_install.InstallTests.test_uninstall_preserves_changed_unit_and_can_retry) ... skipped 'installation requires disposable UID'
+test_uninstall_resumes_after_partial_failure_and_is_idempotent (test_install.InstallTests.test_uninstall_resumes_after_partial_failure_and_is_idempotent) ... skipped 'installation requires disposable UID'
+test_owner_signals_sockets_and_cgroups_denied (test_isolation.IsolationTests.test_owner_signals_sockets_and_cgroups_denied) ... skipped 'kernel probes require disposable UID'
+test_bracketed_paste_and_signals_restore_terminal (test_polish.PolishPtyTests.test_bracketed_paste_and_signals_restore_terminal) ... skipped 'PTY signal/paste regressions run only under disposable UID'
+test_empty_backspace_and_split_utf8_echo (test_polish.PolishPtyTests.test_empty_backspace_and_split_utf8_echo) ... skipped 'PTY signal/paste regressions run only under disposable UID'
+test_last_byte_extends_quarantine_and_manual_fast_line_works (test_polish.PolishPtyTests.test_last_byte_extends_quarantine_and_manual_fast_line_works) ... skipped 'PTY signal/paste regressions run only under disposable UID'
+test_line_quarantine_blocks_split_burst_without_confirmation (test_polish.PolishPtyTests.test_line_quarantine_blocks_split_burst_without_confirmation) ... skipped 'PTY signal/paste regressions run only under disposable UID'
+test_first_start_immediate_exec_exit_fails_and_stays_inspectable (test_polish.PolishRuntimeTests.test_first_start_immediate_exec_exit_fails_and_stays_inspectable) ... skipped 'lifecycle only under disposable UID'
+test_pane_repair_missing_journal_and_session_invocation (test_polish.PolishRuntimeTests.test_pane_repair_missing_journal_and_session_invocation) ... skipped 'lifecycle only under disposable UID'
+test_runtime_issue_precedes_repo_diagnostics_in_menu (test_polish.PolishRuntimeTests.test_runtime_issue_precedes_repo_diagnostics_in_menu) ... skipped 'lifecycle only under disposable UID'
+test_whole_main_burst_stays_on_workloads_screen (test_polish.PolishRuntimeTests.test_whole_main_burst_stays_on_workloads_screen) ... skipped 'lifecycle only under disposable UID'
+test_xdg_namespace_diagnostic_never_adopts_other_objects (test_polish.PolishRuntimeTests.test_xdg_namespace_diagnostic_never_adopts_other_objects) ... skipped 'lifecycle only under disposable UID'
+test_accepted_line_returns_before_quarantine_wait (test_polish.PolishUnitTests.test_accepted_line_returns_before_quarantine_wait) ... ok
+test_plain_directories_skipped_but_damaged_git_reported (test_polish.PolishUnitTests.test_plain_directories_skipped_but_damaged_git_reported) ... ok
+test_absent_environment_and_frozen_on_attach (test_runtime.RuntimeTests.test_absent_environment_and_frozen_on_attach) ... skipped 'requires separate disposable UID; use tools/v6_lab.py'
+test_adversarial_repo_names_F1 (test_runtime.RuntimeTests.test_adversarial_repo_names_F1) ... skipped 'requires separate disposable UID; use tools/v6_lab.py'
+test_agent_argv_literal_and_resume (test_runtime.RuntimeTests.test_agent_argv_literal_and_resume) ... skipped 'requires separate disposable UID; use tools/v6_lab.py'
+test_bare_tmux_cannot_kill_runtime_F2 (test_runtime.RuntimeTests.test_bare_tmux_cannot_kill_runtime_F2) ... skipped 'requires separate disposable UID; use tools/v6_lab.py'
+test_client_loss_multiattach_takeover_and_races (test_runtime.RuntimeTests.test_client_loss_multiattach_takeover_and_races) ... skipped 'requires separate disposable UID; use tools/v6_lab.py'
+test_concurrent_stops_do_not_touch_successor (test_runtime.RuntimeTests.test_concurrent_stops_do_not_touch_successor) ... skipped 'requires separate disposable UID; use tools/v6_lab.py'
+test_concurrent_workloads_and_independent_locks (test_runtime.RuntimeTests.test_concurrent_workloads_and_independent_locks) ... skipped 'requires separate disposable UID; use tools/v6_lab.py'
+test_corrupt_metadata_repair_F11 (test_runtime.RuntimeTests.test_corrupt_metadata_repair_F11) ... skipped 'requires separate disposable UID; use tools/v6_lab.py'
+test_environment_secret_not_argv_F2_F7 (test_runtime.RuntimeTests.test_environment_secret_not_argv_F2_F7) ... skipped 'requires separate disposable UID; use tools/v6_lab.py'
+test_full_cgroup_stop_setsid_and_sibling (test_runtime.RuntimeTests.test_full_cgroup_stop_setsid_and_sibling) ... skipped 'requires separate disposable UID; use tools/v6_lab.py'
+test_interrupted_start_recovery_100 (test_runtime.RuntimeTests.test_interrupted_start_recovery_100) ... skipped 'requires separate disposable UID; use tools/v6_lab.py'
+test_lock_timeout_and_no_descriptor_leak (test_runtime.RuntimeTests.test_lock_timeout_and_no_descriptor_leak) ... skipped 'requires separate disposable UID; use tools/v6_lab.py'
+test_missing_replaced_invalid_repo_stoppable_F5_F6 (test_runtime.RuntimeTests.test_missing_replaced_invalid_repo_stoppable_F5_F6) ... skipped 'requires separate disposable UID; use tools/v6_lab.py'
+test_no_alternate_server_and_readonly_doctor (test_runtime.RuntimeTests.test_no_alternate_server_and_readonly_doctor) ... skipped 'requires separate disposable UID; use tools/v6_lab.py'
+test_preflight_unknown_linger_and_missing_kill_capability (test_runtime.RuntimeTests.test_preflight_unknown_linger_and_missing_kill_capability) ... skipped 'requires separate disposable UID; use tools/v6_lab.py'
+test_real_ssh_disconnect_and_launcher_death (test_runtime.RuntimeTests.test_real_ssh_disconnect_and_launcher_death) ... skipped 'requires separate disposable UID; use tools/v6_lab.py'
+test_render_exception_restores_terminal_and_json_on_tty (test_runtime.RuntimeTests.test_render_exception_restores_terminal_and_json_on_tty) ... skipped 'requires separate disposable UID; use tools/v6_lab.py'
+test_revalidate_repo_before_external_workload (test_runtime.RuntimeTests.test_revalidate_repo_before_external_workload) ... skipped 'requires separate disposable UID; use tools/v6_lab.py'
+test_runtime_namespace_F4 (test_runtime.RuntimeTests.test_runtime_namespace_F4) ... skipped 'requires separate disposable UID; use tools/v6_lab.py'
+test_scope_generation_stale_confirmation (test_runtime.RuntimeTests.test_scope_generation_stale_confirmation) ... skipped 'requires separate disposable UID; use tools/v6_lab.py'
+test_scope_without_session_and_lost_receipt (test_runtime.RuntimeTests.test_scope_without_session_and_lost_receipt) ... skipped 'requires separate disposable UID; use tools/v6_lab.py'
+test_session_without_scope_and_exited_output (test_runtime.RuntimeTests.test_session_without_scope_and_exited_output) ... skipped 'requires separate disposable UID; use tools/v6_lab.py'
+test_source_file_and_restart_policy_F3 (test_runtime.RuntimeTests.test_source_file_and_restart_policy_F3) ... skipped 'requires separate disposable UID; use tools/v6_lab.py'
+test_source_file_last_stop_without_preflight_F3 (test_runtime.RuntimeTests.test_source_file_last_stop_without_preflight_F3) ... skipped 'requires separate disposable UID; use tools/v6_lab.py'
+test_systemd_unknown_fails_closed (test_runtime.RuntimeTests.test_systemd_unknown_fails_closed) ... skipped 'requires separate disposable UID; use tools/v6_lab.py'
+test_tmux_server_crash_restarts_without_touching_sibling_runtime_F2 (test_runtime.RuntimeTests.test_tmux_server_crash_restarts_without_touching_sibling_runtime_F2) ... skipped 'requires separate disposable UID; use tools/v6_lab.py'
+test_tui_signals_eof_and_terminal_restoration (test_runtime.RuntimeTests.test_tui_signals_eof_and_terminal_restoration) ... skipped 'requires separate disposable UID; use tools/v6_lab.py'
+test_types_unified_view_and_cli_json_F14 (test_runtime.RuntimeTests.test_types_unified_view_and_cli_json_F14) ... skipped 'requires separate disposable UID; use tools/v6_lab.py'
+
+----------------------------------------------------------------------
+Ran 103 tests in 0.100s
+
+OK (skipped=61)
