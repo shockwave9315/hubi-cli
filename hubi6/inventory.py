@@ -19,6 +19,7 @@ class Snapshot:
     systemd_known: bool
     elapsed_ms: float
     subprocesses: int
+    other_runtime_objects: int = 0
 
     def data(self):
         return {"schema": 6, "runtime_health": self.runtime_health,
@@ -27,23 +28,22 @@ class Snapshot:
                 "snapshot_ms": self.elapsed_ms, "subprocesses": self.subprocesses}
 
 
-def build(config, store, tmux, systemd, git, *, include_repos=True, include_health=True):
+def build(config, store, tmux, systemd, git, *, include_repos=True, include_health=True, include_other=False):
     start, calls = time.monotonic(), tmux.r.calls
     try:
         sessions, tk, pid, exit_empty, issues = tmux.inventory()
     except HubiError:
         sessions, tk, pid, exit_empty, issues = {}, False, 0, "unknown", ["tmux inventory unavailable"]
     try:
-        units, sk = systemd.inventory()
+        units, sk = systemd.inventory(include_other=True) if include_other else systemd.inventory()
     except HubiError:
         units, sk = {}, False
         issues.append("systemd inventory unavailable")
     records, errors = store.all()
     issues.extend(errors)
-    repos = []
+    repos, repo_issues = [], []
     if include_repos:
-        repos, errors = git.discover()
-        issues.extend(errors)
+        repos, repo_issues = git.discover()
     # Recover independent ownership receipts from either runtime adapter. Disk is
     # a journal, never sufficient authorization to signal a reusable scope name.
     for s in sessions.values():
@@ -107,5 +107,8 @@ def build(config, store, tmux, systemd, git, *, include_repos=True, include_heal
             continue
         workloads.append(Workload(r, state, health(r.repo) if include_health else RepoHealth.UNKNOWN, s, u, wi))
     workloads.sort(key=lambda w: (os.fsencode(w.record.repo.path), w.record.kind, w.record.instance, w.record.generation))
+    # Runtime/ownership warnings must remain visible in the UI's limited space.
+    issues.extend(repo_issues)
     return Snapshot(workloads, repos, issues, rh, service, pid, exit_empty, tk, sk,
-                    (time.monotonic()-start)*1000, tmux.r.calls-calls)
+                    (time.monotonic()-start)*1000, tmux.r.calls-calls,
+                    len(tmux.other_runtime_sessions)+len(systemd.other_runtime_scopes))

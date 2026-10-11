@@ -1,6 +1,7 @@
 import re
+import os
 
-from ..core.model import HubiError, Unit
+from ..core.model import HubiError, Record, Unit
 
 
 PROPERTIES = "Id,LoadState,ActiveState,InvocationID,ControlGroup,MainPID,Description,Restart,KillMode"
@@ -44,14 +45,30 @@ def parse_units(output: str) -> dict[str, Unit]:
 class Systemd:
     def __init__(self, config, runner):
         self.c, self.r = config, runner
+        self.other_runtime_scopes = set()
 
-    def inventory(self):
+    def inventory(self, *, include_other=False):
+        self.other_runtime_scopes.clear()
         p = self.r.run(["systemctl", "--user", "show", self.c.service,
-                        f"hubi6-{self.c.runtime_id}-*.scope", "--no-pager", "--property="+PROPERTIES], check=False)
+                        "hubi6-*.scope" if include_other else f"hubi6-{self.c.runtime_id}-*.scope",
+                        "--no-pager", "--property="+PROPERTIES], check=False)
         units = parse_units(p.stdout)
         # A missing service gives exit 1; a reachable manager still supplies Id.
         known = bool(units) and (p.returncode == 0 or all(u.active == "inactive" for u in units.values()))
-        return units, known
+        own = {}
+        for name, unit in units.items():
+            if name == self.c.service or name.startswith("hubi6-"+self.c.runtime_id+"-"):
+                own[name] = unit
+                continue
+            match = re.match(r"hubi6-([a-f0-9]{20})-", name)
+            if match and unit.live and unit.active != "unknown":
+                try:
+                    receipt = Record.decode(unit.description.split(":", 3)[3], match[1], os.getuid())
+                    if receipt.scope == name and self.owns_description(receipt, unit.description) and unit.cgroup.endswith("/"+name):
+                        self.other_runtime_scopes.add(name)
+                except (HubiError, IndexError):
+                    pass
+        return own, known
 
     def unit(self, name):
         if name != self.c.service and not re.fullmatch(r"hubi6-"+self.c.runtime_id+r"-(codex|claude|terminal)-[a-f0-9]{20}-[a-f0-9]{16}\.scope", name):

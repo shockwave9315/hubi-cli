@@ -10,11 +10,13 @@ FORMAT = "P\t#{session_name}\t#{session_id}\t#{pane_id}\t#{pane_dead}\t#{pane_pi
 class Tmux:
     def __init__(self, config, runner):
         self.c, self.r = config, runner
+        self.other_runtime_sessions = set()
 
     def command(self, *args, **kw):
         return self.r.run(["tmux", "-N", "-S", str(self.c.socket), *args], **kw)
 
     def inventory(self):
+        self.other_runtime_sessions.clear()
         p = self.command("display-message", "-p", "H\t#{pid}\t#{exit-empty}", ";",
                          "list-panes", "-a", "-F", FORMAT, check=False)
         sessions, errors, pid, exit_empty = {}, [], 0, "unknown"
@@ -31,6 +33,14 @@ class Tmux:
             elif fields[0] == "P" and len(fields) == 10:
                 _, name, sid, pane, dead, process, attached, meta, status, exit_signal = fields
                 if not name.startswith("hubi6-"+self.c.runtime_id+"-"):
+                    match = re.match(r"hubi6-([a-f0-9]{20})-", name)
+                    if match:
+                        try:
+                            receipt = Record.decode(meta, match[1], os.getuid())
+                            if receipt.session == name and receipt.pane == pane and re.fullmatch(r"\$[0-9]+", sid) and dead in ("0", "1"):
+                                self.other_runtime_sessions.add(name)
+                        except HubiError:
+                            pass
                     continue
                 try:
                     if not re.fullmatch(r"\$[0-9]+", sid) or not re.fullmatch(r"%[0-9]+", pane) or dead not in ("0", "1"):

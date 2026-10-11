@@ -38,6 +38,10 @@ input before exposing their prompt. Common keys: `w` workloads, `g` GitHub,
 `c` Codex, `l` Claude, `t` terminal; agent creation asks new/resume. Workload
 actions: `a` attach, `v` view, `s` share, `o` takeover, `d` stop, `i` inspect,
 `f` reconcile. Actions unavailable in the current state are hidden.
+Accepted lines return immediately so snapshot/render can run during the 80 ms
+input quarantine. Before the next read, the remaining burst is discarded until
+80 ms of quiet since the last received byte; destructive prompts wait for that
+clean state before being displayed.
 
 ## Configuration and deployment materials
 
@@ -68,6 +72,11 @@ envelopes: `/run/user/UID/hubi6/RUNTIME_ID`. Journal:
 `$XDG_STATE_HOME/hubi6/workloads/RUNTIME_ID`. Log: `$XDG_STATE_HOME/hubi6/hubi6.log`
 (1 MiB, three rotations). GitHub cache: `$XDG_CACHE_HOME/hubi6`. Every owned
 directory is private. There is no fallback to `/tmp` for runtime or locks.
+A different `XDG_STATE_HOME` creates a different Hubi runtime namespace.
+Workloads in one namespace do not appear in another namespace's inventory.
+Doctor reports `other_runtime_objects: N` for verified foreign-namespace sessions
+and live scopes (each object counted once) on the same v6 server/user manager.
+This is informational, does not change PASS, and never offers adoption or stop.
 
 Each working tree receives a random identity in its Git administrative
 directory, `hubi6-workspace-id`. This does not change tracked files or the index.
@@ -183,6 +192,9 @@ layout, ownership, linger, kill capability or inconsistent runtime means FAIL
 `list --json` always emits inventory when runtime can be represented, but exits
 1 for DOWN/DEGRADED/UNKNOWN; healthy inventory exits 0. EXITED includes tmux's
 exit_status/exit_signal. Start on EXITED refuses with an actionable error.
+Initial start also checks the immediate exec/ack window (75 ms plus its final
+snapshot); an agent exiting there causes failure and remains inspectable as
+EXITED. This does not guarantee the agent's later availability.
 EOF/closed stdin is 0, Ctrl+C 130, SIGHUP/PTY hangup 129, SIGTERM 143. --debug
 includes tracebacks; unknown keys/types and explicit missing config are errors.
 

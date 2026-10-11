@@ -158,6 +158,10 @@ class Git:
                     if entry.is_symlink():
                         errors.append(f"Invalid repository {entry.name}: broken symlink")
                     continue
+                try:
+                    (path/".git").lstat()
+                except FileNotFoundError:
+                    continue  # Ordinary directories are not discovery errors.
                 ref = reference(path, resolved=not entry.is_symlink())
                 if not Path(ref.path).is_relative_to(self.c.repos) or Path(ref.path) == self.c.repos:
                     raise HubiError("Repository escapes repo root")

@@ -52,7 +52,14 @@ Workspace UUIDs in readable repos under the configured repo root are removed;
 markers in moved/outside/unreadable repos are preserved. Repository contents,
 Git index and any v5 configuration/services are preserved. Keep your source
 bundle outside the installed prefix for uninstall; the installed bundle also
-contains install.py, but running an uninstaller from a separate bundle is clearer.
+contains install.py. Run uninstall from the retained separate bundle so that the
+command remains available if cleanup is interrupted after deleting the installed
+prefix. The private installation manifest remains until cleanup completes.
+Correct the reported problem (for example cache permissions), then run the same
+uninstall command again. Missing files and an already absent/disabled v6 unit are
+accepted after confirming zero-state and that the service is stopped. Restoring
+the v5 fallback is idempotent; a restored launcher is not rewritten. Changed
+managed files or unknown registry entries are preserved and reported.
 
 ## Clean cutover
 

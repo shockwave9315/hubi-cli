@@ -1,14 +1,11 @@
 """Regressions derived from Claude's complete PR #8 review, not implementation mirrors."""
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 import errno
 import io
 import json
 import os
 from pathlib import Path
-import select
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
@@ -62,12 +59,13 @@ class FixsetUnitTests(unittest.TestCase):
             self.assertTrue(any('broken' in issue for issue in issues))
             with patch('hubi6.adapters.git.reference', side_effect=PermissionError(errno.EACCES, 'denied')):
                 (root/'unreadable').mkdir()
+                (root/'unreadable/.git').mkdir()
                 self.assertTrue(any('unreadable' in issue for issue in git.discover()[1]))
 
     def test_doctor_warn_fail_and_json_semantics(self):
         from unittest.mock import Mock
         app = Mock(c=replace(Config.load(), agents={'codex':['codex'], 'claude':['claude'], 'terminal':['/bin/bash','-i']}))
-        snapshot = Mock(runtime_health='OK', exit_empty='0', systemd_known=True, issues=[], workloads=[])
+        snapshot = Mock(runtime_health='OK', exit_empty='0', systemd_known=True, issues=[], workloads=[], other_runtime_objects=0)
         snapshot.service.restart = 'always'
         app.snapshot.return_value = snapshot
         app.systemd.linger.return_value = 'yes'
@@ -132,6 +130,7 @@ class FixsetRuntimeTests(unittest.TestCase):
 
     def setUp(self):
         self.app = App(Config.load())
+        shutil.rmtree(self.app.c.repos/('fix-'+self._testMethodName), ignore_errors=True)
         self.path = repo('fix-'+self._testMethodName)
 
     def tearDown(self):
@@ -150,6 +149,10 @@ class FixsetRuntimeTests(unittest.TestCase):
         return client
 
     def send_prompt(self, client, text, needle=b'Choice + Enter:'):
+        # A rendered normal screen can precede input readiness by the remainder
+        # of the burst window. Manual responses start after that quiet period;
+        # paste regressions below still send their entire burst without pauses.
+        time.sleep(.1)
         client.output=b''
         client.send(text)
         client.read_until(needle)
@@ -369,6 +372,7 @@ class FixsetRuntimeTests(unittest.TestCase):
     def test_paste_after_real_tmux_detach_and_bracketed_paste(self):
         r=self.start('terminal');client=self.menu()
         self.send_prompt(client,b'w\n');self.send_prompt(client,b'1\n')
+        time.sleep(.1)
         client.output=b'';client.send(b'a\n')
         wait_for(lambda:self.app.find(r.id).session.attached==1)
         client.send(b'\x02d')
@@ -432,46 +436,45 @@ class FixsetRuntimeTests(unittest.TestCase):
         self.assertIn(b'Cloned owner/tui-clone',client.output)
         self.assertTrue((self.path/'clone-called').exists())
 
-    def test_git_read_status_write_stress_F8(self):
-        # A slow fsmonitor makes the optional index refresh overlap real commits.
-        # The negative control must detect contention: otherwise this run proves
-        # nothing about optional locks and cannot silently report green.
-        for i in range(300):
-            (self.path/f'f{i}').write_text('tracked\n')
+    def test_git_read_status_write_deterministic_F8(self):
+        # A real writer's hook holds an explicit index.lock behind a barrier. The shim
+        # checks the subprocess environment, then execs real Git. It makes loss
+        # of the optional-lock contract deterministic, independent of scheduling.
+        (self.path/'tracked').write_text('tracked\n')
         git=['git','-C',str(self.path),'-c','user.name=Lab','-c','user.email=lab@example.invalid','-c','commit.gpgsign=false']
         subprocess.run(git+['add','.'],check=True)
-        subprocess.run(git+['commit','-qm','fixture'],check=True)
-        monitor=self.path/'.git/slow-fsmonitor'
-        monitor.write_text('#!/usr/bin/python3\nimport sys,time\ntime.sleep(.03)\nsys.stdout.buffer.write(b"token\\0/\\0")\n')
-        monitor.chmod(0o700)
-        subprocess.run(git+['config','core.fsmonitor',str(monitor)],check=True)
-        def exercise(optional):
-            import threading
-            stop=threading.Event();started=threading.Event()
-            def statuses():
-                started.set()
-                while not stop.is_set():
-                    if optional:
-                        env=self.app.git.env();env['GIT_OPTIONAL_LOCKS']='1'
-                        self.app.r.run(['git','-C',str(self.path),'status','--short','--branch'],env=env)
-                    else:
-                        self.app.git.summary(self.app.git.resolve(str(self.path)))
-            failures=[]
-            with ThreadPoolExecutor(max_workers=1) as pool:
-                future=pool.submit(statuses);started.wait()
-                try:
-                    for i in range(60):
-                        p=subprocess.run(git+['commit','--allow-empty','-qm',f'stress {i}'],capture_output=True,text=True)
-                        if p.returncode:failures.append(p.stderr)
-                finally:stop.set()
-                future.result()
-            return failures
-        protected=exercise(False)
-        control=exercise(True)
-        self.assertEqual(protected,[])
-        self.assertTrue(control,'Negative control had no index-lock contention')
-        self.assertTrue(all('index.lock' in failure for failure in control),control)
-        print(f'Git F8 stress: protected {len(protected)}/60 commit failures; control {len(control)}/60',flush=True)
+        ready, release = self.path/'writer-ready', self.path/'writer-release'
+        hook=self.path/'.git/hooks/pre-commit'
+        hook.write_text('#!/usr/bin/python3\nfrom pathlib import Path\nimport time\nwith Path(".git/index.lock").open("x"):\n Path("writer-ready").touch()\n end=time.monotonic()+10\n while not Path("writer-release").exists():\n  if time.monotonic()>end:raise SystemExit(1)\n  time.sleep(.01)\nPath(".git/index.lock").unlink()\n')
+        hook.chmod(0o700)
+        shim=self.path/'shim';shim.mkdir()
+        real=shutil.which('git'); log=self.path/'git-env.jsonl'
+        wrapper=shim/'git'
+        wrapper.write_text('#!/usr/bin/python3\nimport os,json,sys\nfrom pathlib import Path\nwith Path('+repr(str(log))+').open("a") as f: f.write(json.dumps({"argv":sys.argv[1:],"optional":os.environ.get("GIT_OPTIONAL_LOCKS")})+"\\n")\nif os.environ.get("GIT_OPTIONAL_LOCKS") != "0":\n print("optional-lock contract missing",file=sys.stderr)\n raise SystemExit(49)\nos.execv('+repr(real)+',['+repr(real)+']+sys.argv[1:])\n')
+        wrapper.chmod(0o700)
+        writer=subprocess.Popen(git+['commit','-qm','barrier fixture'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+        try:
+            wait_for(ready.exists)
+            self.assertTrue((self.path/'.git/index.lock').exists())
+            with patch.dict(os.environ,{'PATH':str(shim)+os.pathsep+os.environ['PATH']}):
+                for _ in range(8):
+                    self.app.git.summary(self.app.git.resolve(str(self.path)))
+                safe=self.app.git.env()
+                safe.pop('GIT_OPTIONAL_LOCKS')
+                with patch.object(self.app.git,'env',return_value=safe), self.assertRaises(HubiError):
+                    self.app.git.summary(self.app.git.resolve(str(self.path)))
+            rows=[json.loads(line) for line in log.read_text().splitlines()]
+            self.assertEqual(len(rows),17)
+            self.assertTrue(all(row['optional']=='0' for row in rows[:-1]))
+            self.assertIsNone(rows[-1]['optional'])
+            self.assertTrue(any('status' in row['argv'] for row in rows))
+            self.assertTrue(any('rev-parse' in row['argv'] for row in rows))
+        finally:
+            release.touch()
+            out,err=writer.communicate(timeout=5)
+        self.assertEqual(writer.returncode,0,err)
+        self.assertFalse((self.path/'.git/index.lock').exists())
+        print('Git F8 deterministic barrier: 16 protected real Git reads, real writer committed; missing-env control rejected',flush=True)
 
     def test_worker_wrong_layout_refused_and_private_temp_cleanup(self):
         from hubi6.config import worker_config

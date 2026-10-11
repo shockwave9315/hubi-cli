@@ -21,6 +21,9 @@ try:
                     "--property=WorkingDirectory="+str(v6_lab.HOME/"project"), "--", "env", "HUBI6_LAB=1",
                     "HUBI6_REQUIRE_CLEAN_BUILD="+('1' if args.require_clean_build else '0'),
                     "/usr/bin/python3", "-m", "unittest", "discover", "-s", "tests_v6", "-p", "test_*.py", "-v")
+    v6_lab.as_user("systemd-run", "--user", "--wait", "--pipe", "--collect", "--unit=hubi6-mutations.service",
+                    "--property=WorkingDirectory="+str(v6_lab.HOME/"project"), "--", "env", "HUBI6_LAB=1",
+                    "/usr/bin/python3", "-m", "tests_v6.mutations")
     v6_lab.as_user("systemd-run", "--user", "--wait", "--pipe", "--collect", "--unit=hubi6-benchmark.service",
                     "--property=WorkingDirectory="+str(v6_lab.HOME/"project"), "--", "env", "HUBI6_LAB=1",
                     "/usr/bin/python3", "-m", "tests_v6.benchmark")

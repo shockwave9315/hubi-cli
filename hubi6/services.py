@@ -32,8 +32,8 @@ class App:
         self.store = Store(config)
         self.tmux, self.systemd, self.git = Tmux(config, self.r), Systemd(config, self.r), Git(config, self.r)
 
-    def snapshot(self):
-        return build(self.c, self.store, self.tmux, self.systemd, self.git)
+    def snapshot(self, *, include_other=False):
+        return build(self.c, self.store, self.tmux, self.systemd, self.git, include_other=include_other)
 
     def runtime_snapshot(self):
         # Lifecycle never scans repositories or touches unrelated workspaces.
@@ -161,8 +161,15 @@ class App:
                 r = self.store.load(self.store.path(r))
                 if r.invocation:
                     self.tmux.metadata(r)
-                    if self.find(r.id, health_check=False).state not in (State.RUNNING, State.ATTACHED):
-                        raise HubiError(f"Workload failed or EXITED during startup; inspect/stop {r.id}")
+                    # The worker journals scope ownership just before exec.
+                    # Observe that narrow ack/exec race, not later agent health.
+                    settle = time.monotonic()+.075
+                    while True:
+                        if self.find(r.id, health_check=False).state not in (State.RUNNING, State.ATTACHED):
+                            raise HubiError(f"Workload failed or EXITED during startup; inspect/stop {r.id}")
+                        if time.monotonic() >= settle:
+                            break
+                        time.sleep(.01)
                     return r
                 sessions, known, *_ = self.tmux.inventory()
                 if known and sessions.get(r.session) and sessions[r.session].dead:
@@ -241,12 +248,22 @@ class App:
                 self.anchored()
                 # Recover immutable primary pane from the live scope receipt if
                 # session metadata was damaged. Verify generation before repair.
-                unit = self.systemd.verify_scope(r, r.invocation)
+                unit = self.systemd.unit(r.scope)
+                description = unit.description
                 receipt = r
                 if unit.live:
-                    receipt = Record.decode(unit.description.split(":", 3)[3], self.c.runtime_id, os.getuid())
-                    if receipt.id != r.id or receipt.scope != unit.name:
+                    try:
+                        receipt = Record.decode(unit.description.split(":", 3)[3], self.c.runtime_id, os.getuid())
+                    except (HubiError, IndexError) as e:
+                        raise HubiError("Cannot verify scope receipt for pane repair") from e
+                    if (receipt.id != r.id or receipt.session != r.session or receipt.scope != unit.name or
+                        not self.systemd.owns_description(r, unit.description)):
                         raise HubiError("Scope receipt does not match the exact repair generation")
+                # Empty session/journal invocation can be recovered only after
+                # decoding the exact scope receipt, then rechecking live identity.
+                unit = self.systemd.verify_scope(r, r.invocation or unit.invocation)
+                if unit.live and unit.description != description:
+                    raise HubiError("Scope receipt changed during pane repair")
                 self.tmux.repair_panes(receipt)
                 if unit.live:
                     receipt.invocation, receipt.phase = unit.invocation, "running"

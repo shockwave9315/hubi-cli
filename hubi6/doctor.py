@@ -8,7 +8,7 @@ from .config import check_layout
 def doctor(app):
     checks = {}
     try:
-        snapshot = app.snapshot()
+        snapshot = app.snapshot(include_other=True)
         checks["runtime"] = snapshot.runtime_health
         checks["exit_empty_off"] = snapshot.exit_empty == "0"
         checks["restart_always"] = bool(snapshot.service and snapshot.service.restart == "always")
@@ -16,6 +16,9 @@ def doctor(app):
         runtime_issues = [i for i in snapshot.issues if not i.startswith(("Invalid repository ", "Cannot read repo root:"))]
         checks["inventory_consistent"] = not runtime_issues and all(w.state != State.UNKNOWN for w in snapshot.workloads)
         checks["diagnostics"] = snapshot.issues
+        # Informational only: these verified objects belong to another journal
+        # namespace. Never import them into inventory or destructive actions.
+        checks["other_runtime_objects"] = snapshot.other_runtime_objects
         try:
             app.anchored(snapshot)
             checks["exact_server_ownership"] = True

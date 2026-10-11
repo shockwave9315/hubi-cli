@@ -1,5 +1,6 @@
 """Small line-oriented UI. Screens render from one complete snapshot."""
 from contextlib import contextmanager
+import codecs
 import json
 import os
 import select
@@ -7,6 +8,7 @@ import signal
 import sys
 import termios
 import time
+import unicodedata
 
 from .core.model import HubiError, actions, display
 from .github import GitHub
@@ -68,33 +70,63 @@ class Input:
         self.pasting = False
         self.paste_end = 0.0
         self.echo, self.paste_timeout = echo, paste_timeout
+        self.last_byte = 0.0
+        self.quarantine_until = 0.0
+        self.echo_buffer = []
+        self.decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
 
     def arm(self):
         if os.isatty(self.fd):
             sys.stdout.write("\033[?2004h")
             sys.stdout.flush()
 
-    def discard_burst(self):
-        """Drop the remainder of one burst until 80 ms of quiet, as in v5."""
+    def finish_line(self):
+        # Return the action immediately. Rendering consumes the quiet window;
+        # only the next logical read waits for its remaining part.
         self.pending.clear()
-        deadline = time.monotonic()+.08
+        self.quarantine_until = self.last_byte+.08
+
+    def discard_burst(self, *, force=False):
+        """Drain before the next read, until 80 ms since the last received byte."""
+        if not self.quarantine_until and not force:
+            return
+        self.pending.clear()
+        deadline = max(self.quarantine_until, time.monotonic()+.08 if force else 0)
         while True:
             ready, _, _ = select.select([self.fd], [], [], max(0, deadline-time.monotonic()))
             if not ready:
-                return
+                break
             try:
                 chunk = os.read(self.fd, 4096)
             except OSError:
-                return
+                break
             if not chunk:
-                return
-            deadline = time.monotonic()+.08
+                break
+            self.last_byte = time.monotonic()
+            deadline = self.last_byte+.08
+        self.quarantine_until = 0.0
+
+    def echo_chunk(self, chunk):
+        for char in self.decoder.decode(chunk):
+            if char in ("\b", "\x7f"):
+                if self.echo_buffer:
+                    previous = self.echo_buffer.pop()
+                    width = 0 if unicodedata.combining(previous) else (2 if unicodedata.east_asian_width(previous) in "WF" else 1)
+                    sys.stdout.write("\b \b"*width)
+            elif char in ("\n", "\r"):
+                sys.stdout.write("\n")
+                break  # Do not echo the discarded remainder of a multiline burst.
+            else:
+                self.echo_buffer.append(char)
+                sys.stdout.write(display(char))
+        sys.stdout.flush()
 
     def prompt(self, text, *, destructive=False):
         if destructive:
             # Drain BEFORE exposing the confirmation prompt. Normal typing
             # after the prompt must never be flushed as stale input.
-            self.discard_burst()
+            self.arm()
+            self.discard_burst(force=not bool(self.quarantine_until))
             if os.isatty(self.fd):
                 termios.tcflush(self.fd, termios.TCIFLUSH)
         self.arm()
@@ -105,6 +137,9 @@ class Input:
     def line(self, *, armed=False):
         if not armed:
             self.arm()
+        self.discard_burst()
+        self.echo_buffer.clear()
+        self.decoder.reset()
         while True:
             if not self.pasting and b"\x1b[200~" in self.pending:
                 self.pasting = True
@@ -112,7 +147,7 @@ class Input:
             if self.pasting:
                 if b"\x1b[201~" in self.pending:
                     self.pasting = False
-                    self.discard_burst()
+                    self.finish_line()
                     return ""
                 # Keep a possible split closing marker; discard all paste data.
                 self.pending = self.pending[-5:]
@@ -121,18 +156,16 @@ class Input:
                 ready, _, _ = select.select([self.fd], [], [], timeout)
                 if not ready:
                     self.pasting = False
-                    self.discard_burst()
+                    self.finish_line()
                     return ""
                 chunk = os.read(self.fd, 4096)
                 if not chunk:
                     return None
                 if chunk == b"\x04" and not self.pending and not self.pasting:
                     return None
+                self.last_byte = time.monotonic()
                 if self.echo and not self.pasting and b"\x1b" not in chunk:
-                    for char in chunk.decode("utf-8", errors="replace"):
-                        sys.stdout.write("\b \b" if char in ("\b", "\x7f") else
-                                         ("\n" if char in ("\n", "\r") else display(char)))
-                    sys.stdout.flush()
+                    self.echo_chunk(chunk)
                 self.pending.extend(chunk)
                 if len(self.pending) > 65536:
                     if self.pasting or b"\x1b[200~" in self.pending:
@@ -140,21 +173,22 @@ class Input:
                         self.paste_end = time.monotonic()+self.paste_timeout
                         self.pending = self.pending[-5:]
                         continue
-                    self.pending.clear()
+                    self.finish_line()
                     return ""
                 if self.pasting or b"\x1b[200~" in self.pending:
                     continue
             if b"\n" not in self.pending:
                 continue
             raw, _, _ = self.pending.partition(b"\n")
-            self.discard_burst()
+            self.finish_line()
             edited = bytearray()
             for c in raw:
-                if c in (8, 127) and edited:
-                    while edited and (edited[-1] & 0xc0) == 0x80:
-                        edited.pop()
+                if c in (8, 127):
                     if edited:
-                        edited.pop()
+                        while edited and (edited[-1] & 0xc0) == 0x80:
+                            edited.pop()
+                        if edited:
+                            edited.pop()
                 else:
                     edited.append(c)
             raw = bytes(edited)
@@ -292,8 +326,11 @@ def run(app):
                         try:
                             app.attach(selected, {"a":"normal", "v":"view", "s":"shared", "o":"takeover"}[action])
                         finally:
-                            reader.discard_burst()
                             reader.arm()
+                            # The client owned input while attached. Reestablish
+                            # a fresh boundary, but let the screen render now.
+                            reader.last_byte = time.monotonic()
+                            reader.finish_line()
                     elif action == "i":
                         message = json.dumps(w.data(), ensure_ascii=True, indent=2)
                     elif action in ("d", "f"):
