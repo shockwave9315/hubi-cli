@@ -9,6 +9,21 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
+
+
+def replace_file(path, data, mode):
+    """Replace the directory entry; never write through an old launcher symlink."""
+    fd, name = tempfile.mkstemp(prefix='.hubi6-install-', dir=path.parent)
+    try:
+        with os.fdopen(fd,'wb') as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(name,mode)
+        os.replace(name,path)
+    finally:
+        Path(name).unlink(missing_ok=True)
 
 
 def run(*argv, check=True):
@@ -88,10 +103,9 @@ def main():
             shutil.copy2(bin_dir/"hubi", registry/"hubi-v5-backup")
         launcher = '#!/usr/bin/env python3\nimport os\nos.execv('+repr(str(prefix/"hubi"))+', ['+repr(str(prefix/"hubi"))+'] + __import__("sys").argv[1:])\n'
         for name in (["hubi6", "hubi"] if alias else ["hubi6"]):
-            (bin_dir/name).write_text(launcher)
-            (bin_dir/name).chmod(0o755)
-        shutil.copy2(bundle/"config/hubi6-tmux.conf", config/"tmux.conf")
-        shutil.copy2(bundle/"systemd/user/hubi6-tmux.service", units/"hubi6-tmux.service")
+            replace_file(bin_dir/name,launcher.encode(),0o755)
+        replace_file(config/"tmux.conf",(bundle/"config/hubi6-tmux.conf").read_bytes(),0o644)
+        replace_file(units/"hubi6-tmux.service",(bundle/"systemd/user/hubi6-tmux.service").read_bytes(),0o644)
         atomic_json(manifest, {"as_hubi": alias, "launcher_sha256": hashlib.sha256(launcher.encode()).hexdigest(),
                                "revision": (bundle/"REVISION").read_text().strip()})
         run("systemctl", "--user", "daemon-reload")

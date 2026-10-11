@@ -4,6 +4,8 @@ These are operator instructions for a **separately authorized future cutover**.
 They have not been run on the owner's account. No session import, live handover,
 or dual production runtime is supported. Run user commands as the target owner,
 not root. Destructive development validation belongs only in the disposable UID.
+Keep launchers and automation quiescent during install/uninstall; these operator
+steps require zero-state and are not concurrent workload lifecycle operations.
 
 ## Install / uninstall
 

@@ -184,6 +184,8 @@ def run(app):
                 choices = snapshot.repos
                 active = len(snapshot.workloads)
                 rows += [f"Workloads: {active}   [w] workloads  [g] GitHub repositories  [q] shell  [x] exit SSH"]
+                rows += [f"{w.record.kind}/{display(w.record.instance)} {w.state.value} repo:{w.repo_health.value}  {display(w.record.repo.path)}"
+                         for w in snapshot.workloads if w.repo_health.value != "OK"]
                 for index, ref in enumerate(choices[page*9:page*9+9], 1):
                     ws = [w for w in snapshot.workloads if w.record.repo.path == ref.path]
                     status = ", ".join(w.record.kind+":"+w.state.value+"/"+w.repo_health.value for w in ws) or "no workloads"

@@ -7,6 +7,7 @@ import time
 from hubi6.services import App
 from hubi6.core.model import HubiError
 from tests_v6.support import bootstrap, repo
+from tests_v6.test_runtime import Client, wait_for
 
 
 def main():
@@ -27,14 +28,24 @@ def main():
             argv += ["--permission-mode", "bypassPermissions"]
         real = App(replace(app.c, agents=dict(app.c.agents, **{kind: argv})))
         r = real.start(kind, str(path))
+        result = {"type": kind, "version": version, "authenticated": False, "scope": r.scope}
         try:
-            time.sleep(1)
+            # Exercise a real client: terminal capability detection can wait
+            # for a frontend and must not be tested with a fixed one-second sleep.
+            client = Client(["attach", r.id, "--mode", "shared"])
+            try:
+                wait_for(lambda: real.find(r.id).session.attached == 1)
+                wait_for(lambda: real.tmux.command("capture-pane", "-p", "-S", "-", "-t", r.pane).stdout.strip(), timeout=8)
+                client.send(b"\x02d")
+                client.p.wait(3)
+            finally:
+                client.close()
             state = real.find(r.id).state.value
             output = real.tmux.command("capture-pane", "-p", "-S", "-", "-t", r.pane).stdout
+            result.update(state=state, output=output.strip())
             if state != "RUNNING" or not output.strip():
+                print(json.dumps(result, indent=2), flush=True)
                 raise AssertionError("Real executable did not reach a visible CLI state")
-            result = {"type": kind, "version": version, "state": state, "output": output.strip(),
-                      "authenticated": False, "scope": r.scope}
             results.append(result)
         finally:
             started = time.monotonic()

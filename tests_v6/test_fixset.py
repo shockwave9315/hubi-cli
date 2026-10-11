@@ -257,9 +257,17 @@ class FixsetRuntimeTests(unittest.TestCase):
         with self.assertRaises(HubiError):self.app.stop(r.id)
         with self.assertRaises(HubiError):self.app.stop(r.id,expected='a'*16,repair=True)
         self.assertEqual(self.app.find(r.id).session.panes,3)
+        self.app.tmux.command('split-window','-d','-t',sibling.pane,'--','/usr/bin/sleep','999')
+        original=self.app.systemd.verify_scope(r,r.invocation)
+        crossed=replace(original,description=r.description+':'+sibling.encoded())
+        with patch.object(self.app.systemd,'verify_scope',return_value=crossed), self.assertRaisesRegex(HubiError,'receipt'):
+            self.app.stop(r.id,repair=True)
+        self.assertEqual(self.app.find(sibling.id).session.panes,2)
         self.app.stop(r.id,repair=True)
         self.assertEqual(self.app.find(r.id).state,State.RUNNING)
         self.assertEqual(self.app.find(r.id).session.panes,1)
+        self.assertEqual(self.app.find(sibling.id).session.panes,2)
+        self.app.stop(sibling.id,repair=True)
         self.assertEqual(self.app.find(sibling.id).state,State.RUNNING)
         self.app.stop(r.id)
 
@@ -302,7 +310,7 @@ class FixsetRuntimeTests(unittest.TestCase):
         rc=Path.home()/'.bashrc';old=rc.read_text() if rc.exists() else None
         rc.write_text('test "$HUBI_NOAUTO" = 1 || touch "$HOME/AUTOLOGIN_LOOP"\nexport RC_LOADED=1\n')
         try:
-            with patch.dict(os.environ,{'SHELL':'/bin/bash','SSH_AUTH_SOCK':'/tmp/synthetic-agent.sock','LANG':'pl_PL.UTF-8','LC_TIME':'C','TMUX':'bad','TMUX_PANE':'%99','HUBI_ACTIVE':'bad','HUBI6_ACTIVE':'inherited-bad'}):
+            with patch.dict(os.environ,{'SHELL':'/bin/bash','SSH_AUTH_SOCK':'/tmp/synthetic-agent.sock','LANG':'pl_PL.UTF-8','LC_TIME':'C','TERM':'dumb','TMUX':'bad','TMUX_PANE':'%99','HUBI_ACTIVE':'bad','HUBI6_ACTIVE':'inherited-bad'}):
                 app=App(Config.load());r=app.start('terminal',str(self.path))
             self.app.tmux.command('send-keys','-t',r.pane,'-l','python3 -c \'import os,json;open("terminal-env","w").write(json.dumps(dict(os.environ)))\'')
             self.app.tmux.command('send-keys','-t',r.pane,'Enter')
@@ -311,6 +319,7 @@ class FixsetRuntimeTests(unittest.TestCase):
             self.assertEqual(env['HUBI6_ACTIVE'],'1');self.assertEqual(env['HUBI_NOAUTO'],'1')
             self.assertEqual(env['RC_LOADED'],'1');self.assertEqual(env['SSH_AUTH_SOCK'],'/tmp/synthetic-agent.sock')
             self.assertEqual(env['LANG'],'pl_PL.UTF-8');self.assertEqual(env['LC_TIME'],'C')
+            self.assertEqual(env['TERM'],'screen-256color') # virtual tmux terminal, not launcher's dumb/xterm
             for key in ('TMUX','TMUX_PANE','HUBI_ACTIVE'):self.assertNotIn(key,env)
             self.assertFalse((Path.home()/'AUTOLOGIN_LOOP').exists())
             client=Client([],command=['env','HUBI6_ACTIVE=1',sys.executable,'-m','hubi6'])
@@ -381,6 +390,25 @@ class FixsetRuntimeTests(unittest.TestCase):
         os.close(client.master)
         self.assertEqual(client.p.wait(3),129)
         os.close(client.slave)
+
+    def test_main_view_shows_unhealthy_workspace_even_when_not_discovered(self):
+        r=self.start()
+        moved=self.path.with_name(self.path.name+'-moved')
+        self.path.rename(moved)
+        try:
+            for expected in (b'MISSING',b'REPLACED',b'INVALID'):
+                if expected == b'REPLACED':repo(self.path.name)
+                if expected == b'INVALID':
+                    self.app.stop(r.id)
+                    r=self.start()
+                    (self.path/'.git/HEAD').write_text('broken')
+                client=Client([])
+                try:client.read_until(b'repo:'+expected)
+                finally:client.close()
+        finally:
+            self.app.stop(r.id)
+            shutil.rmtree(self.path)
+            moved.rename(self.path)
 
     def test_github_clone_confirmation_progress_and_cancel(self):
         picked={'nameWithOwner':'owner/tui-clone','local':False,'local_paths':[], 'isPrivate':True,'isFork':False,'isArchived':False}
@@ -469,3 +497,29 @@ class FixsetRuntimeTests(unittest.TestCase):
         self.app.store.cleanup_temps()
         self.assertFalse(temp.exists());self.assertTrue(fresh.exists())
         fresh.unlink()
+
+    def test_all_receipts_lost_and_foreign_journal_remain_fail_closed(self):
+        r=self.start()
+        sibling=self.app.start('terminal',str(self.path),'sibling')
+        self.app.systemd.kill(r,r.invocation,'KILL')
+        wait_for(lambda:self.app.find(r.id).state==State.EXITED)
+        self.app.tmux.command('set-option','-u','-t',r.pane,'@hubi6')
+        self.app.store.path(r).unlink()
+        try:
+            snapshot=self.app.snapshot()
+            self.assertEqual([w.record.id for w in snapshot.workloads],[sibling.id])
+            self.assertTrue(any('manually' in issue and r.session in issue for issue in snapshot.issues))
+            self.assertEqual(doctor(self.app)['status'],'FAIL')
+            self.assertIn(r.session,self.app.tmux.inventory()[0])
+            self.assertEqual(self.app.find(sibling.id).state,State.RUNNING)
+        finally:
+            # Operator cleanup of the exact session retained by this test's
+            # original receipt; product correctly refuses guessing a lost one.
+            self.app.tmux.command('kill-session','-t','='+r.session)
+        foreign=self.app.c.records/'notes.json'
+        foreign.write_text('{}');foreign.chmod(0o600)
+        try:
+            self.assertEqual(doctor(self.app)['status'],'FAIL')
+            self.assertTrue(foreign.exists())
+            self.assertTrue(any('manually' in issue for issue in self.app.snapshot().issues))
+        finally:foreign.unlink()

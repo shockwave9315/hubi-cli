@@ -49,6 +49,8 @@ to the valid $SHELL/passwd interactive shell with normal rc files. Workloads
 get HUBI6_ACTIVE=1; terminals also get HUBI_NOAUTO=1 to suppress v5 autologin.
 Self-nesting and attach from a Hubi workload are refused. SSH_AUTH_SOCK, SHELL,
 LANG/LANGUAGE and standard LC_* join the explicit API/proxy/SSL allowlist.
+TERM identifies the virtual tmux terminal (screen-256color), independent of a
+launcher running under systemd with TERM=dumb.
 
 For a **later, separately authorized clean installation**, the directory bundle
 is produced with `make build` at `dist/hubi6`. Its `hubi` wrapper can run from

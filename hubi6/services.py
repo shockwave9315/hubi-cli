@@ -20,7 +20,7 @@ ALLOW_ENV = ("PATH", "OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_ORG_ID", "OPEN
              "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN",
              "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy",
              "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS")
-ALLOW_ENV += ("SSH_AUTH_SOCK", "SHELL", "LANG", "LANGUAGE", "TERM")
+ALLOW_ENV += ("SSH_AUTH_SOCK", "SHELL", "LANG", "LANGUAGE")
 LOCALE_ENV = ("LC_ALL", "LC_CTYPE", "LC_COLLATE", "LC_MESSAGES", "LC_NUMERIC", "LC_TIME", "LC_MONETARY",
               "LC_PAPER", "LC_NAME", "LC_ADDRESS", "LC_TELEPHONE", "LC_MEASUREMENT", "LC_IDENTIFICATION")
 
@@ -245,6 +245,8 @@ class App:
                 receipt = r
                 if unit.live:
                     receipt = Record.decode(unit.description.split(":", 3)[3], self.c.runtime_id, os.getuid())
+                    if receipt.id != r.id or receipt.scope != unit.name:
+                        raise HubiError("Scope receipt does not match the exact repair generation")
                 self.tmux.repair_panes(receipt)
                 if unit.live:
                     receipt.invocation, receipt.phase = unit.invocation, "running"
