@@ -100,12 +100,21 @@ def cleanup():
     verification = as_user("systemctl", "--user", "list-units", "--all", "--no-legend", "hubi6-*.scope",
                            capture_output=True, text=True, check=False)
     print("Pre-cleanup workload scopes: "+(verification.stdout.strip() or "none"), flush=True)
-    as_user("tmux", "-N", "-S", f"/run/user/{entry.pw_uid}/hubi6/tmux.sock", "list-clients",
-            capture_output=True, text=True, check=False)
+    socket_path = f"/run/user/{entry.pw_uid}/hubi6/tmux.sock"
+    counts = {'scopes': len(verification.stdout.splitlines())}
+    for kind in ('sessions', 'clients'):
+        result = as_user("tmux", "-N", "-S", socket_path, "list-"+kind,
+                         capture_output=True, text=True, check=False)
+        counts[kind] = len(result.stdout.splitlines())
+    result = as_user('systemctl', '--user', 'list-units', '--all', '--no-legend', 'hubi6-*-clone-*.service',
+                     capture_output=True, text=True, check=False)
+    counts['clone_units'] = len(result.stdout.splitlines())
+    print('PRE-TEARDOWN: '+json.dumps(counts), flush=True)
     if (HOME/".hubi6-ssh.json").exists():
         run(["systemctl", "stop", f"hubi6-lab-{entry.pw_uid}-sshd.service"])
     # Stop ONLY the manager for the marked disposable UID. Kernel enforces separation.
     as_user("systemctl", "--user", "stop", "hubi6-tmux.service", check=False)
+    socket_gone = not Path(socket_path).exists()
     run(["loginctl", "disable-linger", USER])
     run(["systemctl", "stop", f"user@{entry.pw_uid}.service"])
     run(["loginctl", "terminate-user", USER], check=False)
@@ -123,6 +132,29 @@ def cleanup():
     run(["userdel", "--remove", USER])
     assert not HOME.exists() and not Path(f"/run/user/{entry.pw_uid}").exists()
     print(f"CLEAN: uid {entry.pw_uid}; no processes, home, runtime, linger or slice overrides")
+    assert socket_gone, 'Test socket survived service stop (lab subsequently removed)'
+    assert not any(counts.values()), 'Lab was removed, but test left runtime objects before teardown'
+
+
+def copy_real_agents():
+    """Copy executable artifacts only, never the owner's auth/config directories."""
+    entry = identity()
+    sources = {
+        Path('/home/dev/.local/node-v22.23.2/bin/node'): HOME/'real-node',
+        Path('/home/dev/.local/share/claude/versions/2.1.296'): HOME/'real-claude',
+        Path('/home/dev/.npm-global/lib/node_modules/@openai/codex'): HOME/'real-codex-package',
+    }
+    for source, destination in sources.items():
+        if source.is_dir():
+            shutil.copytree(source, destination)
+        else:
+            shutil.copy2(source, destination)
+        for path in [destination, *destination.rglob('*')] if destination.is_dir() else [destination]:
+            os.chown(path, entry.pw_uid, entry.pw_gid, follow_symlinks=False)
+    wrapper = HOME/'real-codex'
+    wrapper.write_text('#!/bin/sh\nexec '+str(HOME/'real-node')+' '+str(HOME/'real-codex-package/bin/codex.js')+' "$@"\n')
+    wrapper.chmod(0o755)
+    os.chown(wrapper, entry.pw_uid, entry.pw_gid)
 
 
 def main():

@@ -12,7 +12,7 @@ from .core.model import HubiError, Record, HEX20
 
 
 def atomic_json(path: Path, data):
-    fd, temp = tempfile.mkstemp(prefix=".hubi6-", dir=path.parent)
+    fd, temp = tempfile.mkstemp(prefix=".hubi6-"+path.name+"-", dir=path.parent)
     try:
         with os.fdopen(fd, "w") as f:
             json.dump(data, f, ensure_ascii=True)
@@ -63,7 +63,7 @@ class Store:
                         raise HubiError("Metadata filename disagrees with identity")
                     records[r.id] = r
                 except (HubiError, OSError, ValueError) as e:
-                    errors.append(f"{path.name}: {type(e).__name__}; use reconcile")
+                    errors.append(f"{path.name}: {type(e).__name__}; reconcile using a surviving runtime receipt, otherwise inspect/move this file manually")
         except HubiError as e:
             errors.append(str(e))
         return records, errors
@@ -73,11 +73,25 @@ class Store:
         for suffix in ("payload", "cancel"):
             (self.c.runtime/(record.id+"."+suffix)).unlink(missing_ok=True)
 
+    def cleanup_temps(self):
+        # Old interrupted atomic writes only. Never unlink flock files during
+        # operation: a waiter may already have opened their inode (ABA hazard).
+        for directory in (self.c.records, self.c.runtime):
+            for path in directory.glob(".hubi6-*"):
+                try:
+                    s = path.lstat()
+                    if (stat.S_ISREG(s.st_mode) and s.st_uid == os.getuid() and
+                        not s.st_mode & 0o077 and time.time()-s.st_mtime > 86400):
+                        path.unlink()
+                except FileNotFoundError:
+                    pass
+
     @contextmanager
     def lock(self, key):
         if not HEX20.fullmatch(key):
             raise HubiError("Invalid lock identity")
         self.c.prepare()
+        self.cleanup_temps()
         fd = os.open(self.c.runtime/"locks"/key, os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
         try:
             s = os.fstat(fd)

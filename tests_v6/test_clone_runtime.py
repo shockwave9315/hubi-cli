@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 import os
 from pathlib import Path
 import subprocess
@@ -8,6 +9,8 @@ import unittest
 from unittest.mock import patch
 
 from hubi6.github import GitHub
+from hubi6.core.model import HubiError
+from hubi6.services import App
 from tests_v6.support import LAB, bootstrap, repo
 from tests_v6.test_runtime import wait_for
 
@@ -34,6 +37,9 @@ from pathlib import Path
 args=sys.argv[1:]
 if args[:2]==["repo","clone"]:
  url,dest=args[2:4]
+ if "auth-error" in url:
+  print("authentication required: ghp_syntheticSecretDoNotShow https://user:password@github.com/a/b",file=sys.stderr)
+  sys.exit(42)
  if "slow" in url:
   Path(dest).mkdir()
   Path(dest,"partial").write_text("interrupted")
@@ -81,3 +87,18 @@ else:sys.exit(1)
             self.assertFalse((self.app.c.repos/"slow").exists())
             units = self.app.r.run(["systemctl", "--user", "list-units", "--all", "--no-legend", f"hubi6-{self.app.c.runtime_id}-clone-*.service"]).stdout
             self.assertNotIn("running", units)
+
+    def test_auth_error_redaction_timeout_and_path(self):
+        gh=GitHub(self.app)
+        with self.assertRaises(HubiError) as error:
+            gh.clone('owner/auth-error')
+        message=str(error.exception)
+        self.assertIn('authentication required',message)
+        self.assertNotIn('syntheticSecret',message)
+        self.assertNotIn('password',message)
+        self.assertIn('[REDACTED]',message)
+        fast=GitHub(App(replace(self.app.c,clone_timeout=.25)))
+        with self.assertRaisesRegex(HubiError,'timed out'):
+            fast.clone('owner/slow-timeout')
+        self.assertFalse(list(self.app.c.repos.glob('.hubi6-clone-*')))
+        self.assertFalse((self.app.c.repos/'slow-timeout').exists())

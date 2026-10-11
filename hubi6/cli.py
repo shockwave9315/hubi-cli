@@ -1,12 +1,15 @@
 import argparse
+import errno
 import json
 import logging
 from logging.handlers import RotatingFileHandler
 import sys
+import os
+import traceback
 
 from . import __version__
 from .config import Config
-from .core.model import HubiError, display
+from .core.model import HubiError, State, display
 
 
 def parser():
@@ -62,9 +65,9 @@ def execute(args):
         from .doctor import doctor
         result = doctor(app)
         print(json.dumps(result, ensure_ascii=True, indent=2) if args.json else
-              "Doctor: "+("PASS" if result["ready"] else "FAIL")+"\n"+
+              "Doctor: "+result["status"]+"\n"+
               "\n".join(f"{k}: {display(v)}" for k, v in result["checks"].items()))
-        return 0 if result["ready"] else 1
+        return {"PASS": 0, "WARN": 3, "FAIL": 1}[result["status"]]
     if args.command == "list":
         s = app.snapshot()
         if args.json:
@@ -76,7 +79,7 @@ def execute(args):
                       f"clients:{w.session.attached if w.session else 0}  {display(w.record.repo.path)}")
             for issue in s.issues:
                 print(display(issue), file=sys.stderr)
-        return 0
+        return 0 if s.runtime_health == "OK" and all(w.state != State.UNKNOWN for w in s.workloads) else 1
     if args.command == "start":
         r = app.start(args.type, args.repo, args.instance, args.resume)
         print(json.dumps(r.data(), ensure_ascii=True) if args.json else r.id)
@@ -109,18 +112,50 @@ def main(argv=None):
     args = parser().parse_args(argv)
     from .tui import SignalExit, terminal
     try:
+        if args.command is None:
+            try:
+                os.fstat(sys.stdin.fileno())
+            except (AttributeError, OSError, ValueError):
+                return 0  # A genuinely closed stdin is EOF, not a prompt error.
         # Also restore the terminal around noninteractive lifecycle/attach commands
         # invoked from a TTY. Signal exits unwind clone staging and terminal state.
         with terminal():
             return execute(args)
     except SignalExit as e:
+        if e.code == 129:
+            silence_hungup_output()
         return e.code
     except KeyboardInterrupt:
         return 130
     except HubiError as e:
+        if args.debug:
+            traceback.print_exc()
         print("Hubi: "+display(e), file=sys.stderr)
         return 2
+    except OSError as e:
+        if e.errno in (errno.EIO, errno.EBADF, errno.EPIPE):
+            silence_hungup_output()
+            return 129
+        if args.debug:
+            traceback.print_exc()
+        print(f"Hubi: {type(e).__name__}; operation failed. Run doctor/inspect.", file=sys.stderr)
+        return 1
     except Exception as e:
+        if args.debug:
+            traceback.print_exc()
         logging.getLogger("hubi6").error("Unhandled exception type=%s", type(e).__name__)
         print(f"Hubi: {type(e).__name__}; operation failed. Run doctor/inspect.", file=sys.stderr)
         return 1
+
+
+def silence_hungup_output():
+    # Prevent CPython's final flush from replacing SIGHUP/129 with exit 120.
+    fd = os.open(os.devnull, os.O_WRONLY)
+    try:
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                os.dup2(fd, stream.fileno())
+            except (AttributeError, OSError, ValueError):
+                pass
+    finally:
+        os.close(fd)

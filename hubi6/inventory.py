@@ -3,7 +3,7 @@ import os
 import time
 
 from .adapters.git import health
-from .core.model import HubiError, Record, State, Workload, derive_state
+from .core.model import HubiError, Record, RepoHealth, State, Workload, derive_state
 
 
 @dataclass
@@ -27,7 +27,7 @@ class Snapshot:
                 "snapshot_ms": self.elapsed_ms, "subprocesses": self.subprocesses}
 
 
-def build(config, store, tmux, systemd, git):
+def build(config, store, tmux, systemd, git, *, include_repos=True, include_health=True):
     start, calls = time.monotonic(), tmux.r.calls
     try:
         sessions, tk, pid, exit_empty, issues = tmux.inventory()
@@ -40,8 +40,10 @@ def build(config, store, tmux, systemd, git):
         issues.append("systemd inventory unavailable")
     records, errors = store.all()
     issues.extend(errors)
-    repos, errors = git.discover()
-    issues.extend(errors)
+    repos = []
+    if include_repos:
+        repos, errors = git.discover()
+        issues.extend(errors)
     # Recover independent ownership receipts from either runtime adapter. Disk is
     # a journal, never sufficient authorization to signal a reusable scope name.
     for s in sessions.values():
@@ -51,7 +53,7 @@ def build(config, store, tmux, systemd, git):
                 raise HubiError("Session name/metadata mismatch")
             records.setdefault(r.id, r)
         except HubiError:
-            issues.append(f"Inconsistent session {s.name}; reconcile using its receipt")
+            issues.append(f"Unverified session {s.name}; inspect its exact identity manually (no surviving receipt)")
     for u in units.values():
         if u.name == config.service:
             continue
@@ -67,6 +69,8 @@ def build(config, store, tmux, systemd, git):
             issues.append(f"Unverified scope {u.name}; no destructive action allowed")
     service = units.get(config.service)
     rh = "UNKNOWN" if not sk else "DOWN"
+    if service and service.live and not tk:
+        rh = "UNKNOWN"
     if service and service.active == "active" and tk and pid == service.pid:
         try:
             with open(f"/proc/{pid}/cgroup") as f:
@@ -86,15 +90,22 @@ def build(config, store, tmux, systemd, git):
             except HubiError:
                 valid = False
             if s.panes != 1:
-                wi.append("Extra manually created panes are outside the workload scope; remove them before stop")
+                wi.append("Extra panes: explicit reconcile repairs this exact session before stopping")
                 valid = False
         if u and u.live and (not systemd.owns_description(r, u.description) or (r.invocation and u.invocation != r.invocation)):
             valid = False
-        state = derive_state(s, u, known=sk and (tk or (s is None and u is not None and u.live)), valid=valid,
+        # An unreadable live server proves neither presence nor absence of a
+        # session. Only an inactive/failed service proves it absent.
+        tmux_absent = service is not None and service.active in ("inactive", "failed")
+        state = derive_state(s, u, known=sk and (tk or tmux_absent), valid=valid,
                              starting=r.phase in ("prepared", "launching") and time.time()-r.created < 10)
         if not valid:
             wi.append("Inconsistent metadata or generation; use reconcile")
-        workloads.append(Workload(r, state, health(r.repo), s, u, wi))
+        # Retained journals are not live objects. Hide only a proven empty,
+        # finished generation; reads never remove files or signal anything.
+        if state == State.STOPPED and not s and not (u and u.live):
+            continue
+        workloads.append(Workload(r, state, health(r.repo) if include_health else RepoHealth.UNKNOWN, s, u, wi))
     workloads.sort(key=lambda w: (os.fsencode(w.record.repo.path), w.record.kind, w.record.instance, w.record.generation))
     return Snapshot(workloads, repos, issues, rh, service, pid, exit_empty, tk, sk,
                     (time.monotonic()-start)*1000, tmux.r.calls-calls)

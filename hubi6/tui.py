@@ -19,8 +19,11 @@ class SignalExit(BaseException):
 
 @contextmanager
 def terminal(*, paste=False):
-    fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd) if os.isatty(fd) else None
+    try:
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd) if os.isatty(fd) else None
+    except (AttributeError, OSError, ValueError, termios.error):
+        fd, old = None, None
     handlers = {}
     def handle(signum, frame):
         raise SignalExit(signum)
@@ -41,13 +44,21 @@ def terminal(*, paste=False):
                 sys.stdout.flush()
         yield
     finally:
-        if old:
-            termios.tcsetattr(fd, termios.TCSANOW, old)
-            if paste:
-                sys.stdout.write("\033[?2004l\033[0m\033[?25h\n")
-                sys.stdout.flush()
-        for sig, handler in handlers.items():
-            signal.signal(sig, handler)
+        try:
+            if old:
+                try:
+                    termios.tcsetattr(fd, termios.TCSANOW, old)
+                except (termios.error, OSError):
+                    pass  # The PTY may already have been hung up.
+                if paste:
+                    try:
+                        sys.stdout.write("\033[?2004l\033[0m\033[?25h\n")
+                        sys.stdout.flush()
+                    except OSError:
+                        pass
+        finally:
+            for sig, handler in handlers.items():
+                signal.signal(sig, handler)
 
 
 class Input:
@@ -58,16 +69,50 @@ class Input:
         self.paste_end = 0.0
         self.echo, self.paste_timeout = echo, paste_timeout
 
-    def line(self):
+    def arm(self):
+        if os.isatty(self.fd):
+            sys.stdout.write("\033[?2004h")
+            sys.stdout.flush()
+
+    def discard_burst(self):
+        """Drop the remainder of one burst until 80 ms of quiet, as in v5."""
+        self.pending.clear()
+        deadline = time.monotonic()+.08
+        while True:
+            ready, _, _ = select.select([self.fd], [], [], max(0, deadline-time.monotonic()))
+            if not ready:
+                return
+            try:
+                chunk = os.read(self.fd, 4096)
+            except OSError:
+                return
+            if not chunk:
+                return
+            deadline = time.monotonic()+.08
+
+    def prompt(self, text, *, destructive=False):
+        if destructive:
+            # Drain BEFORE exposing the confirmation prompt. Normal typing
+            # after the prompt must never be flushed as stale input.
+            self.discard_burst()
+            if os.isatty(self.fd):
+                termios.tcflush(self.fd, termios.TCIFLUSH)
+        self.arm()
+        sys.stdout.write(text)
+        sys.stdout.flush()
+        return self.line(armed=True)
+
+    def line(self, *, armed=False):
+        if not armed:
+            self.arm()
         while True:
             if not self.pasting and b"\x1b[200~" in self.pending:
                 self.pasting = True
                 self.paste_end = time.monotonic()+self.paste_timeout
             if self.pasting:
                 if b"\x1b[201~" in self.pending:
-                    _, _, trailing = self.pending.partition(b"\x1b[201~")
-                    self.pending = bytearray(trailing.lstrip(b"\r\n"))
                     self.pasting = False
+                    self.discard_burst()
                     return ""
                 # Keep a possible split closing marker; discard all paste data.
                 self.pending = self.pending[-5:]
@@ -76,7 +121,7 @@ class Input:
                 ready, _, _ = select.select([self.fd], [], [], timeout)
                 if not ready:
                     self.pasting = False
-                    self.pending.clear()
+                    self.discard_burst()
                     return ""
                 chunk = os.read(self.fd, 4096)
                 if not chunk:
@@ -84,8 +129,9 @@ class Input:
                 if chunk == b"\x04" and not self.pending and not self.pasting:
                     return None
                 if self.echo and not self.pasting and b"\x1b" not in chunk:
-                    printable = chunk.decode("utf-8", errors="replace").replace("\n", "")
-                    sys.stdout.write(display(printable)+( "\n" if b"\n" in chunk else ""))
+                    for char in chunk.decode("utf-8", errors="replace"):
+                        sys.stdout.write("\b \b" if char in ("\b", "\x7f") else
+                                         ("\n" if char in ("\n", "\r") else display(char)))
                     sys.stdout.flush()
                 self.pending.extend(chunk)
                 if len(self.pending) > 65536:
@@ -100,8 +146,8 @@ class Input:
                     continue
             if b"\n" not in self.pending:
                 continue
-            raw, _, rest = self.pending.partition(b"\n")
-            self.pending = bytearray(rest)
+            raw, _, _ = self.pending.partition(b"\n")
+            self.discard_burst()
             edited = bytearray()
             for c in raw:
                 if c in (8, 127) and edited:
@@ -140,7 +186,7 @@ def run(app):
                 rows += [f"Workloads: {active}   [w] workloads  [g] GitHub repositories  [q] shell  [x] exit SSH"]
                 for index, ref in enumerate(choices[page*9:page*9+9], 1):
                     ws = [w for w in snapshot.workloads if w.record.repo.path == ref.path]
-                    status = ", ".join(w.record.kind+":"+w.state.value for w in ws) or "no workloads"
+                    status = ", ".join(w.record.kind+":"+w.state.value+"/"+w.repo_health.value for w in ws) or "no workloads"
                     rows.append(f"[{index}] {display(os.path.basename(ref.path))}  {status}")
             elif screen == "workloads":
                 choices = snapshot.workloads
@@ -210,20 +256,25 @@ def run(app):
                         if picked["local"]:
                             selected = app.git.resolve(picked["local_paths"][0])
                         else:
+                            answer = reader.prompt("Clone "+picked["nameWithOwner"]+" to "+str(app.c.repos/picked["nameWithOwner"].split("/")[1])+"? Type yes: ", destructive=True)
+                            if answer is None:
+                                return 0
+                            if answer != "yes":
+                                message = "Clone cancelled"
+                                continue
+                            sys.stdout.write("Cloning...\n")
+                            sys.stdout.flush()
                             selected = github.clone(picked["nameWithOwner"])
+                            message = "Cloned "+picked["nameWithOwner"]
                         screen = "repo"
                     page = 0
                 elif screen == "repo" and action in ("c", "l", "t"):
-                    sys.stdout.write("Instance [primary] + Enter: ")
-                    sys.stdout.flush()
-                    instance = reader.line()
+                    instance = reader.prompt("Instance [primary] + Enter: ")
                     if instance is None:
                         return 0
                     resume = False
                     if action != "t":
-                        sys.stdout.write("Conversation [new/resume] + Enter: ")
-                        sys.stdout.flush()
-                        mode = reader.line()
+                        mode = reader.prompt("Conversation [new/resume] + Enter: ")
                         if mode is None:
                             return 0
                         if mode not in ("", "new", "resume"):
@@ -236,14 +287,17 @@ def run(app):
                     message = app.git.summary(selected)
                 elif screen == "detail":
                     if action in ("a", "v", "s", "o"):
-                        app.attach(selected, {"a":"normal", "v":"view", "s":"shared", "o":"takeover"}[action])
+                        try:
+                            app.attach(selected, {"a":"normal", "v":"view", "s":"shared", "o":"takeover"}[action])
+                        finally:
+                            reader.discard_burst()
+                            reader.arm()
                     elif action == "i":
                         message = json.dumps(w.data(), ensure_ascii=True, indent=2)
                     elif action in ("d", "f"):
                         token = w.record.generation
-                        sys.stdout.write("Type yes to stop this generation: ")
-                        sys.stdout.flush()
-                        if reader.line() == "yes":
+                        text = "Type yes to repair/reconcile this generation: " if action == "f" else "Type yes to stop this generation: "
+                        if reader.prompt(text, destructive=True) == "yes":
                             app.stop(selected, expected=token, repair=action == "f")
                             screen = "workloads"
                 elif screen == "github" and action == "r":

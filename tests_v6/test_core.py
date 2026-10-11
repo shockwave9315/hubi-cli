@@ -18,7 +18,7 @@ from hubi6.tui import Input
 
 class CoreTests(unittest.TestCase):
     def record(self):
-        ref = RepoRef("/tmp/repo", 1, 2, "/tmp/repo/.git", 1, 3, 4)
+        ref = RepoRef("/tmp/repo", 1, 2, "/tmp/repo/.git", 1, 3)
         return Record("a"*20, os.getuid(), "codex", "primary", key_id("codex", ref.path, "primary"), "b"*16, ref)
 
     def test_state_matrix(self):
@@ -188,7 +188,7 @@ class InputTests(unittest.TestCase):
     def test_multiline_bracketed_paste(self):
         reader = self.feed(b"\x1b[200~d\nyes\nx\n\x1b[201~\na\n")
         self.assertEqual(reader.line(), "")
-        self.assertEqual(reader.line(), "a")
+        self.assertIsNone(reader.line())  # trailing input from the same burst is quarantined
 
     def test_incomplete_paste_times_out_without_enter(self):
         rd, wr = os.pipe()

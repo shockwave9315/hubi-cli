@@ -1,4 +1,3 @@
-import os
 import re
 
 from ..core.model import HubiError, Unit

@@ -418,7 +418,8 @@ while True:time.sleep(.1)
 
     def test_runtime_namespace_F4(self):
         r = self.start()
-        foreign = App(replace(self.app.c, runtime_id="a"*20))
+        with patch.dict(os.environ, {"XDG_STATE_HOME": str(Path.home()/"foreign-state")}):
+            foreign = App(Config.load())
         self.assertFalse(foreign.snapshot().workloads)
         other = foreign.start("codex", str(self.path))
         self.assertNotEqual(other.scope, r.scope)

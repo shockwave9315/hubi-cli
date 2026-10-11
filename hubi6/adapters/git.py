@@ -12,12 +12,12 @@ from ..core.model import HubiError, RepoHealth, RepoRef, safe_path
 def normalized_origin(url: str) -> str:
     """GitHub HTTPS, ssh:// and SCP spellings share one case-insensitive key."""
     url = url.strip()
-    match = re.fullmatch(r"(?:[^/@:]+@)?github\.com:([^\s]+)", url, re.I)
+    match = re.fullmatch(r"(?:[^/@:]+@)?(?:www\.)?github\.com:([^\s]+)", url, re.I)
     if match:
         path = match[1]
     else:
         parsed = urlparse(url)
-        if parsed.hostname is None or parsed.hostname.lower() != "github.com":
+        if parsed.hostname is None or parsed.hostname.lower() not in ("github.com", "www.github.com", "ssh.github.com"):
             return ""
         if parsed.scheme not in ("https", "http", "ssh", "git"):
             return ""
@@ -74,7 +74,7 @@ def reference(path: Path, *, resolved=False) -> RepoRef:
         workspace = ""
     if workspace and not re.fullmatch(r"[a-f0-9]{32}", workspace):
         raise HubiError("Malformed Hubi workspace identity")
-    return RepoRef(str(path), s.st_dev, s.st_ino, str(gitdir), g.st_dev, g.st_ino, g.st_ctime_ns, read_origin(gitdir), workspace)
+    return RepoRef(str(path), s.st_dev, s.st_ino, str(gitdir), g.st_dev, g.st_ino, read_origin(gitdir), workspace)
 
 
 def pin_workspace(ref: RepoRef) -> RepoRef:
@@ -148,17 +148,24 @@ class Git:
         except OSError as e:
             return refs, [f"Cannot read repo root: {type(e).__name__}"]
         for entry in entries:
-            if entry.name.startswith(".hubi6-") or not entry.is_dir():
+            if entry.name.startswith(".hubi6-"):
                 continue
             path = Path(entry.path)
             try:
+                # Every stat/resolve (including is_dir) is inside this boundary.
+                # Broken symlinks must be diagnosed rather than silently skipped.
+                if not entry.is_dir():
+                    if entry.is_symlink():
+                        errors.append(f"Invalid repository {entry.name}: broken symlink")
+                    continue
                 ref = reference(path, resolved=not entry.is_symlink())
                 if not Path(ref.path).is_relative_to(self.c.repos) or Path(ref.path) == self.c.repos:
                     raise HubiError("Repository escapes repo root")
                 refs.append(ref)
-            except (HubiError, OSError, UnicodeError) as e:
-                if (path/".git").exists():
-                    errors.append(f"Invalid repository {path.name}: {type(e).__name__}")
+            except (HubiError, OSError, UnicodeError, RuntimeError) as e:
+                # Never perform a second potentially failing filesystem probe
+                # while reporting a failed entry.
+                errors.append(f"Invalid repository {entry.name}: {type(e).__name__}")
         return refs, errors
 
     def resolve(self, value: str) -> RepoRef:

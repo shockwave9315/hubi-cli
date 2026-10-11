@@ -23,6 +23,7 @@ class State(str, Enum):
 
 
 class RepoHealth(str, Enum):
+    UNKNOWN = "UNKNOWN"
     OK = "OK"
     MISSING = "MISSING"
     REPLACED = "REPLACED"
@@ -81,7 +82,6 @@ class RepoRef:
     git_dir: str
     git_device: int
     git_inode: int
-    git_ctime_ns: int
     origin: str = ""
     workspace_id: str = ""
 
@@ -127,7 +127,9 @@ class Record:
     def parse(cls, data: dict, runtime: str, uid: int):
         try:
             data = dict(data)
-            data["repo"] = RepoRef(**data["repo"])
+            repo = dict(data["repo"])
+            repo.pop("git_ctime_ns", None)  # obsolete pre-review diagnostic field
+            data["repo"] = RepoRef(**repo)
             r = cls(**data)
             if r.runtime != runtime or r.uid != uid or r.schema != 6:
                 raise ValueError("Foreign identity")
@@ -142,9 +144,14 @@ class Record:
                 raise ValueError("Invalid phase")
             if not isinstance(r.created, (float, int)) or not 0 < r.created < float("inf"):
                 raise ValueError("Invalid creation time")
-            for value in (r.repo.device, r.repo.inode, r.repo.git_device, r.repo.git_inode, r.repo.git_ctime_ns):
+            for value in (r.repo.device, r.repo.inode, r.repo.git_device, r.repo.git_inode):
                 if type(value) is not int or value < 0:
                     raise ValueError("Invalid filesystem identity")
+            if not isinstance(r.repo.git_dir, str) or not r.repo.git_dir.startswith("/"):
+                raise ValueError("Invalid Git directory")
+            safe_path(r.repo.git_dir)
+            if not isinstance(r.repo.origin, str):
+                raise ValueError("Invalid origin")
             if r.repo.workspace_id and not re.fullmatch(r"[0-9a-f]{32}", r.repo.workspace_id):
                 raise ValueError("Invalid workspace identity")
             return r
@@ -187,6 +194,8 @@ class Session:
     metadata: str
     cwd: str = ""
     panes: int = 1
+    exit_status: int | None = None
+    exit_signal: str = ""
 
 
 def derive_state(session: Session | None, unit: Unit | None, *, known: bool,
@@ -238,5 +247,7 @@ class Workload:
                 "instance": r.instance, "tmux_session": r.session, "scope": r.scope,
                 "generation": r.generation, "invocation": r.invocation,
                 "state": self.state.value, "attached_clients": self.session.attached if self.session else 0,
+                "exit_status": self.session.exit_status if self.session else None,
+                "exit_signal": self.session.exit_signal if self.session else "",
                 "age_seconds": max(0, time.time() - r.created), "cwd": self.session.cwd if self.session else "",
                 "metadata": r.data(), "issues": self.issues, "actions": actions(self.state)}

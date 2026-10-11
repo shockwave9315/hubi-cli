@@ -6,9 +6,9 @@ import sys
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from hubi6.config import Config
+from hubi6.config import worker_config
 from hubi6.core.model import HubiError, RepoHealth, phase_transition
-from hubi6.adapters.git import Git, health
+from hubi6.adapters.git import health
 from hubi6.adapters.process import Runner
 from hubi6.adapters.systemd import Systemd
 from hubi6.storage import Store, private_json
@@ -16,18 +16,10 @@ from hubi6.storage import Store, private_json
 
 def main():
     mode, record_path, payload_path = sys.argv[1:]
-    # Config identity is reconstructed from the validated receipt, not the pane's
-    # inherited environment. Custom config is supplied in the private envelope.
-    data = private_json(Path(record_path))
-    c = Config.load()
-    if data["runtime"] != c.runtime_id:
-        # repos_root can be customized: recover it from the envelope written by App.
-        from dataclasses import replace
-        c = replace(c, runtime_id=data["runtime"])
+    # The journal's explicit canonical path supplies state location. Validate
+    # its owned/private layout and recompute runtime identity independently.
+    c, r = worker_config(record_path, payload_path)
     store = Store(c)
-    r = store.load(Path(record_path))
-    if Path(record_path) != store.path(r) or Path(payload_path) != c.runtime/(r.id+".payload"):
-        raise HubiError("Worker paths do not match identity")
     if (c.runtime/(r.id+".cancel")).exists():
         return 0
     if mode == "scope":
@@ -67,6 +59,11 @@ def main():
     env = {"HOME": str(c.home), "USER": c.user, "LOGNAME": c.user, "LANG": "C.UTF-8", "TERM": "screen-256color",
            "XDG_RUNTIME_DIR": str(c.runtime_base), "DBUS_SESSION_BUS_ADDRESS": f"unix:path={c.runtime_base}/bus"}
     env.update(payload["env"])
+    # Markers describe the workload, not an inherited launcher. RC files can
+    # use HUBI_NOAUTO to suppress v5 autologin; Hubi refuses self-nesting.
+    env["HUBI6_ACTIVE"] = "1"
+    if r.kind == "terminal":
+        env["HUBI_NOAUTO"] = "1"
     env.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
     os.execvpe(payload["argv"][0], payload["argv"], env)
 

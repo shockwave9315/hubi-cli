@@ -3,9 +3,18 @@ repos_root = "~/repos"
 [agents]
 codex = ["codex"]
 claude = ["claude", "--permission-mode", "bypassPermissions"]
-terminal = ["/bin/bash", "--noprofile", "--norc", "-i"]
+# terminal defaults to valid $SHELL / passwd shell with normal rc files
+# terminal = ["/bin/bash", "-i"]
 
 [github]
 # Empty owner lists repositories owned by the authenticated user.
 owner = ""
 cache_ttl = 600
+clone_timeout = 300
+
+[stop]
+agent_int_grace = 3
+agent_term_grace = 2
+terminal_hup_grace = 1
+terminal_term_grace = 1
+kill_grace = 2

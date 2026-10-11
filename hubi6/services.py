@@ -1,4 +1,6 @@
 import os
+import hashlib
+import re
 from pathlib import Path
 import shutil
 import sys
@@ -18,6 +20,9 @@ ALLOW_ENV = ("PATH", "OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_ORG_ID", "OPEN
              "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN",
              "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy",
              "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS")
+ALLOW_ENV += ("SSH_AUTH_SOCK", "SHELL", "LANG", "LANGUAGE", "TERM")
+LOCALE_ENV = ("LC_ALL", "LC_CTYPE", "LC_COLLATE", "LC_MESSAGES", "LC_NUMERIC", "LC_TIME", "LC_MONETARY",
+              "LC_PAPER", "LC_NAME", "LC_ADDRESS", "LC_TELEPHONE", "LC_MEASUREMENT", "LC_IDENTIFICATION")
 
 
 class App:
@@ -30,8 +35,13 @@ class App:
     def snapshot(self):
         return build(self.c, self.store, self.tmux, self.systemd, self.git)
 
+    def runtime_snapshot(self):
+        # Lifecycle never scans repositories or touches unrelated workspaces.
+        return build(self.c, self.store, self.tmux, self.systemd, self.git,
+                     include_repos=False, include_health=False)
+
     def anchored(self, snapshot=None):
-        s = snapshot or self.snapshot()
+        s = snapshot or self.runtime_snapshot()
         u = s.service
         if not s.tmux_known or not s.systemd_known or not u or u.active != "active" or u.pid <= 0 or s.server_pid != u.pid:
             raise HubiError("Runtime unavailable or unowned; run hubi doctor")
@@ -61,12 +71,17 @@ class App:
         self.tmux.enforce()
         return s
 
-    def find(self, identity, snapshot=None):
-        s = snapshot or self.snapshot()
+    def find(self, identity, snapshot=None, *, health_check=True):
+        if not isinstance(identity, str) or not re.fullmatch(r"[a-f0-9]{8,20}(?:-[a-f0-9]{0,16})?", identity):
+            raise HubiError("Workload ID requires at least 8 hexadecimal characters; use hubi list")
+        s = snapshot or self.runtime_snapshot()
         matches = [w for w in s.workloads if w.record.id == identity or w.record.id.startswith(identity)]
         if len(matches) != 1:
             raise HubiError("Workload ID missing or ambiguous; use hubi list")
-        return matches[0]
+        w = matches[0]
+        if snapshot is None and health_check:
+            w.repo_health = health(w.record.repo)
+        return w
 
     def start(self, kind, repo, instance="primary", resume=False):
         ref = self.git.resolve(repo)
@@ -80,14 +95,24 @@ class App:
         if not executable:
             raise HubiError(f"Agent executable unavailable: {argv[0]}")
         argv[0] = executable
-        with self.store.lock(key):
+        ref = pin_workspace(ref)
+        workspace_lock = hashlib.sha256(f"{kind}:{instance}:{ref.workspace_id}:{ref.device}:{ref.inode}".encode()).hexdigest()[:20]
+        with self.store.lock(workspace_lock), self.store.lock(key):
             s = self.preflight()
+            for w in s.workloads:
+                old = w.record
+                if (old.key != key and old.kind == kind and old.instance == instance and
+                    old.repo.workspace_id == ref.workspace_id and
+                    (old.repo.device, old.repo.inode) == (ref.device, ref.inode)):
+                    raise HubiError(f"Moved workspace already has a workload: {old.id}; stop it before starting here")
             same = [w for w in s.workloads if w.record.key == key]
             for w in same:
-                if w.repo_health == RepoHealth.REPLACED:
+                if health(w.record.repo) == RepoHealth.REPLACED:
                     raise HubiError("Previous checkout still has a workload; stop it by ID")
-                if w.state in (State.RUNNING, State.ATTACHED, State.EXITED):
+                if w.state in (State.RUNNING, State.ATTACHED):
                     return w.record
+                if w.state == State.EXITED:
+                    raise HubiError(f"Workload EXITED: {w.record.id}; stop/reconcile it before creating a new generation")
                 if w.state == State.ORPHANED:
                     raise HubiError("Orphan requires explicit stop/reconcile by ID")
                 if w.record.phase in ("prepared", "launching"):
@@ -95,8 +120,8 @@ class App:
                     # generation its bounded startup period before cancelling it.
                     limit = time.monotonic()+max(0, 5-(time.time()-w.record.created))
                     while time.monotonic() < limit:
-                        updated = self.find(w.record.id)
-                        if updated.state in (State.RUNNING, State.ATTACHED, State.EXITED):
+                        updated = self.find(w.record.id, health_check=False)
+                        if updated.state in (State.RUNNING, State.ATTACHED):
                             return updated.record
                         if updated.unit and updated.unit.live:
                             raise HubiError("Start in progress; retry shortly")
@@ -109,14 +134,20 @@ class App:
                 else:
                     raise HubiError("Inconsistent workload; use reconcile by ID")
             self.git.validate(ref)  # immediately before creation, under the identity lock
-            ref = pin_workspace(ref)
-            self.git.validate(ref)
+            # Garbage-collect only journals with proven absence of both objects,
+            # under this exact lifecycle lock. Reads merely hide such journals.
+            records, _ = self.store.all()
+            visible = {w.record.id for w in s.workloads}
+            if s.tmux_known and s.systemd_known:
+                for old in records.values():
+                    if old.key == key and old.id not in visible:
+                        self.store.remove(old)
             r = Record(self.c.runtime_id, os.getuid(), kind, instance, key, uuid.uuid4().hex[:16], ref)
             self.store.save(r)
             payload = self.c.runtime/(r.id+".payload")
             # One-use 0600 envelope. Secrets never enter argv, tmux options, logs,
             # systemd environment properties or persistent workload metadata.
-            environment = {k: os.environ[k] for k in ALLOW_ENV if k in os.environ}
+            environment = {k: os.environ[k] for k in ALLOW_ENV+LOCALE_ENV if k in os.environ}
             atomic_json(payload, {"argv": argv, "env": environment})
             self.tmux.create(r)
             self.store.save(r)
@@ -130,6 +161,8 @@ class App:
                 r = self.store.load(self.store.path(r))
                 if r.invocation:
                     self.tmux.metadata(r)
+                    if self.find(r.id, health_check=False).state not in (State.RUNNING, State.ATTACHED):
+                        raise HubiError(f"Workload failed or EXITED during startup; inspect/stop {r.id}")
                     return r
                 sessions, known, *_ = self.tmux.inventory()
                 if known and sessions.get(r.session) and sessions[r.session].dead:
@@ -137,14 +170,15 @@ class App:
                 time.sleep(0.025)
             raise HubiError(f"Start acknowledgement timed out; workload remains inspectable: {r.id}")
 
-    def _stop(self, r, *, expected, repair=False):
+    def _stop(self, r, *, expected, repair=False, initial=None):
         if expected != r.generation:
             raise HubiError("Workload generation changed; stale confirmation refused")
-        initial = self.snapshot()
+        initial = initial or self.runtime_snapshot()
         if not initial.systemd_known:
             raise HubiError("Systemd state UNKNOWN; stop refused")
         if initial.tmux_known:
             self.anchored(initial)
+            self.tmux.enforce()
         elif initial.service and initial.service.active not in ("inactive", "failed"):
             raise HubiError("tmux ownership UNKNOWN; stop refused")
         atomic_json(self.c.runtime/(r.id+".cancel"), {"generation": r.generation})
@@ -166,7 +200,9 @@ class App:
                 raise HubiError("Cannot recover scope ownership")
             invocation = u.invocation
         if u.live:
-            for sig, grace in (("HUP" if r.kind == "terminal" else "INT", 0.2), ("TERM", 0.4), ("KILL", 2.0)):
+            first = ("HUP", self.c.terminal_hup_grace) if r.kind == "terminal" else ("INT", self.c.agent_int_grace)
+            term_grace = self.c.terminal_term_grace if r.kind == "terminal" else self.c.agent_term_grace
+            for sig, grace in (first, ("TERM", term_grace), ("KILL", self.c.kill_grace)):
                 self.systemd.kill(r, invocation, sig)
                 end = time.monotonic()+grace
                 while time.monotonic() < end:
@@ -190,23 +226,42 @@ class App:
         self.store.remove(r)
 
     def stop(self, identity, expected=None, repair=False):
-        selected = self.find(identity)
+        selected = self.find(identity, health_check=False)
         r = selected.record
         with self.store.lock(r.key):
-            current = self.find(r.id)
+            snapshot = self.runtime_snapshot()
+            current = self.find(r.id, snapshot, health_check=False)
+            if expected and expected != current.record.generation:
+                raise HubiError("Workload generation changed; stale confirmation refused")
             if not repair and current.state == State.UNKNOWN:
                 raise HubiError("State UNKNOWN; inspect/reconcile before stop")
             if current.session and current.session.panes != 1:
-                raise HubiError("Remove manually created extra panes before stop")
-            self._stop(current.record, expected=expected or r.generation, repair=repair)
+                if not repair:
+                    raise HubiError("Extra panes require explicit reconcile before stop")
+                self.anchored()
+                # Recover immutable primary pane from the live scope receipt if
+                # session metadata was damaged. Verify generation before repair.
+                unit = self.systemd.verify_scope(r, r.invocation)
+                receipt = r
+                if unit.live:
+                    receipt = Record.decode(unit.description.split(":", 3)[3], self.c.runtime_id, os.getuid())
+                self.tmux.repair_panes(receipt)
+                if unit.live:
+                    receipt.invocation, receipt.phase = unit.invocation, "running"
+                self.store.save(receipt)
+                return  # explicit pane repair preserves the verified primary workload
+            self._stop(current.record, expected=expected or r.generation, repair=repair, initial=snapshot)
 
     def attach(self, identity, mode="normal"):
+        if os.environ.get("HUBI6_ACTIVE"):
+            raise HubiError("Attach from inside a Hubi workload is refused; detach first")
         if not sys.stdin.isatty() or not sys.stdout.isatty():
             raise HubiError("Attach requires a terminal")
-        selected = self.find(identity)
+        selected = self.find(identity, health_check=False)
         with self.store.lock(selected.record.key):
-            self.anchored()
-            w = self.find(selected.record.id)
+            snapshot = self.anchored()
+            self.tmux.enforce()
+            w = self.find(selected.record.id, snapshot, health_check=False)
             if "attach" not in actions(w.state):
                 raise HubiError("Workload cannot be attached in its current state")
             if mode == "normal" and w.session.attached:

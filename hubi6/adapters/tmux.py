@@ -1,11 +1,10 @@
 import os
-from pathlib import Path
 import re
 
 from ..core.model import HubiError, Record, Session, tmux_format
 
 
-FORMAT = "P\t#{session_name}\t#{session_id}\t#{pane_id}\t#{pane_dead}\t#{pane_pid}\t#{session_attached}\t#{@hubi6}"
+FORMAT = "P\t#{session_name}\t#{session_id}\t#{pane_id}\t#{pane_dead}\t#{pane_pid}\t#{session_attached}\t#{@hubi6}\t#{pane_dead_status}\t#{pane_dead_signal}"
 
 
 class Tmux:
@@ -29,14 +28,16 @@ class Tmux:
                     exit_empty = fields[2]
                 except ValueError:
                     errors.append("Invalid tmux server identity")
-            elif fields[0] == "P" and len(fields) == 8:
-                _, name, sid, pane, dead, process, attached, meta = fields
+            elif fields[0] == "P" and len(fields) == 10:
+                _, name, sid, pane, dead, process, attached, meta, status, exit_signal = fields
                 if not name.startswith("hubi6-"+self.c.runtime_id+"-"):
                     continue
                 try:
                     if not re.fullmatch(r"\$[0-9]+", sid) or not re.fullmatch(r"%[0-9]+", pane) or dead not in ("0", "1"):
                         raise ValueError()
                     s = Session(name, sid, pane, dead == "1", int(process), int(attached), meta)
+                    s.exit_status = int(status) if status else None
+                    s.exit_signal = exit_signal
                     try:
                         s.cwd = os.readlink(f"/proc/{s.pid}/cwd")
                     except OSError:
@@ -62,7 +63,29 @@ class Tmux:
         # Guard later option changes. Restart=always also covers empty-server
         # exit during a source-file; every creation preflight resets the option.
         self.command("set-option", "-g", "exit-empty", "off", ";", "set-hook", "-g", "after-set-option[900]",
-                     "set-option -g exit-empty off")
+                     "set-option -g exit-empty off", ";", "set-option", "-g", "update-environment", "", ";",
+                     "bind-key", "c", "display-message", "Create another workload using Hubi", ";",
+                     "bind-key", "%", "display-message", "Create another workload using Hubi", ";",
+                     "bind-key", '"', "display-message", "Create another workload using Hubi", ";",
+                     "unbind-key", "<", ";", "unbind-key", ">", ";",
+                     "unbind-key", "-T", "root", "MouseDown3Pane", ";",
+                     "unbind-key", "-T", "root", "MouseDown3StatusRight")
+
+    def repair_panes(self, record):
+        """Explicit repair, authorized only by a verified primary-pane receipt."""
+        def panes():
+            p = self.command("list-panes", "-s", "-t", "="+record.session+":", "-F",
+                             "#{session_name}\t#{pane_id}")
+            rows = [line.split("\t") for line in p.stdout.splitlines()]
+            if (not rows or any(len(row) != 2 or row[0] != record.session or
+                                not re.fullmatch(r"%[0-9]+", row[1]) for row in rows) or
+                record.pane not in [row[1] for row in rows]):
+                raise HubiError("Cannot verify primary pane/session for repair")
+            return [row[1] for row in rows]
+        for pane in panes():
+            if pane != record.pane and pane in panes():
+                self.command("kill-pane", "-t", pane)
+        self.metadata(record)
 
     def create(self, record):
         # No repo text is ever a command. -c is a tmux format, hence explicit # escaping.

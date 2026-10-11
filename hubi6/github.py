@@ -4,7 +4,6 @@ import fcntl
 import hashlib
 import json
 import os
-from pathlib import Path
 import re
 import shutil
 import time
@@ -12,7 +11,7 @@ import uuid
 
 from .adapters.git import normalized_origin, reference
 from .config import private_dir
-from .core.model import HubiError
+from .core.model import HubiError, display
 from .storage import atomic_json, private_json
 
 
@@ -174,21 +173,50 @@ class GitHub:
             atomic_json(staging/"lease.json", {"runtime": self.c.runtime_id, "unit": unit})
             try:
                 # HTTPS and existing gh credential helper. Never read/store a token.
-                self.r.run(["systemd-run", "--user", "--wait", "--pipe", "--collect", "--quiet",
+                started = time.monotonic()
+                try:
+                    result = self.r.run(["systemd-run", "--user", "--wait", "--pipe", "--collect", "--quiet",
                             "--unit="+unit, "--description=Hubi6 GitHub clone", "--property=KillMode=control-group",
-                            "--property=RuntimeMaxSec=60", "--property=TimeoutStopSec=3",
-                            "--setenv=HOME="+str(self.c.home), "--setenv=GIT_TERMINAL_PROMPT=0", "--",
+                            "--property=RuntimeMaxSec="+str(self.c.clone_timeout), "--property=TimeoutStopSec=3",
+                            "--setenv=HOME="+str(self.c.home), "--setenv=PATH="+os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+                            "--setenv=GIT_TERMINAL_PROMPT=0", "--",
                             shutil.which("gh") or "gh", "repo", "clone", "https://github.com/"+name+".git", str(staging/"repo"),
-                            "--", "--config", "credential.helper=", "--config", "credential.helper=!gh auth git-credential"], timeout=65)
+                            "--", "--config", "credential.helper=", "--config", "credential.helper=!gh auth git-credential"],
+                            timeout=self.c.clone_timeout+5, check=False)
+                except HubiError as e:
+                    if "TimeoutExpired" in str(e):
+                        raise HubiError(f"Clone timed out after {self.c.clone_timeout:g} s") from e
+                    raise HubiError("Clone helper unavailable: "+safe_error(str(e))) from e
+                if result.returncode:
+                    if time.monotonic()-started >= self.c.clone_timeout:
+                        raise HubiError(f"Clone timed out after {self.c.clone_timeout:g} s")
+                    detail = safe_error(result.stderr or result.stdout or "gh returned no diagnostic")
+                    raise HubiError(f"GitHub clone failed (exit {result.returncode}): {detail}")
                 ref = reference(staging/"repo")
                 if ref.origin != match:
                     raise HubiError("Cloned origin does not match requested repository")
+                # --config clone options persist in .git/config. Remove only
+                # the helper values installed by this invocation; subsequent
+                # Git operations use the owner's existing gh auth setup.
+                self.r.run(["git", "-C", str(staging/"repo"), "config", "--local", "--unset-all",
+                            "credential.helper"], check=False)
                 # Linux renameat2 NOREPLACE closes the destination-check race.
                 rename_noreplace(staging/"repo", destination)
                 return reference(destination)
             finally:
                 self.stop_clone_unit(unit)
                 shutil.rmtree(staging, ignore_errors=True)
+
+
+def safe_error(value):
+    """Bounded gh diagnostic without credentials, known secrets or controls."""
+    for key, secret in os.environ.items():
+        if secret and any(part in key.upper() for part in ("TOKEN", "SECRET", "API_KEY", "AUTH")):
+            value = value.replace(secret, "[REDACTED]")
+    value = re.sub(r"(https?://)[^\s/@]+(?::[^\s/@]*)?@", r"\1[REDACTED]@", value)
+    value = re.sub(r"(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)", "[REDACTED]", value)
+    value = re.sub(r"(?i)(authorization[:=]\s*(?:bearer|token)\s+)\S+", r"\1[REDACTED]", value)
+    return display(value.strip()[:2000])
 
 
 def rename_noreplace(source, destination):

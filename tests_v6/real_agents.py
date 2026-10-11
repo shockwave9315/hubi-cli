@@ -5,6 +5,7 @@ from pathlib import Path
 import time
 
 from hubi6.services import App
+from hubi6.core.model import HubiError
 from tests_v6.support import bootstrap, repo
 
 
@@ -32,10 +33,28 @@ def main():
             output = real.tmux.command("capture-pane", "-p", "-S", "-", "-t", r.pane).stdout
             if state != "RUNNING" or not output.strip():
                 raise AssertionError("Real executable did not reach a visible CLI state")
-            results.append({"type": kind, "version": version, "state": state, "output": output.strip(),
-                            "authenticated": False, "scope": r.scope})
+            result = {"type": kind, "version": version, "state": state, "output": output.strip(),
+                      "authenticated": False, "scope": r.scope}
+            results.append(result)
         finally:
+            started = time.monotonic()
             real.stop(r.id)
+            result["stop_ms"] = (time.monotonic()-started)*1000
+        # Resume without credentials/history may show onboarding or report no
+        # sessions. Exercise the real command safely; never claim inference or
+        # conversation-state persistence from this unauthenticated smoke.
+        try:
+            resumed = real.start(kind, str(path), resume=True)
+        except HubiError as e:
+            result["resume"] = "No usable authenticated conversation: "+str(e)
+            for w in real.runtime_snapshot().workloads:
+                result["resume_output"] = real.tmux.command("capture-pane", "-p", "-S", "-", "-t", w.record.pane).stdout.strip()
+                real.stop(w.record.id, repair=True)
+        else:
+            time.sleep(.4)
+            result["resume"] = real.find(resumed.id).state.value
+            result["resume_output"] = real.tmux.command("capture-pane", "-p", "-S", "-", "-t", resumed.pane).stdout.strip()
+            real.stop(resumed.id)
     print(json.dumps(results, indent=2))
 
 
