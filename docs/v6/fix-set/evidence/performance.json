@@ -1,0 +1,119 @@
+{
+  "snapshots": [
+    {
+      "median_ms": 10.756921023130417,
+      "p95_ms": 11.804655194282532,
+      "subprocesses": 2,
+      "repos": 7,
+      "workloads": 0
+    },
+    {
+      "median_ms": 28.004049323499203,
+      "p95_ms": 28.676780872046947,
+      "subprocesses": 2,
+      "repos": 7,
+      "workloads": 6
+    },
+    {
+      "median_ms": 53.97828295826912,
+      "p95_ms": 61.283464543521404,
+      "subprocesses": 2,
+      "repos": 200,
+      "workloads": 6
+    },
+    {
+      "median_ms": 137.53403909504414,
+      "p95_ms": 144.7192681953311,
+      "subprocesses": 2,
+      "repos": 1000,
+      "workloads": 0
+    },
+    {
+      "median_ms": 274.49493017047644,
+      "p95_ms": 279.4417794793844,
+      "subprocesses": 2,
+      "repos": 1000,
+      "workloads": 50
+    }
+  ],
+  "runtime_snapshots": [
+    {
+      "median_ms": 25.40051471441984,
+      "p95_ms": 27.292607352137566,
+      "subprocesses": 2,
+      "repos": 0,
+      "workloads": 6,
+      "repo_root_entries": 7
+    },
+    {
+      "median_ms": 142.19638239592314,
+      "p95_ms": 146.5735910460353,
+      "subprocesses": 2,
+      "repos": 0,
+      "workloads": 50,
+      "repo_root_entries": 1000
+    }
+  ],
+  "operations": [
+    {
+      "repos": 7,
+      "workloads": 6,
+      "median_ms": {
+        "inspect": 29.288780875504017,
+        "attach": 190.72856567800045,
+        "stop": 141.35522115975618
+      },
+      "subprocesses": {
+        "inspect": [
+          2
+        ],
+        "stop": [
+          15
+        ],
+        "attach": [
+          7
+        ]
+      }
+    },
+    {
+      "repos": 7,
+      "workloads": 50,
+      "median_ms": {
+        "inspect": 145.0464716181159,
+        "attach": 790.0991402566433,
+        "stop": 369.38066501170397
+      },
+      "subprocesses": {
+        "inspect": [
+          2
+        ],
+        "stop": [
+          15
+        ],
+        "attach": [
+          7
+        ]
+      }
+    },
+    {
+      "repos": 1000,
+      "workloads": 50,
+      "median_ms": {
+        "inspect": 144.0757317468524,
+        "attach": 793.3065388351679,
+        "stop": 373.39384760707617
+      },
+      "subprocesses": {
+        "inspect": [
+          2
+        ],
+        "stop": [
+          15
+        ],
+        "attach": [
+          7
+        ]
+      }
+    }
+  ]
+}

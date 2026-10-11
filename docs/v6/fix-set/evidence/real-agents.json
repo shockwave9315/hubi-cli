@@ -1,0 +1,24 @@
+[
+  {
+    "type": "codex",
+    "version": "codex-cli 0.162.1",
+    "authenticated": false,
+    "scope": "hubi6-55c106a4120410a5331a-codex-a71d57a8b2ad8942d615-20258bcf843043c8.scope",
+    "state": "RUNNING",
+    "output": "Welcome to Codex, OpenAI's command-line coding agent\n\n  Sign in with ChatGPT to use Codex as part of your paid plan\n  or connect an API key for usage-based billing\n\n> 1. Sign in with ChatGPT\n     Usage included with Plus, Pro, Business, and Enterprise plans\n\n  2. Sign in with Device Code\n     Sign in from another device with a one-time code\n\n  3. Provide your own API key\n     Pay for what you use\n\n  Press enter to continue",
+    "stop_ms": 242.20024328678846,
+    "resume": "RUNNING",
+    "resume_output": ""
+  },
+  {
+    "type": "claude",
+    "version": "2.1.296 (Claude Code)",
+    "authenticated": false,
+    "scope": "hubi6-55c106a4120410a5331a-claude-a9a5347c512913e77add-2b29ee4581b449d9.scope",
+    "state": "RUNNING",
+    "output": "Welcome to Claude Code v2.1.296",
+    "stop_ms": 339.7264303639531,
+    "resume": "RUNNING",
+    "resume_output": "Welcome to Claude Code v2.1.296\n\n Let's get started.\n\n Choose the text style that looks best with your terminal\n To change this later, run /theme\n\n     Auto (match terminal)\n \u276f \u2714 Dark mode\n     Light mode\n     Dark mode (colorblind-friendly)\n     Light mode (colorblind-friendly)\n     Dark mode (ANSI colors only)\n     Light mode (ANSI colors only)\n\n \u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\n  1  function greet() {\n  2 -  console.log(\"Hello, World!\");\n  2 +  console.log(\"Hello, Claude!\");\n  3  }\n \u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\n  Syntax theme: Monokai Extended (ctrl+t to disable)"
+  }
+]
