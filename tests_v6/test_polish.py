@@ -67,6 +67,7 @@ class PolishUnitTests(unittest.TestCase):
         self.assertAlmostEqual(reader.quarantine_until-reader.last_byte, .08)
 
 
+@unittest.skipUnless(LAB, 'PTY signal/paste regressions run only under disposable UID')
 class PolishPtyTests(unittest.TestCase):
     # These processes exercise only Input/termios, never any runtime lifecycle.
     def input_client(self, body):
