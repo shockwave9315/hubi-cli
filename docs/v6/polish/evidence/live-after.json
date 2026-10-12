@@ -1,0 +1,65 @@
+{
+  "identical": true,
+  "before": {
+    "units": [
+      "ControlGroup=/user.slice/user-1000.slice/user@1000.service/app.slice/hubi-claude-58491583f7e4.scope\nId=hubi-claude-58491583f7e4.scope\nActiveState=active\nInvocationID=827173a0fadd4d1483aef6da25c4417b",
+      "ControlGroup=/user.slice/user-1000.slice/user@1000.service/app.slice/hubi-claude-83de655a3d27.scope\nId=hubi-claude-83de655a3d27.scope\nActiveState=active\nInvocationID=f8f33763a7684654bb5027f777b49b61",
+      "ControlGroup=/user.slice/user-1000.slice/user@1000.service/app.slice/hubi-claude-c64123bd8dee.scope\nId=hubi-claude-c64123bd8dee.scope\nActiveState=active\nInvocationID=0e25960c7e4e44d699faf85b0d592cf8",
+      "ControlGroup=/user.slice/user-1000.slice/user@1000.service/app.slice/hubi-claude-da9f8ef75bf3.scope\nId=hubi-claude-da9f8ef75bf3.scope\nActiveState=active\nInvocationID=cc7a1b643588465e9148e96ca81bf901",
+      "ControlGroup=/user.slice/user-1000.slice/user@1000.service/app.slice/hubi-codex-58491583f7e4.scope\nId=hubi-codex-58491583f7e4.scope\nActiveState=active\nInvocationID=536fcfc7dfa3494988e161a0bc87ecc8",
+      "ControlGroup=/user.slice/user-1000.slice/user@1000.service/app.slice/hubi-codex-83de655a3d27.scope\nId=hubi-codex-83de655a3d27.scope\nActiveState=active\nInvocationID=336cc32b3dfa4a83a0b9782f6485146a",
+      "ControlGroup=/user.slice/user-1000.slice/user@1000.service/app.slice/hubi-codex-c64123bd8dee-c.scope\nId=hubi-codex-c64123bd8dee-c.scope\nActiveState=active\nInvocationID=6a48bb3a2f40434bb3da8794b5570f96",
+      "ControlGroup=/user.slice/user-1000.slice/user@1000.service/app.slice/hubi-codex-c64123bd8dee.scope\nId=hubi-codex-c64123bd8dee.scope\nActiveState=active\nInvocationID=ea0630eb30cf44acaf505280edd893d0",
+      "ControlGroup=/user.slice/user-1000.slice/user@1000.service/app.slice/hubi-codex-da9f8ef75bf3.scope\nId=hubi-codex-da9f8ef75bf3.scope\nActiveState=active\nInvocationID=e17f9228e7e543cd9309a09a9e6c9961",
+      "MainPID=172\nNRestarts=0\nControlGroup=/user.slice/user-1000.slice/user@1000.service/app.slice/hubi-tmux.service\nId=hubi-tmux.service\nActiveState=active\nInvocationID=4553644e7cf9456db5ce5bdefad4ca14"
+    ],
+    "panes": [
+      "$19\thubi-codex-Pompa-next-c64123bd8dee\t1791467905\t%19\t889983",
+      "$24\thubi-claude-Pompa-next-c64123bd8dee\t1791528149\t%24\t1177943",
+      "$26\thubi-codex-Pompa-next-c-d0b5057b2944\t1791541261\t%26\t1224815",
+      "$27\thubi-codex-Inpost-Paczkomaty-58491583f7e4\t1791560567\t%27\t1283765",
+      "$28\thubi-claude-Inpost-Paczkomaty-58491583f7e4\t1791570774\t%28\t1321290",
+      "$32\thubi-claude-hubi-cli-83de655a3d27\t1791637583\t%32\t1544419",
+      "$33\thubi-claude-praca-da9f8ef75bf3\t1791644970\t%33\t2092441",
+      "$34\thubi-codex-hubi-cli-83de655a3d27\t1791646374\t%34\t2098224",
+      "$35\thubi-codex-praca-da9f8ef75bf3\t1791711828\t%35\t2367428"
+    ],
+    "socket_inode": 28,
+    "installed": {
+      "/home/dev/.local/bin/hubi": "94aafd25186d48597b0936546d3d443767f5c6305583bcf4749459d7a22830ef",
+      "/home/dev/.config/hubi/tmux-server.conf": "c0f90af71477093b6dd9bc99bb47c816f11d552adb5dd363d2fb3f5442150467",
+      "/home/dev/.config/systemd/user/hubi-tmux.service": "e87fc014486a8070ac289f17f14227c5084b504570df373b844a298896b69150"
+    }
+  },
+  "after": {
+    "units": [
+      "ControlGroup=/user.slice/user-1000.slice/user@1000.service/app.slice/hubi-claude-58491583f7e4.scope\nId=hubi-claude-58491583f7e4.scope\nActiveState=active\nInvocationID=827173a0fadd4d1483aef6da25c4417b",
+      "ControlGroup=/user.slice/user-1000.slice/user@1000.service/app.slice/hubi-claude-83de655a3d27.scope\nId=hubi-claude-83de655a3d27.scope\nActiveState=active\nInvocationID=f8f33763a7684654bb5027f777b49b61",
+      "ControlGroup=/user.slice/user-1000.slice/user@1000.service/app.slice/hubi-claude-c64123bd8dee.scope\nId=hubi-claude-c64123bd8dee.scope\nActiveState=active\nInvocationID=0e25960c7e4e44d699faf85b0d592cf8",
+      "ControlGroup=/user.slice/user-1000.slice/user@1000.service/app.slice/hubi-claude-da9f8ef75bf3.scope\nId=hubi-claude-da9f8ef75bf3.scope\nActiveState=active\nInvocationID=cc7a1b643588465e9148e96ca81bf901",
+      "ControlGroup=/user.slice/user-1000.slice/user@1000.service/app.slice/hubi-codex-58491583f7e4.scope\nId=hubi-codex-58491583f7e4.scope\nActiveState=active\nInvocationID=536fcfc7dfa3494988e161a0bc87ecc8",
+      "ControlGroup=/user.slice/user-1000.slice/user@1000.service/app.slice/hubi-codex-83de655a3d27.scope\nId=hubi-codex-83de655a3d27.scope\nActiveState=active\nInvocationID=336cc32b3dfa4a83a0b9782f6485146a",
+      "ControlGroup=/user.slice/user-1000.slice/user@1000.service/app.slice/hubi-codex-c64123bd8dee-c.scope\nId=hubi-codex-c64123bd8dee-c.scope\nActiveState=active\nInvocationID=6a48bb3a2f40434bb3da8794b5570f96",
+      "ControlGroup=/user.slice/user-1000.slice/user@1000.service/app.slice/hubi-codex-c64123bd8dee.scope\nId=hubi-codex-c64123bd8dee.scope\nActiveState=active\nInvocationID=ea0630eb30cf44acaf505280edd893d0",
+      "ControlGroup=/user.slice/user-1000.slice/user@1000.service/app.slice/hubi-codex-da9f8ef75bf3.scope\nId=hubi-codex-da9f8ef75bf3.scope\nActiveState=active\nInvocationID=e17f9228e7e543cd9309a09a9e6c9961",
+      "MainPID=172\nNRestarts=0\nControlGroup=/user.slice/user-1000.slice/user@1000.service/app.slice/hubi-tmux.service\nId=hubi-tmux.service\nActiveState=active\nInvocationID=4553644e7cf9456db5ce5bdefad4ca14"
+    ],
+    "panes": [
+      "$19\thubi-codex-Pompa-next-c64123bd8dee\t1791467905\t%19\t889983",
+      "$24\thubi-claude-Pompa-next-c64123bd8dee\t1791528149\t%24\t1177943",
+      "$26\thubi-codex-Pompa-next-c-d0b5057b2944\t1791541261\t%26\t1224815",
+      "$27\thubi-codex-Inpost-Paczkomaty-58491583f7e4\t1791560567\t%27\t1283765",
+      "$28\thubi-claude-Inpost-Paczkomaty-58491583f7e4\t1791570774\t%28\t1321290",
+      "$32\thubi-claude-hubi-cli-83de655a3d27\t1791637583\t%32\t1544419",
+      "$33\thubi-claude-praca-da9f8ef75bf3\t1791644970\t%33\t2092441",
+      "$34\thubi-codex-hubi-cli-83de655a3d27\t1791646374\t%34\t2098224",
+      "$35\thubi-codex-praca-da9f8ef75bf3\t1791711828\t%35\t2367428"
+    ],
+    "socket_inode": 28,
+    "installed": {
+      "/home/dev/.local/bin/hubi": "94aafd25186d48597b0936546d3d443767f5c6305583bcf4749459d7a22830ef",
+      "/home/dev/.config/hubi/tmux-server.conf": "c0f90af71477093b6dd9bc99bb47c816f11d552adb5dd363d2fb3f5442150467",
+      "/home/dev/.config/systemd/user/hubi-tmux.service": "e87fc014486a8070ac289f17f14227c5084b504570df373b844a298896b69150"
+    }
+  }
+}

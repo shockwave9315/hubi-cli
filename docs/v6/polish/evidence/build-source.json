@@ -1,0 +1,30 @@
+{
+  "head": "bade59c1c86699d6c4f78ef104f825655b608b90",
+  "dirty": false,
+  "source_sha256": "66d6571b63db9f57f023ad1182cbdde8bf7b261eb519d2a294a0c8390687d062",
+  "files": {
+    "hubi6/__init__.py": "b9e601c2ab926a6b26a3c32c6b1cdc275abed73ea49c33fc8adc51bb67bfa958",
+    "hubi6/__main__.py": "935a1c1166b0c1ea35a82256345000bf2c73ded718d77773bc27a71ecce28f7d",
+    "hubi6/adapters/__init__.py": "2b50493a0be0afc284c56e9cb124cc4bc6e709d4b10e575b853da05c9ec484dc",
+    "hubi6/adapters/git.py": "f77e947619ae10d80c15d9a1fde569953844f89d17ce419639f32b47b1edbe22",
+    "hubi6/adapters/process.py": "e13c492c731e0913636b3bc0aced4952902f5057d9779193b542ba806182466f",
+    "hubi6/adapters/systemd.py": "660e9e65f0c2d26c8d7589341d8cda87f34952a00879871cca6a43ddcc6d8c9b",
+    "hubi6/adapters/tmux.py": "a8bb65d900dea30659db1f20f01e072e57164e46d3c1ddb7f5aff949aa8c4a45",
+    "hubi6/cli.py": "fd0b2c8e8c2b3b7ab7f798e21f19beafbafcfd2f932be55be1aeaa451de174c8",
+    "hubi6/config.py": "fe52460abb7d486916cd7810788aea077bfdaa1836d9338ffc0562a4da0c41d8",
+    "hubi6/core/__init__.py": "9d3af40ad8c132f2b81da0804a825ff3c0ffdcecaccf8f56911dca8b31763ebd",
+    "hubi6/core/model.py": "f5342317216d7358c51404073f1c145c00b9d23196de17ebfb0f156a44e9959d",
+    "hubi6/doctor.py": "d7ea1dc8c5913a32c941b8a6711e9f608ea819221daeae8e35369bcbe44422b1",
+    "hubi6/github.py": "a74cc351509625c0f959a91f465dd368257bf047b9571614a8889493f40cae3d",
+    "hubi6/inventory.py": "c3bfc7460799a7e74d7baa6624fcb600482ba1352d99e7d7b3cd8c6ac1213cef",
+    "hubi6/services.py": "a0a784b379a2a51e39359acd6a1787b36157bb42ec96ae53e8f97b3c0071f39a",
+    "hubi6/storage.py": "2d5509c7b1af131c8de015fb9fe3be705c05287b9ce5f340af6db717920bcbda",
+    "hubi6/tui.py": "02407276d85a664c5b1564e17bc5b1da4d9f9e0840bb9563e821a43f9db79b9a",
+    "hubi6/worker.py": "c1dd7baa8816f8d52a732c4bf5b2abaa5d4e5b7121520a7ab75d024e8e61ebb9",
+    "config/hubi6-tmux.conf": "c04d666c289dd189c344bc58155f1e99968c45cd688cb46b4d821a6a6bb1b319",
+    "config/hubi6.example.toml": "b5e5fd14e925c9f71a6b695a169b11d9ea289c3ee1a1ceccb7e65aea857ccef3",
+    "systemd/user/hubi6-tmux.service": "759410cb213619ef895978f8c801e2f97f4db8e10ee02a2f4f09aaf902c271da",
+    "tools/build_v6.py": "62014eb0438f36673de2930d58be394df9d49ad9b8fda167a902c479cad75da8",
+    "tools/install_v6.py": "2025bea9802797c82c2cba51c3a3e1df87e302cad1c6e55933ac49a324b33af9"
+  }
+}

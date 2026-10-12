@@ -1,0 +1,210 @@
+# Hubi v6 — development/review build
+
+Python 3.11+, standard library only. The unchanged executable `../../hubi` is
+v5. V6 is `python3 -m hubi6`, a separate package and runtime. This branch does
+not install anything on the owner account, disable v5 or perform a cutover.
+
+```console
+python3 -m hubi6 --version
+python3 -m hubi6 doctor --json
+python3 -m hubi6 list --json
+python3 -m hubi6 start codex my-repo --instance primary
+python3 -m hubi6 start claude my-repo --resume
+python3 -m hubi6 start terminal my-repo --instance shell2
+python3 -m hubi6 inspect WORKLOAD_ID
+python3 -m hubi6 attach WORKLOAD_ID --mode shared
+python3 -m hubi6 attach WORKLOAD_ID --mode view
+python3 -m hubi6 attach WORKLOAD_ID --mode takeover
+python3 -m hubi6 stop WORKLOAD_ID --generation GENERATION
+python3 -m hubi6 reconcile WORKLOAD_ID --generation GENERATION
+python3 -m hubi6 github list --json
+python3 -m hubi6 github list --offline
+python3 -m hubi6 github clone owner/repository
+```
+
+`stop` explicitly authorizes stopping the specified generation. With extra panes,
+`reconcile` repairs the exact session while preserving its primary workload;
+otherwise it explicitly stops the inconsistent generation.
+Reconcile verifies the independent ownership receipts and removes inconsistent
+session metadata; it does not sweep unverified objects. An unambiguous ID prefix
+of at least 8 hexadecimal characters is accepted; empty/short IDs are refused. Stop never requires the repository to exist. `--generation` protects
+a confirmation made earlier; IDs themselves also include an immutable generation.
+
+The menu uses a complete snapshot, one screen write, line + Enter input and a
+bounded bracketed-paste quarantine, rearmed for every prompt and after attach.
+Raw multiline bursts cannot answer subsequent prompts; confirmations drain stale
+input before exposing their prompt. Common keys: `w` workloads, `g` GitHub,
+`b` back, `>`/`<` pages, `q` shell (98), `x` disconnect (99). Repository actions:
+`c` Codex, `l` Claude, `t` terminal; agent creation asks new/resume. Workload
+actions: `a` attach, `v` view, `s` share, `o` takeover, `d` stop, `i` inspect,
+`f` reconcile. Actions unavailable in the current state are hidden.
+Accepted lines return immediately so snapshot/render can run during the 80 ms
+input quarantine. Before the next read, the remaining burst is discarded until
+80 ms of quiet since the last received byte; destructive prompts wait for that
+clean state before being displayed.
+
+## Configuration and deployment materials
+
+Configuration: `$XDG_CONFIG_HOME/hubi6/config.toml` (default
+`~/.config/hubi6/config.toml`). See [example](../../config/hubi6.example.toml).
+`--config FILE` selects another TOML file. Agent entries are argv arrays, not
+shell commands. Defaults retain the v5 Codex/Claude flags. Terminal defaults
+to the valid $SHELL/passwd interactive shell with normal rc files. Workloads
+get HUBI6_ACTIVE=1; terminals also get HUBI_NOAUTO=1 to suppress v5 autologin.
+Self-nesting and attach from a Hubi workload are refused. SSH_AUTH_SOCK, SHELL,
+LANG/LANGUAGE and standard LC_* join the explicit API/proxy/SSL allowlist.
+TERM identifies the virtual tmux terminal (screen-256color), independent of a
+launcher running under systemd with TERM=dumb.
+
+For a **later, separately authorized clean installation**, the directory bundle
+is produced with `make build` at `dist/hubi6`. Its `hubi` wrapper can run from
+that directory; the pane worker uses real Python module paths. The bundle
+contains the v6 [service](../../systemd/user/hubi6-tmux.service) and
+[tmux config](../../config/hubi6-tmux.conf). The service expects the latter at
+`~/.config/hubi6/tmux.conf`. Enable linger and the v6 service only as part of
+that later deployment. Development does not replace `~/.local/bin/hubi`.
+The bundle includes install.py; see the [install/uninstall, clean cutover and
+rollback runbook](CUTOVER.md). Fresh builds remove stale files and record dirty
+state plus source hashes; production installation rejects dirty bundles.
+
+Runtime socket: `/run/user/UID/hubi6/tmux.sock`. Locks and one-use startup
+envelopes: `/run/user/UID/hubi6/RUNTIME_ID`. Journal:
+`$XDG_STATE_HOME/hubi6/workloads/RUNTIME_ID`. Log: `$XDG_STATE_HOME/hubi6/hubi6.log`
+(1 MiB, three rotations). GitHub cache: `$XDG_CACHE_HOME/hubi6`. Every owned
+directory is private. There is no fallback to `/tmp` for runtime or locks.
+A different `XDG_STATE_HOME` creates a different Hubi runtime namespace.
+Workloads in one namespace do not appear in another namespace's inventory.
+Doctor reports `other_runtime_objects: N` for verified foreign-namespace sessions
+and live scopes (each object counted once) on the same v6 server/user manager.
+This is informational, does not change PASS, and never offers adoption or stop.
+
+Each working tree receives a random identity in its Git administrative
+directory, `hubi6-workspace-id`. This does not change tracked files or the index.
+Together with canonical path, filesystem device/inode and Git-dir identity it
+detects checkout replacement, including inode reuse. Git status runs with
+`GIT_OPTIONAL_LOCKS=0`.
+
+## Runtime and ownership
+
+```text
+user@UID.service (linger)
+  app.slice
+    hubi6-tmux.service (tmux -D, Restart=always)
+    hubi6-RUNTIME-TYPE-KEY-GENERATION.scope  # one workload
+    hubi6-RUNTIME-clone-GENERATION.service # temporary, bounded clone
+SSH/session/client cgroups contain the disposable control layer.
+```
+
+The runtime identity binds UID, HOME, socket, service and journal directory.
+Changing repo root does not hide existing workloads. Logical workload keys bind
+type, canonical absolute workspace path and ASCII instance; generation names
+are never reused. Two runtimes and v5/v6 cannot claim each other's scopes.
+
+One snapshot uses one tmux client invocation and one batched `systemctl show`.
+All repository discovery and state derivation then runs in Python. Lifecycle
+uses a separate runtime snapshot without repository discovery or unrelated repo
+health reads; find/inspect probes only the selected workspace. Stale journals
+with proven absence of both runtime objects are hidden without writes, and safely
+collected under the same-key lifecycle lock on the next start. No Git
+subprocess per row. No cached runtime inventory. Fresh stable service generation,
+MainPID/socket PID/cgroup/UID ownership checks guard mutations. Tmux clients
+always use `-N` and the explicit socket. Scope signals require fresh systemd
+state, exact unit, its InvocationID, description and cgroup. No PID-based workload
+signals, unit globs for mutations, implicit orphan killing or global cleanup.
+
+The private journal records intent before tmux creation. Tmux session metadata
+and systemd description contain independent receipts. Interrupted starts can
+recover on the next start. Startup API environment and argv use a one-use 0600
+envelope in the private runtime directory, removed before agent exec. Secrets
+do not enter helper argv, tmux options, systemd properties or logs. Only the
+allowlist in `services.py` reaches the workload; `TMUX`, `TMUX_PANE` and launcher
+markers are removed. A normal stop sends INT (agent) or HUP (terminal), then TERM
+and KILL to the complete verified cgroup and removes the exact session.
+
+The service restarts even after a clean tmux exit. Its configuration and every
+creation preflight force `exit-empty off`; an option hook also guards ordinary
+changes. Sourcing a hostile-to-lifetime user config cannot leave the runtime
+permanently down. This is protection from accidental self-destruction, not a
+sandbox against deliberate socket targeting or `systemd-run` by an agent.
+
+Manually adding panes/windows through tmux command mode is outside the
+single-primary-pane workload contract, as in v5. V6 disables their default
+bindings (reasserted in preflight), detects extras as UNKNOWN and offers an
+explicit reconcile to remove extra panes from the verified session while keeping
+the primary workload. Inspect remains available; normal stop works after repair.
+It never adopts outside-scope processes into the workload cgroup.
+
+## GitHub
+
+Discovery uses `gh repo list --json` with complete pagination. For the default
+account it also merges paginated `gh api user/repos` results to include
+collaborator and organization repositories. An explicit `[github].owner`
+limits discovery to that owner. Private/fork/archived flags remain visible.
+LOCAL matches normalized GitHub origins across HTTPS, SCP and SSH URL spellings,
+independent of directory names; worktrees use common Git configuration.
+
+Hubi does not obtain or persist a GitHub token. HTTPS clones use existing `gh`
+authentication via `gh auth git-credential`. The 10-minute JSON cache is private;
+offline/auth/network failures can display the previous catalogue with a stale
+marker. The TUI displays cache first; refresh is explicit (`r`). Network refresh
+is synchronous, bounded at 30 seconds, and never part of a runtime render.
+
+Clone asks for confirmation in the TUI, displays Cloning/result, and preserves
+bounded gh diagnostics after redacting credentials and known secrets. It runs
+in its own transient service with a configurable 300-second default bound and full-cgroup
+cleanup, stages below repo root, validates the origin, then publishes using
+Linux `renameat2(RENAME_NOREPLACE)`. An existing directory or symlink is never
+overwritten. A name collision between forks is reported; Hubi does not pick an
+alternative name automatically. SIGINT/TERM clean helpers and staging in finally.
+After uncatchable SIGKILL, the hidden marked staging directory is recovered under
+the clone lock on the next clone; the bounded service prevents an indefinite
+helper. A partial clone is never advertised as a local repository.
+
+## Tests and independent review
+
+```console
+make test        # units anywhere; real-runtime cases skip without disposable UID
+make integration # sudo supervisor creates separate UID, tests, benchmarks, cleans
+make build       # creates an uninstalled bundle
+```
+
+Never run legacy v5 destructive harnesses on the owner UID. The v6 lab uses
+`hubi6test`, a marked disposable HOME, its own lingering user manager, private
+bus/socket/units/repos, a separate loopback sshd allowing only this test user,
+and CPU/memory/process limits. Runtime tests refuse UID 0/1000. Kernel probes
+verify owner signals, sockets and cgroup writes are denied. `tools/test_v6.py`
+always tears down the lab in finally. For focused development, use
+`sudo python3 tools/v6_lab.py create|sync|run|cleanup` explicitly.
+
+The input audit is preserved in [AUDIT_INPUT.md](AUDIT_INPUT.md); the owner's
+implementation request supersedes its optional v5 fix and cutover suggestions.
+The [implementation report](IMPLEMENTATION_REPORT.md) maps all 19 contracts and
+F1–F15 to code/tests, records measurements, isolation and live fingerprints.
+
+## Doctor and exit semantics
+
+Doctor is read-only and returns JSON status PASS/WARN/FAIL. PASS means all core
+runtime checks plus configured Codex, Claude, terminal and gh are available
+(ready=true, rc=0). Missing Codex/Claude/gh with a healthy core means WARN
+(ready=false, runtime_ready=true, rc=3). Missing core dependencies, private
+layout, ownership, linger, kill capability or inconsistent runtime means FAIL
+(rc=1). Clean cutover requires full PASS. Repo issues remain separate diagnostics.
+`list --json` always emits inventory when runtime can be represented, but exits
+1 for DOWN/DEGRADED/UNKNOWN; healthy inventory exits 0. EXITED includes tmux's
+exit_status/exit_signal. Start on EXITED refuses with an actionable error.
+Initial start also checks the immediate exec/ack window (75 ms plus its final
+snapshot); an agent exiting there causes failure and remains inspectable as
+EXITED. This does not guarantee the agent's later availability.
+EOF/closed stdin is 0, Ctrl+C 130, SIGHUP/PTY hangup 129, SIGTERM 143. --debug
+includes tracebacks; unknown keys/types and explicit missing config are errors.
+
+Agent stop defaults: INT up to 3 s, TERM up to 2 s, then KILL and verification up
+to 2 s. Terminal stop: HUP up to 1 s, TERM up to 1 s, then the same KILL check.
+The windows are configurable under [stop]; early clean exit does not wait out
+the entire grace period. Ownership/invocation is reverified before every signal.
+
+Stable lock files are intentional: unlinking them while waiters may exist would
+create lock inode races. Uninstall removes them only after global v6 zero-state.
+Mutation paths remove private abandoned atomic-write temps older than a day.
+Workspace UUIDs also detect a moved checkout and prevent a duplicate of the same
+type/instance there; distinct intentional instances remain supported.

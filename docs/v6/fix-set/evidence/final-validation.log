@@ -1,0 +1,269 @@
+Running as unit: hubi6-test-driver.service; invocation ID: 7a9a202b92c74b5898b868be4f1c3b00
+test_auth_error_redaction_timeout_and_path (test_clone_runtime.CloneRuntimeTests.test_auth_error_redaction_timeout_and_path) ... ok
+test_clone_term_sigkill_and_staging_recovery (test_clone_runtime.CloneRuntimeTests.test_clone_term_sigkill_and_staging_recovery) ... ok
+test_private_clone_real_git_and_service (test_clone_runtime.CloneRuntimeTests.test_private_clone_real_git_and_service) ... ok
+test_control_characters_F15 (test_core.CoreTests.test_control_characters_F15) ... ok
+test_git_optional_locks_F8 (test_core.CoreTests.test_git_optional_locks_F8) ... ok
+test_git_origin_matching (test_core.CoreTests.test_git_origin_matching) ... ok
+test_instances_ascii_in_all_locales_F10 (test_core.CoreTests.test_instances_ascii_in_all_locales_F10) ... ok
+test_invalid_identity (test_core.CoreTests.test_invalid_identity) ... ok
+test_metadata_rejects_foreign_or_malformed_F11 (test_core.CoreTests.test_metadata_rejects_foreign_or_malformed_F11) ... ok
+test_metadata_roundtrip (test_core.CoreTests.test_metadata_roundtrip) ... ok
+test_namespace_and_generation (test_core.CoreTests.test_namespace_and_generation) ... ok
+test_private_directories_and_metadata (test_core.CoreTests.test_private_directories_and_metadata) ... ok
+test_repo_identity_replacement_and_invalid_F5_F6 (test_core.CoreTests.test_repo_identity_replacement_and_invalid_F5_F6) ... ok
+test_runtime_path_fallback_F9 (test_core.CoreTests.test_runtime_path_fallback_F9) ... ok
+test_state_matrix (test_core.CoreTests.test_state_matrix) ... ok
+test_systemd_unknown_parsing (test_core.CoreTests.test_systemd_unknown_parsing) ... ok
+test_tmux_escaping_F1 (test_core.CoreTests.test_tmux_escaping_F1) ... ok
+test_transition_rules_and_actions (test_core.CoreTests.test_transition_rules_and_actions) ... ok
+test_arrows_and_escapes (test_core.InputTests.test_arrows_and_escapes) ... ok
+test_backspace (test_core.InputTests.test_backspace) ... ok
+test_incomplete_paste_times_out_without_enter (test_core.InputTests.test_incomplete_paste_times_out_without_enter) ... ok
+test_line_and_eof (test_core.InputTests.test_line_and_eof) ... ok
+test_multiline_bracketed_paste (test_core.InputTests.test_multiline_bracketed_paste) ... ok
+test_all_receipts_lost_and_foreign_journal_remain_fail_closed (test_fixset.FixsetRuntimeTests.test_all_receipts_lost_and_foreign_journal_remain_fail_closed) ... ok
+test_bad_entries_do_not_block_inventory_or_lifecycle (test_fixset.FixsetRuntimeTests.test_bad_entries_do_not_block_inventory_or_lifecycle) ... ok
+test_closed_stdin_and_real_pty_hangup_exit_codes (test_fixset.FixsetRuntimeTests.test_closed_stdin_and_real_pty_hangup_exit_codes) ... ok
+test_custom_state_home_worker_and_interrupted_recovery (test_fixset.FixsetRuntimeTests.test_custom_state_home_worker_and_interrupted_recovery) ... ok
+test_exited_start_fails_and_reports_exit_status (test_fixset.FixsetRuntimeTests.test_exited_start_fails_and_reports_exit_status) ... ok
+test_extra_pane_repair_and_binding_reassertion (test_fixset.FixsetRuntimeTests.test_extra_pane_repair_and_binding_reassertion) ... ok
+test_git_read_status_write_stress_F8 (test_fixset.FixsetRuntimeTests.test_git_read_status_write_stress_F8) ... Git F8 stress: protected 0/60 commit failures; control 4/60
+ok
+test_github_clone_confirmation_progress_and_cancel (test_fixset.FixsetRuntimeTests.test_github_clone_confirmation_progress_and_cancel) ... ok
+test_live_scope_tmux_unavailable_is_unknown_and_closed (test_fixset.FixsetRuntimeTests.test_live_scope_tmux_unavailable_is_unknown_and_closed) ... ok
+test_main_view_shows_unhealthy_workspace_even_when_not_discovered (test_fixset.FixsetRuntimeTests.test_main_view_shows_unhealthy_workspace_even_when_not_discovered) ... ok
+test_moved_workspace_does_not_duplicate_agent (test_fixset.FixsetRuntimeTests.test_moved_workspace_does_not_duplicate_agent) ... ok
+test_normal_terminal_rc_environment_and_nested_refusal (test_fixset.FixsetRuntimeTests.test_normal_terminal_rc_environment_and_nested_refusal) ... ok
+test_paste_after_real_tmux_detach_and_bracketed_paste (test_fixset.FixsetRuntimeTests.test_paste_after_real_tmux_detach_and_bracketed_paste) ... ok
+test_raw_paste_burst_cannot_cross_screens_or_confirm_stop (test_fixset.FixsetRuntimeTests.test_raw_paste_burst_cannot_cross_screens_or_confirm_stop) ... ok
+test_slow_graceful_agent_shutdown (test_fixset.FixsetRuntimeTests.test_slow_graceful_agent_shutdown) ... ok
+test_stale_journal_hidden_after_runtime_generation_change (test_fixset.FixsetRuntimeTests.test_stale_journal_hidden_after_runtime_generation_change) ... ok
+test_worker_wrong_layout_refused_and_private_temp_cleanup (test_fixset.FixsetRuntimeTests.test_worker_wrong_layout_refused_and_private_temp_cleanup) ... ok
+test_config_errors_are_actionable (test_fixset.FixsetUnitTests.test_config_errors_are_actionable) ... ok
+test_debug_traceback (test_fixset.FixsetUnitTests.test_debug_traceback) ... ok
+test_discovery_isolates_stat_errors_without_error_path_probe (test_fixset.FixsetUnitTests.test_discovery_isolates_stat_errors_without_error_path_probe) ... ok
+test_doctor_warn_fail_and_json_semantics (test_fixset.FixsetUnitTests.test_doctor_warn_fail_and_json_semantics) ... ok
+test_empty_short_and_ambiguous_prefixes (test_fixset.FixsetUnitTests.test_empty_short_and_ambiguous_prefixes) ... ok
+test_fresh_build_no_stale_files_and_dirty_identity (test_fixset.FixsetUnitTests.test_fresh_build_no_stale_files_and_dirty_identity) ... ok
+test_origin_common_github_hosts (test_fixset.FixsetUnitTests.test_origin_common_github_hosts) ... ok
+test_accessible_collaborator_and_org_pagination (test_github.GitHubTests.test_accessible_collaborator_and_org_pagination) ... ok
+test_cache_ttl_offline (test_github.GitHubTests.test_cache_ttl_offline) ... ok
+test_clone_atomic_https_existing_auth (test_github.GitHubTests.test_clone_atomic_https_existing_auth) ... ok
+test_clone_destination_collision (test_github.GitHubTests.test_clone_destination_collision) ... ok
+test_clone_interruption_cleanup (test_github.GitHubTests.test_clone_interruption_cleanup) ... ok
+test_corrupt_cache (test_github.GitHubTests.test_corrupt_cache) ... ok
+test_discovery_pagination_private_forks_archived (test_github.GitHubTests.test_discovery_pagination_private_forks_archived) ... ok
+test_invalid_names (test_github.GitHubTests.test_invalid_names) ... ok
+test_local_is_origin_not_directory (test_github.GitHubTests.test_local_is_origin_not_directory) ... ok
+test_no_cache_offline_and_auth_failure (test_github.GitHubTests.test_no_cache_offline_and_auth_failure) ... ok
+test_no_replace_directory_or_symlink (test_github.GitHubTests.test_no_replace_directory_or_symlink) ... ok
+test_publish_collision_race (test_github.GitHubTests.test_publish_collision_race) ... ok
+test_sigkill_staging_recovery (test_github.GitHubTests.test_sigkill_staging_recovery) ... ok
+test_fresh_bundle_install_workflows_and_uninstall (test_install.InstallTests.test_fresh_bundle_install_workflows_and_uninstall) ... Fresh bundle install: Codex/Claude/terminal, attach/inspect/stop, uninstall/rollback alias: PASS; dirty=False
+ok
+test_owner_signals_sockets_and_cgroups_denied (test_isolation.IsolationTests.test_owner_signals_sockets_and_cgroups_denied) ... Isolation: 27 owner PIDs deny signals; sockets/cgroup writes denied
+ok
+test_absent_environment_and_frozen_on_attach (test_runtime.RuntimeTests.test_absent_environment_and_frozen_on_attach) ... ok
+test_adversarial_repo_names_F1 (test_runtime.RuntimeTests.test_adversarial_repo_names_F1) ... ok
+test_agent_argv_literal_and_resume (test_runtime.RuntimeTests.test_agent_argv_literal_and_resume) ... ok
+test_bare_tmux_cannot_kill_runtime_F2 (test_runtime.RuntimeTests.test_bare_tmux_cannot_kill_runtime_F2) ... ok
+test_client_loss_multiattach_takeover_and_races (test_runtime.RuntimeTests.test_client_loss_multiattach_takeover_and_races) ... ok
+test_concurrent_stops_do_not_touch_successor (test_runtime.RuntimeTests.test_concurrent_stops_do_not_touch_successor) ... ok
+test_concurrent_workloads_and_independent_locks (test_runtime.RuntimeTests.test_concurrent_workloads_and_independent_locks) ... ok
+test_corrupt_metadata_repair_F11 (test_runtime.RuntimeTests.test_corrupt_metadata_repair_F11) ... ok
+test_environment_secret_not_argv_F2_F7 (test_runtime.RuntimeTests.test_environment_secret_not_argv_F2_F7) ... ok
+test_full_cgroup_stop_setsid_and_sibling (test_runtime.RuntimeTests.test_full_cgroup_stop_setsid_and_sibling) ... ok
+test_interrupted_start_recovery_100 (test_runtime.RuntimeTests.test_interrupted_start_recovery_100) ... Interrupted starts: 100/100 recovered
+ok
+test_lock_timeout_and_no_descriptor_leak (test_runtime.RuntimeTests.test_lock_timeout_and_no_descriptor_leak) ... ok
+test_missing_replaced_invalid_repo_stoppable_F5_F6 (test_runtime.RuntimeTests.test_missing_replaced_invalid_repo_stoppable_F5_F6) ... ok
+test_no_alternate_server_and_readonly_doctor (test_runtime.RuntimeTests.test_no_alternate_server_and_readonly_doctor) ... ok
+test_preflight_unknown_linger_and_missing_kill_capability (test_runtime.RuntimeTests.test_preflight_unknown_linger_and_missing_kill_capability) ... ok
+test_real_ssh_disconnect_and_launcher_death (test_runtime.RuntimeTests.test_real_ssh_disconnect_and_launcher_death) ... ok
+test_render_exception_restores_terminal_and_json_on_tty (test_runtime.RuntimeTests.test_render_exception_restores_terminal_and_json_on_tty) ... ok
+test_revalidate_repo_before_external_workload (test_runtime.RuntimeTests.test_revalidate_repo_before_external_workload) ... ok
+test_runtime_namespace_F4 (test_runtime.RuntimeTests.test_runtime_namespace_F4) ... ok
+test_scope_generation_stale_confirmation (test_runtime.RuntimeTests.test_scope_generation_stale_confirmation) ... ok
+test_scope_without_session_and_lost_receipt (test_runtime.RuntimeTests.test_scope_without_session_and_lost_receipt) ... ok
+test_session_without_scope_and_exited_output (test_runtime.RuntimeTests.test_session_without_scope_and_exited_output) ... ok
+test_source_file_and_restart_policy_F3 (test_runtime.RuntimeTests.test_source_file_and_restart_policy_F3) ... ok
+test_source_file_last_stop_without_preflight_F3 (test_runtime.RuntimeTests.test_source_file_last_stop_without_preflight_F3) ... ok
+test_systemd_unknown_fails_closed (test_runtime.RuntimeTests.test_systemd_unknown_fails_closed) ... ok
+test_tmux_server_crash_restarts_without_touching_sibling_runtime_F2 (test_runtime.RuntimeTests.test_tmux_server_crash_restarts_without_touching_sibling_runtime_F2) ... ok
+test_tui_signals_eof_and_terminal_restoration (test_runtime.RuntimeTests.test_tui_signals_eof_and_terminal_restoration) ... ok
+test_types_unified_view_and_cli_json_F14 (test_runtime.RuntimeTests.test_types_unified_view_and_cli_json_F14) ... ok
+
+----------------------------------------------------------------------
+Ran 90 tests in 184.870s
+
+OK
+Finished with result: success
+Main processes terminated with: code=exited, status=0/SUCCESS
+Service runtime: 3min 4.970s
+CPU time consumed: 56.408s
+Memory peak: 80.8M (swap: 0B)
+Running as unit: hubi6-benchmark.service; invocation ID: 11becde7a75d4fabbbd94e6d6f5a0e10
+{
+  "snapshots": [
+    {
+      "median_ms": 10.756921023130417,
+      "p95_ms": 11.804655194282532,
+      "subprocesses": 2,
+      "repos": 7,
+      "workloads": 0
+    },
+    {
+      "median_ms": 28.004049323499203,
+      "p95_ms": 28.676780872046947,
+      "subprocesses": 2,
+      "repos": 7,
+      "workloads": 6
+    },
+    {
+      "median_ms": 53.97828295826912,
+      "p95_ms": 61.283464543521404,
+      "subprocesses": 2,
+      "repos": 200,
+      "workloads": 6
+    },
+    {
+      "median_ms": 137.53403909504414,
+      "p95_ms": 144.7192681953311,
+      "subprocesses": 2,
+      "repos": 1000,
+      "workloads": 0
+    },
+    {
+      "median_ms": 274.49493017047644,
+      "p95_ms": 279.4417794793844,
+      "subprocesses": 2,
+      "repos": 1000,
+      "workloads": 50
+    }
+  ],
+  "runtime_snapshots": [
+    {
+      "median_ms": 25.40051471441984,
+      "p95_ms": 27.292607352137566,
+      "subprocesses": 2,
+      "repos": 0,
+      "workloads": 6,
+      "repo_root_entries": 7
+    },
+    {
+      "median_ms": 142.19638239592314,
+      "p95_ms": 146.5735910460353,
+      "subprocesses": 2,
+      "repos": 0,
+      "workloads": 50,
+      "repo_root_entries": 1000
+    }
+  ],
+  "operations": [
+    {
+      "repos": 7,
+      "workloads": 6,
+      "median_ms": {
+        "inspect": 29.288780875504017,
+        "attach": 190.72856567800045,
+        "stop": 141.35522115975618
+      },
+      "subprocesses": {
+        "inspect": [
+          2
+        ],
+        "stop": [
+          15
+        ],
+        "attach": [
+          7
+        ]
+      }
+    },
+    {
+      "repos": 7,
+      "workloads": 50,
+      "median_ms": {
+        "inspect": 145.0464716181159,
+        "attach": 790.0991402566433,
+        "stop": 369.38066501170397
+      },
+      "subprocesses": {
+        "inspect": [
+          2
+        ],
+        "stop": [
+          15
+        ],
+        "attach": [
+          7
+        ]
+      }
+    },
+    {
+      "repos": 1000,
+      "workloads": 50,
+      "median_ms": {
+        "inspect": 144.0757317468524,
+        "attach": 793.3065388351679,
+        "stop": 373.39384760707617
+      },
+      "subprocesses": {
+        "inspect": [
+          2
+        ],
+        "stop": [
+          15
+        ],
+        "attach": [
+          7
+        ]
+      }
+    }
+  ]
+}
+Finished with result: success
+Main processes terminated with: code=exited, status=0/SUCCESS
+Service runtime: 59.403s
+CPU time consumed: 19.362s
+Memory peak: 172.9M (swap: 0B)
+Running as unit: hubi6-real-agents.service; invocation ID: 9c39ce8f9f934214ae9a7833fac2e013
+[
+  {
+    "type": "codex",
+    "version": "codex-cli 0.162.1",
+    "authenticated": false,
+    "scope": "hubi6-55c106a4120410a5331a-codex-a71d57a8b2ad8942d615-20258bcf843043c8.scope",
+    "state": "RUNNING",
+    "output": "Welcome to Codex, OpenAI's command-line coding agent\n\n  Sign in with ChatGPT to use Codex as part of your paid plan\n  or connect an API key for usage-based billing\n\n> 1. Sign in with ChatGPT\n     Usage included with Plus, Pro, Business, and Enterprise plans\n\n  2. Sign in with Device Code\n     Sign in from another device with a one-time code\n\n  3. Provide your own API key\n     Pay for what you use\n\n  Press enter to continue",
+    "stop_ms": 242.20024328678846,
+    "resume": "RUNNING",
+    "resume_output": ""
+  },
+  {
+    "type": "claude",
+    "version": "2.1.296 (Claude Code)",
+    "authenticated": false,
+    "scope": "hubi6-55c106a4120410a5331a-claude-a9a5347c512913e77add-2b29ee4581b449d9.scope",
+    "state": "RUNNING",
+    "output": "Welcome to Claude Code v2.1.296",
+    "stop_ms": 339.7264303639531,
+    "resume": "RUNNING",
+    "resume_output": "Welcome to Claude Code v2.1.296\n\n Let's get started.\n\n Choose the text style that looks best with your terminal\n To change this later, run /theme\n\n     Auto (match terminal)\n \u276f \u2714 Dark mode\n     Light mode\n     Dark mode (colorblind-friendly)\n     Light mode (colorblind-friendly)\n     Dark mode (ANSI colors only)\n     Light mode (ANSI colors only)\n\n \u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\n  1  function greet() {\n  2 -  console.log(\"Hello, World!\");\n  2 +  console.log(\"Hello, Claude!\");\n  3  }\n \u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u254c\n  Syntax theme: Monokai Extended (ctrl+t to disable)"
+  }
+]
+Finished with result: success
+Main processes terminated with: code=exited, status=0/SUCCESS
+Service runtime: 4.531s
+CPU time consumed: 1.141s
+Memory peak: 38.4M (swap: 0B)
+{"user": "hubi6test", "uid": 1001, "home": "/home/hubi6test"}
+Pre-cleanup workload scopes: none
+PRE-TEARDOWN: {"scopes": 0, "sessions": 0, "clients": 0, "clone_units": 0}
+Removed '/run/systemd/system.control/user-1001.slice.d/50-CPUWeight.conf'.
+Removed '/run/systemd/system.control/user-1001.slice.d/50-MemoryMax.conf'.
+Removed '/run/systemd/system.control/user-1001.slice.d/50-TasksMax.conf'.
+Removed '/run/systemd/system.control/user-1001.slice.d'.
+userdel: hubi6test mail spool (/var/mail/hubi6test) not found
+CLEAN: uid 1001; no processes, home, runtime, linger or slice overrides
