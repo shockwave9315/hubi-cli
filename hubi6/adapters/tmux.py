@@ -1,7 +1,27 @@
 import os
 import re
 
-from ..core.model import HubiError, Record, Session, tmux_format
+from ..core.model import HubiError, Record, Session, display, tmux_format
+
+
+KIND_ICON = {"claude": "\u2733", "codex": ">_", "terminal": "$"}
+# One status-bar colour per workload type: the bar itself says where you are.
+KIND_STYLE = {"claude": "bg=colour209,fg=colour232", "codex": "bg=colour79,fg=colour232",
+              "terminal": "bg=colour75,fg=colour232"}
+
+
+NEW_PANE_HINT = "Nową sesję uruchom z menu Hubi: Ctrl-b d"
+
+
+def label(record):
+    """Human status-line label. Presentation only; never an identity.
+
+    Repository names are external text: control characters are escaped and '#'
+    is replaced, because tmux draws '#[...]' found in an expanded option as a
+    style directive.
+    """
+    name = display(record.repo.path.rsplit("/", 1)[-1]).replace("#", "\u266f")
+    return f"{KIND_ICON.get(record.kind, '?')} {record.kind}/{record.instance} \u00b7 {name}"[:60]
 
 
 FORMAT = "P\t#{session_name}\t#{session_id}\t#{pane_id}\t#{pane_dead}\t#{pane_pid}\t#{session_attached}\t#{@hubi6}\t#{pane_dead_status}\t#{pane_dead_signal}"
@@ -74,12 +94,36 @@ class Tmux:
         # exit during a source-file; every creation preflight resets the option.
         self.command("set-option", "-g", "exit-empty", "off", ";", "set-hook", "-g", "after-set-option[900]",
                      "set-option -g exit-empty off", ";", "set-option", "-g", "update-environment", "", ";",
-                     "bind-key", "c", "display-message", "Create another workload using Hubi", ";",
-                     "bind-key", "%", "display-message", "Create another workload using Hubi", ";",
-                     "bind-key", '"', "display-message", "Create another workload using Hubi", ";",
+                     "bind-key", "c", "display-message", NEW_PANE_HINT, ";",
+                     "bind-key", "%", "display-message", NEW_PANE_HINT, ";",
+                     "bind-key", '"', "display-message", NEW_PANE_HINT, ";",
                      "unbind-key", "<", ";", "unbind-key", ">", ";",
+                     # suspend-client would stop a client its launcher waits for:
+                     # under SSH autologin nothing can resume it from the keyboard.
+                     "unbind-key", "C-z", ";",
                      "unbind-key", "-T", "root", "MouseDown3Pane", ";",
                      "unbind-key", "-T", "root", "MouseDown3StatusRight")
+
+    def titles(self):
+        """Best-effort pane titles and foreground commands for display.
+
+        Deliberately separate from inventory(): titles are written by the agent
+        itself, so they must never reach ownership or state decisions, and a
+        strange title can at worst blank one cosmetic field.
+        """
+        try:
+            p = self.command("list-panes", "-a", "-F", "#{session_name}\t#{pane_current_command}\t#{pane_title}",
+                             check=False)
+        except HubiError:
+            return {}
+        prefix, result = "hubi6-"+self.c.runtime_id+"-", {}
+        if p.returncode:
+            return result
+        for line in p.stdout.splitlines():
+            fields = line.split("\t", 2)
+            if len(fields) == 3 and fields[0].startswith(prefix):
+                result.setdefault(fields[0], (fields[1], fields[2]))
+        return result
 
     def repair_panes(self, record):
         """Explicit repair, authorized only by a verified primary-pane receipt."""
@@ -110,9 +154,20 @@ class Tmux:
     def metadata(self, record):
         # set-option resolves -t as a window/pane target, unlike kill-session's
         # exact-name grammar. Numeric pane IDs are exact and never reused.
+        # The session name is hexadecimal by construction (core.model.names), so
+        # it is safe inside the hook command. When the primary process ends, the
+        # dead pane is kept for its exit status but every client is returned to
+        # its launcher instead of being left on "Pane is dead". The guard matters:
+        # without a client, detach-client fails with "no current client", and
+        # tmux parks that error in the pane as a view-mode message which then
+        # swallows the next client's keystrokes.
         self.command("set-option", "-t", record.pane, "@hubi6", record.encoded(), ";",
                      "set-option", "-w", "-t", record.pane, "remain-on-exit", "on", ";",
-                     "set-option", "-w", "-t", record.pane, "window-size", "largest")
+                     "set-option", "-w", "-t", record.pane, "window-size", "latest", ";",
+                     "set-option", "-t", record.pane, "@hubi6-label", label(record), ";",
+                     "set-option", "-t", record.pane, "status-style", KIND_STYLE.get(record.kind, "default"), ";",
+                     "set-hook", "-p", "-t", record.pane, "pane-died",
+                     "if -F '#{session_attached}' 'detach-client -s ="+record.session+"'")
 
     def launch(self, record, argv):
         self.command("respawn-pane", "-k", "-t", record.pane, "-c", tmux_format(record.repo.path), "--", *argv)

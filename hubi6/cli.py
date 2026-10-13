@@ -10,31 +10,49 @@ import traceback
 from . import __version__
 from .config import Config
 from .core.model import HubiError, State, display
+from .i18n import HEALTH_PL, RUNTIME_PL, STATE_PL, pl
+
+
+class PolishHelp(argparse.HelpFormatter):
+    def add_usage(self, usage, actions, groups, prefix=None):
+        return super().add_usage(usage, actions, groups, "użycie: ")
 
 
 def parser():
-    p = argparse.ArgumentParser(prog="hubi", description="Hubi v6 systemd/tmux workloads")
-    p.add_argument("--version", action="version", version="Hubi "+__version__)
-    p.add_argument("--config")
-    p.add_argument("--debug", action="store_true")
-    sub = p.add_subparsers(dest="command")
-    for name in ("doctor", "list"):
-        c = sub.add_parser(name)
+    p = argparse.ArgumentParser(prog="hubi", formatter_class=PolishHelp, add_help=False,
+                                description="Hubi v6: agenci i terminale w systemd/tmux. Bez polecenia otwiera menu.")
+    p._positionals.title, p._optionals.title = "polecenia", "opcje"
+    p.add_argument("-h", "--help", action="help", help="pokaż tę pomoc")
+    p.add_argument("--version", action="version", version="Hubi "+__version__, help="pokaż wersję")
+    p.add_argument("--config", help="inny plik konfiguracji TOML")
+    p.add_argument("--debug", action="store_true", help="pełne ślady błędów")
+    p.add_argument("--classic", action="store_true", help="klasyczne menu liniowe (awaryjne)")
+    sub = p.add_subparsers(dest="command", parser_class=lambda **kw: argparse.ArgumentParser(formatter_class=PolishHelp, **kw))
+    for name, text in (("doctor", "diagnostyka środowiska"), ("list", "lista sesji")):
+        c = sub.add_parser(name, help=text)
         c.add_argument("--json", action="store_true")
-    c = sub.add_parser("start")
+    c = sub.add_parser("start", help="uruchom sesję w tle i wypisz jej ID")
     c.add_argument("type", choices=("codex", "claude", "terminal"))
     c.add_argument("repo")
     c.add_argument("--instance", default="primary")
     c.add_argument("--resume", action="store_true")
     c.add_argument("--json", action="store_true")
-    for name in ("stop", "inspect", "attach", "reconcile"):
-        c = sub.add_parser(name)
+    for name in ("codex", "claude", "terminal"):
+        c = sub.add_parser(name, help=f"uruchom {name} w repozytorium (jeśli trzeba) i wejdź")
+        c.add_argument("repo")
+        c.add_argument("instance", nargs="?", default="primary")
+        if name != "terminal":
+            c.add_argument("--resume", action="store_true", help="wznów rozmowę")
+        c.add_argument("--mode", choices=("normal", "view", "shared", "takeover"), default="normal")
+    for name, text in (("stop", "zatrzymaj sesję"), ("inspect", "szczegóły sesji (JSON)"), ("attach", "wejdź do sesji"),
+                       ("reconcile", "napraw niespójną sesję")):
+        c = sub.add_parser(name, help=text)
         c.add_argument("id")
         if name in ("stop", "reconcile"):
-            c.add_argument("--generation", help="Reject a stale confirmation")
+            c.add_argument("--generation", help="odrzuć nieaktualne potwierdzenie")
         if name == "attach":
             c.add_argument("--mode", choices=("normal", "view", "shared", "takeover"), default="normal")
-    c = sub.add_parser("github")
+    c = sub.add_parser("github", help="repozytoria na GitHubie")
     g = c.add_subparsers(dest="github_command", required=True)
     ls = g.add_parser("list")
     ls.add_argument("--json", action="store_true")
@@ -43,6 +61,26 @@ def parser():
     clone = g.add_parser("clone")
     clone.add_argument("repo")
     return p
+
+
+def menu(app, classic):
+    """The Polish dashboard, with the line-oriented menu as a safety net.
+
+    Hubi is the SSH login entry point: an unexpected fault in the richer menu
+    must degrade to the reviewed fallback instead of leaving no menu at all.
+    """
+    from .tui import run as classic_menu
+    if classic or os.environ.get("HUBI6_UI") == "classic":
+        return classic_menu(app)
+    from .menu import run as dashboard
+    try:
+        return dashboard(app)
+    except (HubiError, OSError):
+        raise                                          # expected errors and a vanished terminal are not faults
+    except Exception as e:
+        logging.getLogger("hubi6").error("Dashboard failed type=%s; using classic menu", type(e).__name__)
+        print(f"Hubi: nowe menu zgłosiło błąd ({type(e).__name__}); uruchamiam menu klasyczne.", file=sys.stderr)
+        return classic_menu(app)
 
 
 def execute(args):
@@ -59,13 +97,12 @@ def execute(args):
         handler = RotatingFileHandler(app.c.state_base/"hubi6.log", maxBytes=1048576, backupCount=3)
         logging.getLogger("hubi6").addHandler(handler)
     if args.command is None:
-        from .tui import run
-        return run(app)
+        return menu(app, args.classic)
     if args.command == "doctor":
         from .doctor import doctor
         result = doctor(app)
         print(json.dumps(result, ensure_ascii=True, indent=2) if args.json else
-              "Doctor: "+result["status"]+"\n"+
+              "Diagnostyka: "+result["status"]+"\n"+
               "\n".join(f"{k}: {display(v)}" for k, v in result["checks"].items()))
         return {"PASS": 0, "WARN": 3, "FAIL": 1}[result["status"]]
     if args.command == "list":
@@ -73,16 +110,18 @@ def execute(args):
         if args.json:
             print(json.dumps(s.data(), ensure_ascii=True, indent=2))
         else:
-            print("Runtime: "+s.runtime_health)
+            print("Runtime: "+RUNTIME_PL.get(s.runtime_health, s.runtime_health))
             for w in s.workloads:
-                print(f"{w.record.id}  {w.record.kind}/{w.record.instance}  {w.state.value}  repo:{w.repo_health.value}  "
-                      f"clients:{w.session.attached if w.session else 0}  {display(w.record.repo.path)}")
+                print(f"{w.record.id}  {w.record.kind}/{w.record.instance}  {STATE_PL[w.state]}  repo:{HEALTH_PL[w.repo_health]}  "
+                      f"klienci:{w.session.attached if w.session else 0}  {display(w.record.repo.path)}")
             for issue in s.issues:
-                print(display(issue), file=sys.stderr)
+                print(pl(display(issue)), file=sys.stderr)
         return 0 if s.runtime_health == "OK" and all(w.state != State.UNKNOWN for w in s.workloads) else 1
     if args.command == "start":
         r = app.start(args.type, args.repo, args.instance, args.resume)
         print(json.dumps(r.data(), ensure_ascii=True) if args.json else r.id)
+    elif args.command in ("codex", "claude", "terminal"):
+        return app.open(args.command, args.repo, args.instance, getattr(args, "resume", False), args.mode)
     elif args.command in ("stop", "reconcile"):
         app.stop(args.id, args.generation, repair=args.command == "reconcile")
     elif args.command == "inspect":
@@ -101,10 +140,10 @@ def execute(args):
                 print(json.dumps({"repos": view, "cached": result.cached, "stale": result.stale, "error": result.error}, ensure_ascii=True, indent=2))
             else:
                 for repo in view:
-                    print(f"{'LOCAL' if repo['local'] else 'NOT LOCAL':9} {repo['nameWithOwner']}"
-                          f"{' private' if repo['isPrivate'] else ''}{' fork' if repo['isFork'] else ''}{' archived' if repo['isArchived'] else ''}")
+                    print(f"{'lokalne' if repo['local'] else 'zdalne':8} {repo['nameWithOwner']}"
+                          f"{' prywatne' if repo['isPrivate'] else ''}{' fork' if repo['isFork'] else ''}{' archiwum' if repo['isArchived'] else ''}")
                 if result.error:
-                    print(result.error, file=sys.stderr)
+                    print(pl(result.error), file=sys.stderr)
     return 0
 
 
@@ -130,7 +169,7 @@ def main(argv=None):
     except HubiError as e:
         if args.debug:
             traceback.print_exc()
-        print("Hubi: "+display(e), file=sys.stderr)
+        print("Hubi: "+pl(display(e)), file=sys.stderr)
         return 2
     except OSError as e:
         if e.errno in (errno.EIO, errno.EBADF, errno.EPIPE):
@@ -138,13 +177,13 @@ def main(argv=None):
             return 129
         if args.debug:
             traceback.print_exc()
-        print(f"Hubi: {type(e).__name__}; operation failed. Run doctor/inspect.", file=sys.stderr)
+        print(f"Hubi: {type(e).__name__}; operacja nie powiodła się. Uruchom `hubi doctor`.", file=sys.stderr)
         return 1
     except Exception as e:
         if args.debug:
             traceback.print_exc()
         logging.getLogger("hubi6").error("Unhandled exception type=%s", type(e).__name__)
-        print(f"Hubi: {type(e).__name__}; operation failed. Run doctor/inspect.", file=sys.stderr)
+        print(f"Hubi: {type(e).__name__}; operacja nie powiodła się. Uruchom `hubi doctor`.", file=sys.stderr)
         return 1
 
 

@@ -31,6 +31,12 @@ def terminal(*, paste=False):
         raise SignalExit(signum)
     for sig in (signal.SIGINT, signal.SIGHUP, signal.SIGTERM):
         handlers[sig] = signal.signal(sig, handle)
+    if paste:
+        # A stopped menu cannot be continued from the keyboard when its parent is
+        # the login shell still reading its startup files (SSH autologin): that
+        # shell waits without job control. A handler, unlike SIG_IGN, is reset
+        # to the default in every child process.
+        handlers[signal.SIGTSTP] = signal.signal(signal.SIGTSTP, lambda signum, frame: None)
     try:
         if old:
             mode = termios.tcgetattr(fd)
@@ -40,6 +46,9 @@ def terminal(*, paste=False):
                 mode[3] &= ~(termios.ICANON | termios.ECHO)
                 mode[3] |= termios.ISIG
                 mode[6][termios.VMIN], mode[6][termios.VTIME] = 1, 0
+                # No keyboard suspend either: it would also stop helpers that
+                # share the foreground process group.
+                mode[6][termios.VSUSP] = b"\x00"
             termios.tcsetattr(fd, termios.TCSANOW, mode)
             if paste:
                 sys.stdout.write("\033[?2004h")

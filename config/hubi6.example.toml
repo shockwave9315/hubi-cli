@@ -18,3 +18,10 @@ agent_term_grace = 2
 terminal_hup_grace = 1
 terminal_term_grace = 1
 kill_grace = 2
+
+[ui]
+# Seconds between live refreshes of the menu (only changed lines are redrawn).
+refresh = 2
+color = true
+# false replaces the Unicode icons and spinner with plain ASCII.
+icons = true

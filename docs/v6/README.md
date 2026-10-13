@@ -11,6 +11,9 @@ python3 -m hubi6 list --json
 python3 -m hubi6 start codex my-repo --instance primary
 python3 -m hubi6 start claude my-repo --resume
 python3 -m hubi6 start terminal my-repo --instance shell2
+python3 -m hubi6 claude my-repo              # start if needed, then attach
+python3 -m hubi6 codex my-repo cp5 --resume  # named instance, resume picker
+python3 -m hubi6 terminal my-repo
 python3 -m hubi6 inspect WORKLOAD_ID
 python3 -m hubi6 attach WORKLOAD_ID --mode shared
 python3 -m hubi6 attach WORKLOAD_ID --mode view
@@ -30,18 +33,75 @@ session metadata; it does not sweep unverified objects. An unambiguous ID prefix
 of at least 8 hexadecimal characters is accepted; empty/short IDs are refused. Stop never requires the repository to exist. `--generation` protects
 a confirmation made earlier; IDs themselves also include an immutable generation.
 
-The menu uses a complete snapshot, one screen write, line + Enter input and a
-bounded bracketed-paste quarantine, rearmed for every prompt and after attach.
-Raw multiline bursts cannot answer subsequent prompts; confirmations drain stale
-input before exposing their prompt. Common keys: `w` workloads, `g` GitHub,
-`b` back, `>`/`<` pages, `q` shell (98), `x` disconnect (99). Repository actions:
-`c` Codex, `l` Claude, `t` terminal; agent creation asks new/resume. Workload
-actions: `a` attach, `v` view, `s` share, `o` takeover, `d` stop, `i` inspect,
-`f` reconcile. Actions unavailable in the current state are hidden.
-Accepted lines return immediately so snapshot/render can run during the 80 ms
-input quarantine. Before the next read, the remaining burst is discarded until
-80 ms of quiet since the last received byte; destructive prompts wait for that
-clean state before being displayed.
+## Menu
+
+`hubi` without a command opens the Polish dashboard (`hubi6/menu.py`). Every
+frame is rendered by pure functions from one complete snapshot and sent in one
+write; afterwards only lines that changed are redrawn, on the alternate screen.
+The list refreshes every `[ui] refresh` seconds (2 by default, 10 after a minute
+without a key press). No line is ever wider than the terminal: columns are
+clipped with an ellipsis, so nothing wraps at 65 columns or at 39.
+
+One key is one action, without Enter:
+
+| Key | Main screen |
+| --- | --- |
+| `1`-`9` | attach to that session |
+| `l` `c` `t` | new Claude / Codex / terminal, then the repository number: started and attached |
+| `d` | stop: session number, then `q` confirms |
+| `i` | session details: view, share, take over, stop, repair |
+| `r` | repository view with `git status` |
+| `g` | GitHub catalogue and clone |
+| `?` | help |
+| `q` / `x` | shell (98) / end the SSH session (99, only offered under autologin) |
+
+While choosing a repository, `n` names the instance and `r` switches between a
+new conversation and resume. `0`, Esc and Backspace go back; arrows or `j`/`k`
+move a cursor and Enter activates it; Space turns pages. Keys are not case
+sensitive, and an unknown key is answered with a hint instead of silence.
+
+Each row shows the type icon, `type/instance`, repository, activity, attached
+clients and age. Activity comes from the pane title the agent sets itself: a
+leading spinner means "pracuje" and the rest of the title is shown underneath.
+Titles are fetched by a separate, lenient tmux query (`Tmux.titles`) and never
+reach the inventory parser, ownership checks or state derivation. Sessions are
+numbered in creation order, so starting something never renumbers the others.
+
+Input safety is the same contract as the line menu, adapted to single keys:
+
+- A read that is not exactly one key (a paste, or several keys delivered
+  together) is discarded as a whole, reported on screen and followed by 80 ms of
+  required silence. Bracketed paste is swallowed up to its closing marker.
+- Separate key presses are not throttled, so quick consecutive keys all count.
+- Before a stop/remove/repair question is displayed, the terminal must be silent
+  for 80 ms and is flushed; the answer is one deliberate `q`. The same drain
+  happens before every attach, so nothing typed earlier can reach an agent.
+- Cloning still asks for a typed `tak` + Enter.
+
+Long operations (start, stop, GitHub refresh, clone) show a spinner on the
+status line. The operation stays on the main thread, so signals interrupt it
+exactly as before; a helper thread only draws.
+
+When the primary process of a session ends, a `pane-died` hook detaches every
+client, which returns to the menu instead of staying on "Pane is dead". The dead
+pane and its exit status are still retained. A clean exit (status 0, no signal,
+no clients) is then removed automatically by `App.reap_clean_exit`; nothing is
+signalled, because the scope is already gone. A failed exit stays EXITED and
+opens its detail screen, where `v` shows the output and `d` removes it.
+
+Ctrl-Z cannot suspend the menu: under SSH autologin the parent is a login shell
+still reading its startup files, which waits without job control, so a stopped
+menu could not be resumed from the keyboard. The menu disables the terminal's
+suspend character and installs a no-op SIGTSTP handler; the tmux server unbinds
+`suspend-client` for the same reason.
+
+The reviewed line-oriented menu (`hubi6/tui.py`, English) is unchanged and
+remains as a fallback: `hubi --classic` or `HUBI6_UI=classic`. It is also
+started automatically if the dashboard raises an unexpected exception, because
+Hubi is the SSH login entry point. Human-readable CLI output and error messages
+are Polish through `hubi6/i18n.py`; raised messages, logs and JSON keep their
+stable English identifiers, and a test fails when a new message has no Polish
+wording.
 
 ## Configuration and deployment materials
 
@@ -51,6 +111,8 @@ Configuration: `$XDG_CONFIG_HOME/hubi6/config.toml` (default
 shell commands. Defaults retain the v5 Codex/Claude flags. Terminal defaults
 to the valid $SHELL/passwd interactive shell with normal rc files. Workloads
 get HUBI6_ACTIVE=1; terminals also get HUBI_NOAUTO=1 to suppress v5 autologin.
+`[ui]` accepts `refresh` (seconds), `color` and `icons` (false = ASCII only);
+`NO_COLOR` and `TERM=dumb` also disable colour.
 Self-nesting and attach from a Hubi workload are refused. SSH_AUTH_SOCK, SHELL,
 LANG/LANGUAGE and standard LC_* join the explicit API/proxy/SSL allowlist.
 TERM identifies the virtual tmux terminal (screen-256color), independent of a
@@ -66,6 +128,13 @@ that later deployment. Development does not replace `~/.local/bin/hubi`.
 The bundle includes install.py; see the [install/uninstall, clean cutover and
 rollback runbook](CUTOVER.md). Fresh builds remove stale files and record dirty
 state plus source hashes; production installation rejects dirty bundles.
+
+SSH autologin: append [config/hubi6-autologin.sh](../../config/hubi6-autologin.sh)
+to the **end of `~/.profile`**, not to `~/.bashrc`. A typical `~/.profile`
+sources `~/.bashrc` first and extends PATH afterwards; a menu started from
+`~/.bashrc` gives every workload the PATH from before those additions (for
+example the system Node instead of the user's). The block sets
+`HUBI_AUTOLOGIN=1`, which is how the menu knows that `x` ends the SSH session.
 
 Runtime socket: `/run/user/UID/hubi6/tmux.sock`. Locks and one-use startup
 envelopes: `/run/user/UID/hubi6/RUNTIME_ID`. Journal:
@@ -126,6 +195,13 @@ creation preflight force `exit-empty off`; an option hook also guards ordinary
 changes. Sourcing a hostile-to-lifetime user config cannot leave the runtime
 permanently down. This is protection from accidental self-destruction, not a
 sandbox against deliberate socket targeting or `systemd-run` by an agent.
+
+Inside a session the status bar names it (`type/instance · repository`) in a
+colour per type; the generation hash is no longer the only label. `Ctrl-b d`
+returns to the menu, `Ctrl-b )` / `(` / `L` move between sessions without
+leaving tmux, and `Ctrl-b s` lists them with their labels. Windows follow the
+most recently used client (`window-size latest`), so a small terminal is not
+left with a cropped slice of a window sized for a larger idle client.
 
 Manually adding panes/windows through tmux command mode is outside the
 single-primary-pane workload contract, as in v5. V6 disables their default

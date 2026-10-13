@@ -229,7 +229,7 @@ class PolishRuntimeTests(unittest.TestCase):
                 cli = [sys.executable, '-m', 'hubi6', '--config', str(config)]
                 result = subprocess.run(cli+['start', 'codex', str(self.path), '--instance', f'exit{i}', '--json'], capture_output=True, text=True)
                 self.assertNotEqual(result.returncode, 0, result.stdout)
-                self.assertIn('startup', result.stderr)
+                self.assertRegex(result.stderr, '(?i)start')  # Polish wording of either startup failure
                 w = wait_for(lambda: next((w for w in self.app.runtime_snapshot().workloads if w.state == State.EXITED), None))
                 self.assertEqual(w.data()['exit_status'], 23)
                 listed = subprocess.run(cli+['list', '--json'], capture_output=True, text=True)

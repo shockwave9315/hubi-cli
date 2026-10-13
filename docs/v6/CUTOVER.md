@@ -93,6 +93,8 @@ managed files or unknown registry entries are preserved and reported.
 5. Require **status=PASS, ready=true, exit code 0**. WARN is not sufficient for
    cutover. Verify linger, all core dependencies, Codex, Claude and gh. Ensure
    existing gh HTTPS auth works; Hubi never creates a private token store.
+   If SSH autologin is used, its block belongs at the end of `~/.profile`
+   (see `config/hubi6-autologin.sh`); remove any older copy from `~/.bashrc`.
 6. Owner smoke: fresh Codex/Claude sessions and deliberate stop/resume, terminal
    RC/SSH agent, normal/shared/takeover, missing repo inspect/stop, GitHub private
    clone and LOCAL detection. Stop the smoke workloads, verify zero-state.

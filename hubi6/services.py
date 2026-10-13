@@ -271,6 +271,31 @@ class App:
                 return  # explicit pane repair preserves the verified primary workload
             self._stop(current.record, expected=expected or r.generation, repair=repair, initial=snapshot)
 
+    def reap_clean_exit(self, identity):
+        """Remove one generation whose primary process already ended with status 0.
+
+        Nothing is signalled: the scope is gone and only the retained dead pane
+        and its journal remain. A failed or signalled exit is left EXITED so its
+        output stays inspectable. Returns the reaped workload, or None.
+        """
+        try:
+            w = self.find(identity, health_check=False)
+        except HubiError:
+            return None
+        s = w.session
+        if (w.state != State.EXITED or s is None or not s.dead or s.attached or s.panes != 1 or
+                s.exit_status != 0 or s.exit_signal or (w.unit and w.unit.live)):
+            return None
+        self.stop(w.record.id, expected=w.record.generation)
+        return w
+
+    def open(self, kind, repo, instance="primary", resume=False, mode="normal"):
+        """Start the workload if needed, attach, and tidy up after a clean exit."""
+        record = self.start(kind, repo, instance, resume)
+        code = self.attach(record.id, mode)
+        self.reap_clean_exit(record.id)
+        return code
+
     def attach(self, identity, mode="normal"):
         if os.environ.get("HUBI6_ACTIVE"):
             raise HubiError("Attach from inside a Hubi workload is refused; detach first")
