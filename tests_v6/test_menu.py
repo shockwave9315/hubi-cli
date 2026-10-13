@@ -1,5 +1,6 @@
 """Polish dashboard: pure rendering and key handling anywhere; lifecycle in the lab."""
 import ast
+from dataclasses import replace
 import io
 import os
 from pathlib import Path
@@ -323,6 +324,249 @@ class LifecycleUnitTests(unittest.TestCase):
             self.assertEqual(signal.getsignal(signal.SIGTSTP), handler)
             with terminal():                         # plain CLI commands keep normal job control
                 self.assertEqual(termios.tcgetattr(slave)[6][termios.VSUSP], before[6][termios.VSUSP])
+
+
+class FakeTmux:
+    def __init__(self, titles):
+        self.table = titles
+
+    def titles(self):
+        return self.table
+
+
+class FakeGit:
+    def __init__(self):
+        self.summaries = 0
+
+    def summary(self, reference):
+        self.summaries += 1
+        return "## main\n M file\n"
+
+    def resolve(self, value):
+        return ref(Path(value).name)
+
+
+class FakeApp:
+    """Records lifecycle calls; nothing here touches tmux, systemd or a PTY."""
+
+    def __init__(self, workloads=(), titles=None):
+        self.c = replace(Config.load(), ui_color=False)
+        self.workloads, self.calls, self.r = list(workloads), [], None
+        self.tmux, self.git = FakeTmux(titles or {}), FakeGit()
+        self.fail_start = None
+
+    def snapshot(self):
+        return snapshot(self.workloads)
+
+    def start(self, kind, path, instance="primary", resume=False):
+        self.calls.append(("start", kind, path, instance, resume))
+        if self.fail_start:
+            raise HubiError(self.fail_start)
+        w = workload(kind, instance, Path(path).name, State.RUNNING, created=time.time())
+        self.workloads.append(w)
+        return w.record
+
+    def attach(self, identity, mode="normal"):
+        self.calls.append(("attach", identity, mode))
+        return 0
+
+    def stop(self, identity, expected=None, repair=False):
+        self.calls.append(("stop", identity, expected, repair))
+        self.workloads = [w for w in self.workloads if w.record.id != identity]
+
+    def find(self, identity, snapshot=None, health_check=True):
+        for w in self.workloads:
+            if w.record.id == identity:
+                return w
+        raise HubiError("Workload ID missing or ambiguous; use hubi list")
+
+    def reap_clean_exit(self, identity):
+        return None
+
+
+class ControllerTests(unittest.TestCase):
+    def make(self, workloads=(), titles=None, **env):
+        rd, wr = os.pipe()
+        self.addCleanup(os.close, rd)
+        self.addCleanup(os.close, wr)
+        self.wr = wr
+
+        class Stream(io.StringIO):
+            def fileno(self):
+                raise OSError()
+        app = FakeApp(workloads, titles)
+        with patch.dict(os.environ, env):
+            m = menu.Menu(app, menu.Keys(rd), menu.Screen(Stream()))
+        m.refresh()
+        return m, app
+
+    def later(self, data, delay=.2):
+        import threading
+        timer = threading.Timer(delay, os.write, (self.wr, data))
+        timer.start()
+        self.addCleanup(timer.join)
+
+    def press(self, m, *keys):
+        result = None
+        for key in keys:
+            with patch("hubi6.tui.sys.stdout", io.StringIO()):
+                result = m.handle(key)
+            m.refresh()
+            m.draw()
+        return result
+
+    def text(self, m):
+        return plain(m.screen.stream.getvalue())
+
+    def test_digit_attaches_at_once(self):
+        items, titles = sample()
+        m, app = self.make(items[:2], titles)
+        first = menu.build_view(app.snapshot(), titles).items[0]
+        self.assertIsNone(self.press(m, "1"))
+        self.assertEqual(app.calls, [("attach", first.id, "normal")])
+
+    def test_attached_session_asks_how_to_join(self):
+        busy = workload("terminal", "primary", "alpha", State.ATTACHED, created=1, attached=2)
+        m, app = self.make([busy])
+        self.later(b"s")
+        self.press(m, "1")
+        self.assertEqual(app.calls, [("attach", busy.record.id, "shared")])
+        self.assertIn("ma już 2 klientów", self.text(m))
+        m, app = self.make([busy])
+        self.later(b"z")
+        self.press(m, "1")
+        self.assertEqual(app.calls, [])
+
+    def test_stop_requires_q_and_passes_the_generation(self):
+        items, titles = sample()
+        m, app = self.make(items[:2], titles)
+        target = menu.build_view(app.snapshot(), titles).items[0]
+        self.later(b"n")
+        self.press(m, "d", "1")
+        self.assertEqual(app.calls, [])
+        self.assertIn("Anulowano", self.text(m))
+        self.later(b"q")
+        self.press(m, "d", "1")
+        self.assertEqual(app.calls, [("stop", target.id, target.generation, False)])
+        self.assertIn("zatrzymano", self.text(m))
+
+    def test_any_other_key_cancels_a_pending_stop(self):
+        items, titles = sample()
+        m, app = self.make(items[:2], titles)
+        self.press(m, "d", "g")
+        self.assertEqual((m.ui.verb, m.ui.screen, app.calls), ("", "main", []))
+
+    def test_new_agent_is_two_keys_and_attaches(self):
+        m, app = self.make()
+        self.press(m, "L", "3")                      # keys are not case sensitive
+        started = app.workloads[-1].record
+        self.assertEqual(app.calls, [("start", "claude", ref("praca").path, "primary", False), ("attach", started.id, "normal")])
+        self.assertEqual(m.ui.screen, "main")
+
+    def test_named_instance_and_resume(self):
+        m, app = self.make()
+        os.write(self.wr, b"rev\n")
+        self.press(m, "c", "r", "n", "1")
+        self.assertEqual(app.calls[0], ("start", "codex", ref("alpha").path, "rev", True))
+        self.assertEqual((m.ui.instance, m.ui.resume), ("primary", False))   # options do not leak into the next start
+
+    def test_invalid_instance_name_is_refused_in_polish(self):
+        m, app = self.make()
+        os.write(self.wr, "zła nazwa\n".encode())
+        self.press(m, "l", "n")
+        self.assertEqual(m.ui.instance, "primary")
+        self.assertIn("Nazwa instancji", m.ui.message)
+        self.assertEqual(app.calls, [])
+
+    def test_terminal_has_no_resume(self):
+        m, app = self.make()
+        self.press(m, "t", "r")
+        self.assertFalse(m.ui.resume)
+        self.assertIn("nic tu nie robi", m.ui.message)
+
+    def test_existing_instance_is_entered_not_restarted(self):
+        running = workload("claude", "primary", "alpha", State.RUNNING, created=1)
+        m, app = self.make([running])
+        self.press(m, "l", "1")
+        self.assertEqual(app.calls, [("attach", running.record.id, "normal")])
+
+    def test_finished_instance_is_replaced_only_after_q(self):
+        dead = workload("claude", "primary", "alpha", State.EXITED, created=1, status=1)
+        m, app = self.make([dead])
+        self.later(b"n")
+        self.press(m, "l", "1")
+        self.assertEqual(app.calls, [])
+        self.later(b"q")
+        self.press(m, "l", "1")
+        self.assertEqual([call[0] for call in app.calls], ["stop", "start", "attach"])
+
+    def test_failed_start_is_reported_in_polish(self):
+        m, app = self.make()
+        app.fail_start = "Agent executable unavailable: codex"
+        self.press(m, "c", "1")
+        self.assertEqual(m.ui.message, "Brak programu agenta: codex")
+        self.assertEqual(m.ui.level, "bad")
+
+    def test_exit_keys(self):
+        m, _ = self.make()
+        self.assertEqual(self.press(m, "q"), 98)
+        self.assertEqual(self.press(m, "eof"), 0)
+        self.assertIsNone(self.press(m, "x"))
+        self.assertIn("nic tu nie robi", m.ui.message)
+        m, _ = self.make(HUBI_AUTOLOGIN="1")
+        self.assertEqual(self.press(m, "x"), 99)
+
+    def test_burst_and_unknown_keys_are_explained(self):
+        m, app = self.make()
+        self.press(m, "burst")
+        self.assertIn("Zignorowano serię znaków", m.ui.message)
+        self.press(m, "z")
+        self.assertIn("Klawisz „z” nic tu nie robi", m.ui.message)
+        self.press(m, "9")
+        self.assertIn("Nie ma sesji numer 9", m.ui.message)
+        self.assertEqual(app.calls, [])
+
+    def test_back_from_every_screen(self):
+        m, _ = self.make()
+        for opener in ("l", "r", "?"):
+            for back in ("0", "esc", "back"):
+                self.press(m, opener)
+                self.assertNotEqual(m.ui.screen, "main", opener)
+                self.press(m, back)
+                self.assertEqual(m.ui.screen, "main", (opener, back))
+
+    def test_repository_view_and_details(self):
+        items, titles = sample()
+        m, app = self.make(items, titles)
+        self.press(m, "r", "3")
+        self.assertEqual((m.ui.screen, m.ui.repo.path, app.git.summaries), ("repo", ref("praca").path, 1))
+        self.assertIn("M file", self.text(m))
+        self.press(m, "0", "i", "1")
+        self.assertEqual(m.ui.screen, "detail")
+        self.press(m, "v")
+        self.assertEqual(app.calls[-1][2], "view")
+
+    def test_github_open_local_and_clone_needs_typed_tak(self):
+        m, app = self.make()
+        catalogue = type("C", (), {"stale": False, "error": "", "repos": []})()
+        entries = [{"nameWithOwner": "o/alpha", "isPrivate": False, "isFork": False, "isArchived": False, "local": True,
+                    "local_paths": [ref("alpha").path]},
+                   {"nameWithOwner": "o/fresh", "isPrivate": True, "isFork": False, "isArchived": False, "local": False,
+                    "local_paths": []}]
+        cloned = []
+        with patch.object(m.github, "cached", return_value=catalogue), patch.object(m.github, "view", return_value=entries), \
+                patch.object(m.github, "clone", side_effect=lambda name: cloned.append(name) or ref("fresh")):
+            self.press(m, "g", "1")
+            self.assertEqual((m.ui.screen, m.ui.repo.path), ("repo", ref("alpha").path))
+            self.press(m, "0", "g")
+            self.later(b"nie\n")
+            self.press(m, "2")
+            self.assertEqual(cloned, [])
+            self.assertIn("anulowane", m.ui.message)
+            self.later(b"tak\n")
+            self.press(m, "2")
+            self.assertEqual(cloned, ["o/fresh"])
+            self.assertEqual((m.ui.screen, m.ui.repo.path), ("repo", ref("fresh").path))
 
 
 @unittest.skipUnless(LAB, "dashboard lifecycle only under the disposable UID")
