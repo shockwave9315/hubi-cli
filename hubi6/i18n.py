@@ -22,9 +22,9 @@ HEALTH_PL = {
 RUNTIME_PL = {"OK": "OK", "DOWN": "nie działa", "DEGRADED": "niepełny", "UNKNOWN": "nieznany"}
 KIND_PL = {"claude": "Claude", "codex": "Codex", "terminal": "terminal"}
 # The instance is part of a workload's identity and keeps its stable ASCII name.
-# People see it as a label, and the default one in Polish.
+# People see it as the session name ("nazwa sesji"), the default one in Polish.
 DEFAULT_INSTANCE = "primary"
-DEFAULT_LABEL = "główna"
+DEFAULT_NAME = "główna"
 
 EXACT = {
     # Git adapter
@@ -73,7 +73,7 @@ EXACT = {
     "Invalid ui configuration": "Nieprawidłowa konfiguracja ui",
     "agents must contain nonempty argv arrays for codex, claude or terminal": "agents musi zawierać niepuste tablice argv dla codex, claude lub terminal",
     # model
-    "Instance must match [A-Za-z0-9][A-Za-z0-9_-]{0,31}": "Etykieta: litery, cyfry, _ i -, bez spacji, najwyżej 32 znaki, na początku litera lub cyfra",
+    "Instance must match [A-Za-z0-9][A-Za-z0-9_-]{0,31}": "Nazwa sesji: litery, cyfry, _ i -, bez spacji, najwyżej 32 znaki, na początku litera lub cyfra",
     "Paths containing control characters are unsupported": "Ścieżki ze znakami sterującymi nie są obsługiwane",
     "Unknown workload type": "Nieznany typ sesji",
     "Invalid runtime/workload identity": "Nieprawidłowa tożsamość runtime/sesji",
@@ -211,15 +211,15 @@ def pl(message):
     return text
 
 
-def label_pl(instance):
+def name_pl(instance):
     """What a person sees for an instance name."""
-    return DEFAULT_LABEL if instance == DEFAULT_INSTANCE else instance
+    return DEFAULT_NAME if instance == DEFAULT_INSTANCE else instance
 
 
-def instance_of(label):
-    """The instance a typed label means; empty and the Polish default map to the default."""
-    text = str(label).strip()
-    return DEFAULT_INSTANCE if not text or text.casefold() == DEFAULT_LABEL else text
+def instance_of(name):
+    """The instance a typed session name means; empty and the Polish default map to the default."""
+    text = str(name).strip()
+    return DEFAULT_INSTANCE if not text or text.casefold() == DEFAULT_NAME else text
 
 
 def age(seconds):

@@ -2,7 +2,7 @@ import os
 import re
 
 from ..core.model import HubiError, Record, Session, display, tmux_format
-from ..i18n import label_pl
+from ..i18n import name_pl
 
 
 KIND_ICON = {"claude": "\u2733", "codex": ">_", "terminal": "$"}
@@ -22,7 +22,7 @@ def label(record):
     style directive.
     """
     name = display(record.repo.path.rsplit("/", 1)[-1]).replace("#", "\u266f")
-    return f"{KIND_ICON.get(record.kind, '?')} {record.kind}/{label_pl(record.instance)} \u00b7 {name}"[:60]
+    return f"{KIND_ICON.get(record.kind, '?')} {record.kind}/{name_pl(record.instance)} \u00b7 {name}"[:60]
 
 
 FORMAT = "P\t#{session_name}\t#{session_id}\t#{pane_id}\t#{pane_dead}\t#{pane_pid}\t#{session_attached}\t#{@hubi6}\t#{pane_dead_status}\t#{pane_dead_signal}"

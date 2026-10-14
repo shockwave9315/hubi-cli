@@ -19,8 +19,7 @@ import unicodedata
 
 from .core.model import HubiError, RepoHealth, State, actions, display
 from .github import GitHub
-from .i18n import DEFAULT_INSTANCE, DEFAULT_LABEL, HEALTH_PL, KIND_PL, RUNTIME_PL, STATE_PL, age, instance_of, label_pl, \
-    pl, plural
+from .i18n import DEFAULT_INSTANCE, HEALTH_PL, KIND_PL, RUNTIME_PL, STATE_PL, age, instance_of, name_pl, pl, plural
 from .tui import Input, terminal
 
 PAGE = 9
@@ -34,6 +33,7 @@ STYLES = {
     "claude": "38;5;209", "codex": "38;5;79", "terminal": "38;5;75",
     "ok": "38;5;78", "busy": "1;38;5;221", "idle": "38;5;110", "warn": "38;5;221",
     "bad": "1;38;5;203", "muted": "38;5;245", "confirm": "1;38;5;232;48;5;221",
+    "on": "1;38;5;232;48;5;221",
 }
 
 
@@ -156,7 +156,7 @@ class Item:
 
     @property
     def name(self):
-        return f"{self.kind}/{label_pl(self.instance)}"
+        return f"{self.kind}/{name_pl(self.instance)}"
 
 
 @dataclass
@@ -206,6 +206,21 @@ def working(title):
     return head if spinning else ""
 
 
+def free_name(items, kind, path):
+    """The automatic name for a new session: the default one, else the first free number.
+
+    Every recorded session of that type in that repository counts as taken,
+    whatever its state, so a new session never reuses or replaces another one.
+    """
+    taken = {item.instance for item in items if item.kind == kind and item.path == path}
+    if DEFAULT_INSTANCE not in taken:
+        return DEFAULT_INSTANCE
+    number = 2
+    while str(number) in taken:
+        number += 1
+    return str(number)
+
+
 def branch_of(ref):
     """Branch name from the HEAD file. Filesystem only: no Git subprocess per row."""
     try:
@@ -243,7 +258,7 @@ class Ui:
     screen: str = "main"
     verb: str = ""              # main: "" | "stop" | "info"
     kind: str = ""              # pick: workload type being created, "" = open repo
-    instance: str = DEFAULT_INSTANCE
+    instance: str = ""          # session name typed by the user, "" = automatic
     resume: bool = False
     page: int = 0
     cursor: int = -1
@@ -311,7 +326,7 @@ def repo_row(label, row, width, glyphs, *, selected=False, kind=""):
     marks = [i for i in row.items if not kind or i.kind == kind]
     used = shown = 0
     for item in marks:
-        piece = f"{glyphs.icons[item.kind]} {label_pl(item.instance)}  "
+        piece = f"{glyphs.icons[item.kind]} {name_pl(item.instance)}  "
         if used+width_of(piece) > tail:
             break
         cells.append((piece, item.kind))
@@ -392,13 +407,25 @@ def frame_main(view, ui, width, height, glyphs):
     return lines[:max(0, height-len(bottom))]+bottom
 
 
+def start_options(ui, *, talks):
+    """What the next start will do, said loudly: the conversation switch and a typed name."""
+    lines = []
+    if talks:
+        new = ("[ NOWA ROZMOWA ]", "on") if not ui.resume else ("  nowa rozmowa  ", "muted")
+        old = ("[ WZNÓW ROZMOWĘ ]", "on") if ui.resume else ("  wznów rozmowę  ", "muted")
+        lines.append([" ", new, " ", old, ("   r przełącza", "muted")])
+    if ui.instance:
+        lines.append([(" nazwa sesji: ", "muted"), (name_pl(ui.instance), "bold")])
+    return lines
+
+
 def frame_pick(view, ui, width, height, glyphs):
-    what = "REPOZYTORIUM" if not ui.kind else "NOWY "+glyphs.icons[ui.kind]+" "+KIND_PL[ui.kind].upper()
+    resume = ui.resume and ui.kind not in ("", "terminal")
+    what = "REPOZYTORIUM" if not ui.kind else ("WZNÓW " if resume else "NOWY ")+glyphs.icons[ui.kind]+" "+KIND_PL[ui.kind].upper()
     top = [head(view, what, width, glyphs)]
     if ui.kind:
-        talk = "" if ui.kind == "terminal" else f"   rozmowa: {'wznów' if ui.resume else 'nowa'}"
-        top.append([(" etykieta: ", "muted"), (label_pl(ui.instance), "bold"), (talk, "muted")])
-    top.append([(" Wybierz repozytorium:", "section")])
+        top += start_options(ui, talks=ui.kind != "terminal")
+    top.append([(" Wybierz repo, otworzy się lista rozmów:" if resume else " Wybierz repozytorium:", "section")])
     pages = max(1, (len(view.repos)+PAGE-1)//PAGE)
     page = min(ui.page, pages-1)
     rows = [repo_row(str(n), row, width, glyphs, kind=ui.kind, selected=ui.cursor == n-1)
@@ -407,9 +434,9 @@ def frame_pick(view, ui, width, height, glyphs):
         rows = [[("    Brak repozytoriów w katalogu roboczym. ", "muted"), ("g", "key"), (" = GitHub", "muted")]]
     hints = [("1-9", "start" if ui.kind else "otwórz")]
     if ui.kind:
-        hints.append(("n", "etykieta"))
+        hints.append(("n", "nazwa sesji"))
         if ui.kind != "terminal":
-            hints.append(("r", "wznów rozmowę"))
+            hints.append(("r", "nowa/wznów"))
     if pages > 1:
         hints.append(("spacja", f"strona {page+1}/{pages}"))
     hints.append(("0", "wróć"))
@@ -422,12 +449,11 @@ def frame_repo(view, ui, width, height, glyphs):
     name = os.path.basename(ui.repo.path)
     top = [head(view, "REPO "+name, width, glyphs),
            [(" "+clip(display(ui.repo.path), width-2), "muted"), ("  "+(row.branch if row else ""), "ok")]]
-    talk = f"   rozmowa: {'wznów' if ui.resume else 'nowa'}"
-    top.append([(" etykieta: ", "muted"), (label_pl(ui.instance), "bold"), (talk, "muted")])
+    top += start_options(ui, talks=True)
     items = row.items if row else []
     body = [[(" Sesje w tym repo:", "section")]] if items else []
     body += [workload_row(n, item, width, glyphs) for n, item in enumerate(items[:PAGE], 1)]
-    hints = [("l", "Claude"), ("c", "Codex"), ("t", "terminal"), ("n", "etykieta"), ("r", "wznów rozmowę"),
+    hints = [("l", "Claude"), ("c", "Codex"), ("t", "terminal"), ("n", "nazwa sesji"), ("r", "nowa/wznów"),
              ("s", "status Gita"), ("0", "wróć")]
     if items:
         hints.insert(0, ("1-9", "wejdź"))
@@ -508,8 +534,8 @@ def frame_github(view, ui, width, height, glyphs, catalogue, repos):
 
 HELP = (
     ("1-9", "wejdź do sesji z listy, bez Entera"),
-    ("l c t", "nowy Claude / Codex / terminal, potem numer repo"),
-    ("n r", "przy wyborze repo: etykieta / wznów rozmowę"),
+    ("l c t", "nowa sesja: Claude / Codex / terminal, potem repo"),
+    ("r n", "przy wyborze repo: wznów rozmowę / własna nazwa"),
     ("d", "zatrzymaj: numer sesji, potem q potwierdza"),
     ("i", "szczegóły: podgląd, dołączenie, przejęcie, naprawa"),
     ("r", "widok repozytorium i status Gita"),
@@ -798,7 +824,7 @@ class Menu:
         # session that was alive when we went in is checked, not only this one.
         done = [w for w in [self.app.reap_clean_exit(ident)]+[self.app.reap_clean_exit(i.id) for i in live] if w]
         if done:
-            names = ", ".join(f"{w.record.kind}/{label_pl(w.record.instance)}" for w in done)
+            names = ", ".join(f"{w.record.kind}/{name_pl(w.record.instance)}" for w in done)
             self.say(f"{names}: koniec pracy, posprzątane", "ok")
             if self.ui.screen == "detail" and any(w.record.id == ident for w in done):
                 self.ui.screen = "main"
@@ -845,14 +871,22 @@ class Menu:
             self.ui.screen = "main"
 
     def launch(self, kind, ref):
-        instance, resume = self.ui.instance, self.ui.resume and kind != "terminal"
-        label = f"{kind}/{label_pl(instance)}"
-        for item in self.view.items:
+        """l/c/t always means a new session; a running one is entered with its number.
+
+        Without a typed name the session takes the first free automatic name, so
+        "resume" resumes even where that agent already runs. Only a name the user
+        typed can address an existing session.
+        """
+        named, resume = self.ui.instance, self.ui.resume and kind != "terminal"
+        self.refresh()                                # the name is chosen from the current inventory
+        instance = named or free_name(self.view.items, kind, ref.path)
+        label = f"{kind}/{name_pl(instance)}"
+        for item in self.view.items if named else ():
             if (item.kind, item.path, item.instance) != (kind, ref.path, instance):
                 continue
             if item.state in (State.RUNNING, State.ATTACHED):
                 self.say(f"{label} już działa", "ok")
-                self.ui.instance, self.ui.resume = DEFAULT_INSTANCE, False
+                self.ui.instance, self.ui.resume = "", False
                 return self.enter(item)
             if item.state == State.EXITED:
                 if not self.confirm(f"Poprzednia sesja {label} jest zakończona. Usunąć ją i uruchomić nową?"):
@@ -870,7 +904,7 @@ class Menu:
             if failed:
                 self.ui.screen, self.ui.selected = "detail", failed[0].id
             raise
-        self.ui.instance, self.ui.resume = DEFAULT_INSTANCE, False
+        self.ui.instance, self.ui.resume = "", False
         self.attach(record.id)
 
     def open_repo(self, ref):
@@ -900,17 +934,23 @@ class Menu:
     def back(self):
         ui = self.ui
         ui.screen = {"pick": "main", "repo": "main", "detail": "main", "github": "main", "help": "main"}.get(ui.screen, "main")
-        ui.verb, ui.page, ui.cursor, ui.instance, ui.resume = "", 0, -1, DEFAULT_INSTANCE, False
+        ui.verb, ui.page, ui.cursor, ui.instance, ui.resume = "", 0, -1, "", False
 
     def name_instance(self):
-        answer = self.ask_line(f"Etykieta [{DEFAULT_LABEL}]: ")
+        answer = self.ask_line("Nazwa sesji [automatyczna]: ")
         if answer is None:
             return False
-        answer = instance_of(answer)
-        from .core.model import validate_instance
-        validate_instance(answer)
+        answer = answer.strip()
+        if answer:                                    # empty keeps the automatic name
+            answer = instance_of(answer)
+            from .core.model import validate_instance
+            validate_instance(answer)
         self.ui.instance = answer
         return True
+
+    def toggle_resume(self):
+        self.ui.resume = not self.ui.resume
+        self.say("Wznów: po wyborze repo otworzy się lista rozmów" if self.ui.resume else "Nowa rozmowa", "ok")
 
     # ---- key dispatch
 
@@ -980,7 +1020,7 @@ class Menu:
         if key == "n" and ui.kind:
             self.name_instance()
         elif key == "r" and ui.kind and ui.kind != "terminal":
-            ui.resume = not ui.resume
+            self.toggle_resume()
         elif key == " ":
             ui.page, ui.cursor = (page+1) % pages, -1
         elif key in ("down", "j", "up", "k"):
@@ -1003,7 +1043,7 @@ class Menu:
         if key == "n":
             self.name_instance()
         elif key == "r":
-            ui.resume = not ui.resume
+            self.toggle_resume()
         elif key == "s":
             ui.git = self.app.git.summary(ui.repo)
             self.say("Status Gita odświeżony", "ok")

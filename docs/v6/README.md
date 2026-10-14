@@ -49,7 +49,7 @@ One key is one action, without Enter:
 | Key | Main screen |
 | --- | --- |
 | `1`-`9` | attach to that session |
-| `l` `c` `t` | new Claude / Codex / terminal, then the repository number: started and attached |
+| `l` `c` `t` | new Claude / Codex / terminal session, then the repository number: started and attached |
 | `d` | stop: session number, then `q` confirms |
 | `i` | session details: view, share, take over, stop, repair |
 | `r` | repository view with `git status` |
@@ -57,15 +57,31 @@ One key is one action, without Enter:
 | `?` | help |
 | `q` / `x` | shell (98) / end the SSH session (99, only offered under autologin) |
 
-While choosing a repository, `n` asks for a label (`Etykieta [główna]:`) and `r`
-switches between a new conversation and resume. The label is the workload's
+`l`, `c` and `t` always start a new session; a running one is entered with
+its number. Without a typed name the session takes an automatic one
+(`menu.free_name`): the default instance if that type has no session in the
+repository yet, otherwise the first free number (`codex/2`, `codex/3`). Every
+recorded session counts as taken whatever its state, so an automatic start never
+enters, reuses or replaces another session and never asks a question. This is
+what makes resume dependable: with the agent already running there, choosing
+resume still opens the conversation picker, in a new session.
+
+While choosing a repository, `r` switches between a new conversation and resume.
+The switch is drawn as two labelled sides with the active one highlighted, the
+screen title changes between `NOWY` and `WZNÓW`, and the toggle is confirmed on
+the status line. `n` asks for a session name (`Nazwa sesji [automatyczna]:`);
+only a typed name can address an existing session (a running one is entered, a
+finished one is replaced after `q`). The session name is the workload's
 instance. Its stored, stable name stays ASCII and the default stays `primary` in
 records, JSON and the command line; people see the default as `główna`, and
-typing nothing or `główna` selects it. `0`, Esc and Backspace go back; arrows or `j`/`k`
+typing `główna` selects it. The command line keeps "start if needed, then
+attach" for `hubi claude|codex|terminal REPO [NAZWA]`.
+
+`0`, Esc and Backspace go back; arrows or `j`/`k`
 move a cursor and Enter activates it; Space turns pages. Keys are not case
 sensitive, and an unknown key is answered with a hint instead of silence.
 
-Each row shows the type icon, `type/label`, repository, activity, attached
+Each row shows the type icon, `type/name`, repository, activity, attached
 clients and age. Activity comes from the pane title the agent sets itself: a
 leading spinner glyph means "pracuje" and the rest of the title is shown
 underneath. Codex animates a braille spinner; Claude Code shows `◐` while it
@@ -217,7 +233,7 @@ changes. Sourcing a hostile-to-lifetime user config cannot leave the runtime
 permanently down. This is protection from accidental self-destruction, not a
 sandbox against deliberate socket targeting or `systemd-run` by an agent.
 
-Inside a session the status bar names it (`type/label · repository`) in a
+Inside a session the status bar names it (`type/name · repository`) in a
 colour per type; the generation hash is no longer the only label. `Ctrl-b d`
 returns to the menu, `Ctrl-b )` / `(` / `L` move between sessions without
 leaving tmux, and `Ctrl-b s` lists them with their labels. Windows follow the

@@ -106,7 +106,7 @@ Ominięcie menu: `ssh -t HOST 'HUBI_NOAUTO=1 bash -il'`.
 | Klawisz | Działanie |
 |---|---|
 | `1`-`9` | wejdź do sesji |
-| `l` `c` `t` | nowy Claude / Codex / terminal, potem numer repo |
+| `l` `c` `t` | nowa sesja: Claude / Codex / terminal, potem numer repo |
 | `d` | zatrzymaj: numer sesji, potem `q` potwierdza |
 | `i` | szczegóły sesji: podgląd, współdzielenie, przejęcie, naprawa |
 | `r` | widok repozytorium i `git status` |
@@ -115,9 +115,16 @@ Ominięcie menu: `ssh -t HOST 'HUBI_NOAUTO=1 bash -il'`.
 | `q` / `x` | powłoka / rozłącz (`x` tylko po autologinie) |
 | `0`, Esc | wróć |
 
-Przy wyborze repo `n` nadaje etykietę, a `r` przełącza między nową rozmową
-a wznowieniem. Etykieta pozwala mieć kilka sesji tego samego typu w jednym
-repo, na przykład `codex/główna` i `codex/cp5`.
+`l`, `c` i `t` zawsze startują nową sesję. Do działającej wchodzisz cyfrą.
+Pierwsza sesja danego typu w repo nazywa się `główna`, kolejne dostają numer:
+`codex/główna`, `codex/2`, `codex/3`.
+
+Przy wyborze repo:
+
+| Klawisz | Działanie |
+|---|---|
+| `r` | przełącza między nową rozmową a wznowieniem (lista wcześniejszych rozmów) |
+| `n` | własna nazwa sesji zamiast automatycznej, np. `codex/cp5` |
 
 W sesji:
 
@@ -131,7 +138,7 @@ W sesji:
 
 ```console
 hubi                          # menu
-hubi claude REPO [ETYKIETA]   # uruchom w razie potrzeby i wejdź
+hubi claude REPO [NAZWA]      # uruchom w razie potrzeby i wejdź
 hubi codex REPO --resume      # to samo dla Codexa, ze wznowieniem rozmowy
 hubi terminal REPO            # terminal w repo
 hubi list                     # sesje i ich ID

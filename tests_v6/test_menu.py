@@ -17,7 +17,7 @@ from hubi6 import menu
 from hubi6.adapters.tmux import NEW_PANE_HINT, label
 from hubi6.config import Config
 from hubi6.core.model import HubiError, Record, RepoHealth, RepoRef, Session, State, Workload, key_id
-from hubi6.i18n import age, instance_of, label_pl, pl, plural
+from hubi6.i18n import age, instance_of, name_pl, pl, plural
 from hubi6.inventory import Snapshot
 from hubi6.services import App
 from hubi6.tui import terminal
@@ -173,9 +173,37 @@ class RenderTests(unittest.TestCase):
             self.assertNotIn("instanc", text.lower(), name)
         for name in ("pick", "repo"):
             text = "\n".join(menu.render(frames[name], menu.Theme(False), 64))
-            self.assertIn("etykieta: główna", text, name)
-            self.assertIn("n etykieta", text, name)
-        self.assertNotIn("instanc", " ".join(text for _keys, text in menu.HELP).lower())
+            self.assertIn("n nazwa sesji", text, name)
+            self.assertNotIn("etykiet", text.lower(), name)
+            self.assertNotIn("nazwa sesji:", text, name)       # nothing typed: the name is automatic, so no line
+        words = " ".join(text for _keys, text in menu.HELP).lower()
+        self.assertNotIn("instanc", words)
+        self.assertNotIn("etykiet", words)
+
+    def test_conversation_switch_is_loud_and_says_what_will_happen(self):
+        items, titles = sample()
+        view = menu.build_view(snapshot(items), titles)
+        draw = lambda ui, frame=menu.frame_pick: "\n".join(menu.render(frame(view, ui, 64, 25, menu.UNICODE), menu.Theme(False), 64))
+        new = draw(menu.Ui(screen="pick", kind="claude"))
+        old = draw(menu.Ui(screen="pick", kind="claude", resume=True))
+        self.assertIn("NOWY ✳ CLAUDE", new)
+        self.assertIn("[ NOWA ROZMOWA ]", new)
+        self.assertIn("wznów rozmowę", new)
+        self.assertIn("r przełącza", new)
+        self.assertIn("WZNÓW ✳ CLAUDE", old)
+        self.assertIn("[ WZNÓW ROZMOWĘ ]", old)
+        self.assertIn("nowa rozmowa", old)
+        self.assertIn("otworzy się lista rozmów", old)
+        self.assertNotIn("otworzy się lista rozmów", new)
+        # The active side is drawn in its own style, not only in brackets.
+        frame = menu.frame_pick(view, menu.Ui(screen="pick", kind="codex", resume=True), 64, 25, menu.UNICODE)
+        self.assertIn(("[ WZNÓW ROZMOWĘ ]", "on"), frame[1])
+        # A terminal has no conversation; a typed name is always shown.
+        shell = draw(menu.Ui(screen="pick", kind="terminal", instance="rev"))
+        self.assertNotIn("ROZMOW", shell)
+        self.assertIn("nazwa sesji: rev", shell)
+        repo = draw(menu.Ui(screen="repo", repo=ref("alpha"), resume=True), menu.frame_repo)
+        self.assertIn("[ WZNÓW ROZMOWĘ ]", repo)
 
     def test_repository_row_says_how_many_sessions_did_not_fit(self):
         now = time.time()
@@ -319,7 +347,7 @@ class TextTests(unittest.TestCase):
         self.assertIn("codex/główna · praca", label(workload("codex", "primary", "praca", State.RUNNING, created=1).record))
 
     def test_default_label_maps_both_ways_and_never_changes_identity(self):
-        self.assertEqual([label_pl("primary"), label_pl("rev"), label_pl("Primary")], ["główna", "rev", "Primary"])
+        self.assertEqual([name_pl("primary"), name_pl("rev"), name_pl("Primary")], ["główna", "rev", "Primary"])
         self.assertEqual([instance_of(x) for x in ("", "  ", "główna", "GŁÓWNA", " rev ", "primary", "glowna")],
                          ["primary", "primary", "primary", "primary", "rev", "primary", "glowna"])
         # The stored record and its key keep the ASCII name; only what is drawn changes.
@@ -525,23 +553,32 @@ class ControllerTests(unittest.TestCase):
         os.write(self.wr, b"rev\n")
         self.press(m, "c", "r", "n", "1")
         self.assertEqual(app.calls[0], ("start", "codex", ref("alpha").path, "rev", True))
-        self.assertEqual((m.ui.instance, m.ui.resume), ("primary", False))   # options do not leak into the next start
+        self.assertEqual((m.ui.instance, m.ui.resume), ("", False))   # options do not leak into the next start
 
     def test_invalid_instance_name_is_refused_in_polish(self):
         m, app = self.make()
         os.write(self.wr, "zła nazwa\n".encode())
         self.press(m, "l", "n")
-        self.assertEqual(m.ui.instance, "primary")
-        self.assertIn("Etykieta", m.ui.message)
+        self.assertEqual(m.ui.instance, "")
+        self.assertIn("Nazwa sesji", m.ui.message)
         self.assertNotIn("instanc", m.ui.message.lower())
         self.assertEqual(app.calls, [])
 
-    def test_label_prompt_and_the_default_label(self):
+    def test_name_prompt_and_the_default_name(self):
         for typed in ("\n", "główna\n", "Główna \n"):
             m, app = self.make()
             os.write(self.wr, typed.encode())
             self.press(m, "t", "n", "1")
             self.assertEqual(app.calls[0], ("start", "terminal", ref("alpha").path, "primary", False), typed)
+
+    def test_resume_toggle_reports_itself(self):
+        m, app = self.make()
+        self.press(m, "c", "r")
+        self.assertTrue(m.ui.resume)
+        self.assertIn("otworzy się lista rozmów", m.ui.message)
+        self.press(m, "r")
+        self.assertFalse(m.ui.resume)
+        self.assertEqual(m.ui.message, "Nowa rozmowa")
 
     def test_terminal_has_no_resume(self):
         m, app = self.make()
@@ -549,21 +586,67 @@ class ControllerTests(unittest.TestCase):
         self.assertFalse(m.ui.resume)
         self.assertIn("nic tu nie robi", m.ui.message)
 
-    def test_existing_instance_is_entered_not_restarted(self):
+    def test_new_session_next_to_a_running_one_gets_a_number(self):
         running = workload("claude", "primary", "alpha", State.RUNNING, created=1)
         m, app = self.make([running])
         self.press(m, "l", "1")
-        self.assertEqual(app.calls, [("attach", running.record.id, "normal")])
+        started = app.workloads[-1].record
+        self.assertEqual(app.calls, [("start", "claude", ref("alpha").path, "2", False), ("attach", started.id, "normal")])
+        self.press(m, "l", "1")
+        self.assertEqual(app.calls[2], ("start", "claude", ref("alpha").path, "3", False))
+        # Another type or another repository still gets the default name.
+        self.press(m, "c", "1")
+        self.assertEqual(app.calls[4][:4], ("start", "codex", ref("alpha").path, "primary"))
+        self.press(m, "l", "2")
+        self.assertEqual(app.calls[6][:4], ("start", "claude", ref("beta").path, "primary"))
 
-    def test_finished_instance_is_replaced_only_after_q(self):
+    def test_resume_resumes_even_where_the_agent_already_runs(self):
+        # Reported by the owner: with Codex running in the repository, "wznów" only entered the running session.
+        taken = [workload("codex", name, "praca", State.RUNNING, created=n) for n, name in enumerate(("primary", "test", "wznow"), 1)]
+        m, app = self.make(taken)
+        self.press(m, "c", "r", "3")
+        started = app.workloads[-1].record
+        self.assertEqual(app.calls, [("start", "codex", ref("praca").path, "2", True), ("attach", started.id, "normal")])
+        self.assertEqual((m.ui.instance, m.ui.resume), ("", False))
+        # The same from the repository view.
+        m, app = self.make(taken)
+        m.open_repo(ref("praca"))
+        self.press(m, "r", "c")
+        self.assertEqual(app.calls[0], ("start", "codex", ref("praca").path, "2", True))
+
+    def test_automatic_name_never_reuses_or_replaces_another_session(self):
         dead = workload("claude", "primary", "alpha", State.EXITED, created=1, status=1)
+        gap = workload("claude", "3", "alpha", State.RUNNING, created=2)
+        m, app = self.make([dead, gap])
+        self.press(m, "l", "1")                      # no question and nothing stopped
+        self.assertEqual(app.calls[0][:4], ("start", "claude", ref("alpha").path, "2"))
+        self.press(m, "l", "1")
+        self.assertEqual(app.calls[2][:4], ("start", "claude", ref("alpha").path, "4"))
+        self.assertNotIn("stop", [call[0] for call in app.calls])
+        self.assertEqual(menu.free_name([], "claude", ref("alpha").path), "primary")
+
+    def test_typed_name_of_a_running_session_enters_it(self):
+        running = workload("claude", "rev", "alpha", State.RUNNING, created=1)
+        m, app = self.make([running])
+        os.write(self.wr, b"rev\n")
+        self.press(m, "l", "r", "n", "1")
+        self.assertEqual(app.calls, [("attach", running.record.id, "normal")])
+        self.assertEqual((m.ui.instance, m.ui.resume), ("", False))
+
+    def test_typed_name_of_a_finished_session_replaces_it_only_after_q(self):
+        dead = workload("claude", "rev", "alpha", State.EXITED, created=1, status=1)
         m, app = self.make([dead])
+        os.write(self.wr, b"rev\n")
+        self.press(m, "l", "n")
         self.later(b"n")
-        self.press(m, "l", "1")
+        self.press(m, "1")
         self.assertEqual(app.calls, [])
+        os.write(self.wr, b"rev\n")
+        self.press(m, "l", "n")
         self.later(b"q")
-        self.press(m, "l", "1")
+        self.press(m, "1")
         self.assertEqual([call[0] for call in app.calls], ["stop", "start", "attach"])
+        self.assertEqual(app.calls[1][:4], ("start", "claude", ref("alpha").path, "rev"))
 
     def test_failed_start_is_reported_in_polish(self):
         m, app = self.make()
@@ -695,39 +778,51 @@ class DashboardRuntimeTests(unittest.TestCase):
         client.read_until("posprzątane".encode(), 10)
         self.assertFalse(self.app.runtime_snapshot().workloads)
 
-    def test_label_is_asked_in_polish_and_the_default_stays_primary(self):
+    def test_session_names_in_a_real_runtime(self):
         from contextlib import redirect_stdout
         from hubi6.cli import main
+        show = lambda *args: self.app.tmux.command(*args).stdout
+        detach = lambda: (client.send(b"\x02d"), client.read_until("AGENCI I TERMINALE".encode()))
         client = self.menu()
+        # A typed name.
         self.press(client, b"t", "Wybierz repozytorium")
-        self.assertIn("etykieta: główna", plain(client.output))
-        self.press(client, b"n", "Etykieta [główna]:")
+        self.assertNotIn("nazwa sesji:", plain(client.output))
+        self.press(client, b"n", "Nazwa sesji [automatyczna]:")
         client.output = b""
         client.send(b"drugi\n")
         client.read_until("Wybierz repozytorium".encode())
-        self.assertIn("etykieta: drugi", plain(client.output))
+        self.assertIn("nazwa sesji: drugi", plain(client.output))
         time.sleep(.12)
         client.send(b"1")
         named = self.only().record
         self.attached(named.id)
         self.assertEqual(named.instance, "drugi")
-        client.send(b"\x02d")
-        client.read_until("AGENCI I TERMINALE".encode())
-        # The default label is display only: identity, record and JSON keep "primary".
-        default = self.app.start("terminal", str(self.path))
-        self.assertEqual(default.instance, "primary")
-        show = lambda *args: self.app.tmux.command(*args).stdout
+        detach()
+        # Automatic names: the default one first, then numbers; nothing is entered or replaced.
+        for expected in ("primary", "2"):
+            before = {w.record.id for w in self.app.runtime_snapshot().workloads}
+            self.press(client, b"t", "Wybierz repozytorium")
+            client.output = b""
+            time.sleep(.12)
+            client.send(b"1")
+            fresh = wait_for(lambda: [w for w in self.app.runtime_snapshot().workloads if w.record.id not in before])[0].record
+            self.attached(fresh.id)
+            self.assertEqual(fresh.instance, expected)
+            detach()
+        self.assertEqual(sorted(w.record.instance for w in self.app.runtime_snapshot().workloads), ["2", "drugi", "primary"])
+        # The default name is display only: identity, record and JSON keep "primary".
+        default = next(w.record for w in self.app.runtime_snapshot().workloads if w.record.instance == "primary")
         self.assertEqual(show("show-options", "-v", "-t", default.pane, "@hubi6-label").strip(), "$ terminal/główna · only")
         out = io.StringIO()
         with redirect_stdout(out):
             main(["--config", str(self.config), "list"])
-        self.assertIn("terminal/główna", out.getvalue())
-        self.assertIn("terminal/drugi", out.getvalue())
+        for expected in ("terminal/główna", "terminal/drugi", "terminal/2"):
+            self.assertIn(expected, out.getvalue())
         self.assertNotIn("terminal/primary", out.getvalue())
+        # The command line keeps "start if needed": the Polish default name addresses the running session.
         with redirect_stdout(io.StringIO()):
             main(["--config", str(self.config), "start", "terminal", str(self.path), "--instance", "główna", "--json"])
-        self.assertEqual(sorted(w.record.instance for w in self.app.runtime_snapshot().workloads), ["drugi", "primary"])
-        client.read_until("terminal/główna".encode(), 10)   # the live list picks the new session up by itself
+        self.assertEqual(len(self.app.runtime_snapshot().workloads), 3)
 
     def test_session_ended_after_switching_inside_tmux_is_tidied_too(self):
         first = self.app.start("terminal", str(self.path), "first")

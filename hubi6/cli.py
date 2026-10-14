@@ -10,7 +10,7 @@ import traceback
 from . import __version__
 from .config import Config
 from .core.model import HubiError, State, display
-from .i18n import DEFAULT_LABEL, HEALTH_PL, RUNTIME_PL, STATE_PL, instance_of, label_pl, pl
+from .i18n import DEFAULT_NAME, HEALTH_PL, RUNTIME_PL, STATE_PL, instance_of, name_pl, pl
 
 
 class PolishHelp(argparse.HelpFormatter):
@@ -42,14 +42,14 @@ def parser():
     c = sub.add_parser("start", help="uruchom sesję w tle i wypisz jej ID")
     c.add_argument("type", choices=("codex", "claude", "terminal"), help="rodzaj sesji")
     c.add_argument("repo", help="nazwa albo ścieżka repozytorium")
-    c.add_argument("--instance", default="primary", metavar="ETYKIETA", help=f"etykieta sesji (domyślnie: {DEFAULT_LABEL})")
+    c.add_argument("--instance", default="primary", metavar="NAZWA", help=f"nazwa sesji (domyślnie: {DEFAULT_NAME})")
     c.add_argument("--resume", action="store_true", help="wznów rozmowę")
     c.add_argument("--json", action="store_true", help=as_json)
     for name in ("codex", "claude", "terminal"):
         c = sub.add_parser(name, help=f"uruchom {name} w repozytorium (jeśli trzeba) i wejdź")
         c.add_argument("repo", help="nazwa albo ścieżka repozytorium")
-        c.add_argument("instance", nargs="?", default="primary", metavar="ETYKIETA",
-                       help=f"etykieta sesji (domyślnie: {DEFAULT_LABEL})")
+        c.add_argument("instance", nargs="?", default="primary", metavar="NAZWA",
+                       help=f"nazwa sesji (domyślnie: {DEFAULT_NAME})")
         if name != "terminal":
             c.add_argument("--resume", action="store_true", help="wznów rozmowę")
         c.add_argument("--mode", choices=("normal", "view", "shared", "takeover"), default="normal", help="tryb wejścia")
@@ -121,7 +121,7 @@ def execute(args):
         else:
             print("Runtime: "+RUNTIME_PL.get(s.runtime_health, s.runtime_health))
             for w in s.workloads:
-                print(f"{w.record.id}  {w.record.kind}/{label_pl(w.record.instance)}  {STATE_PL[w.state]}  repo:{HEALTH_PL[w.repo_health]}  "
+                print(f"{w.record.id}  {w.record.kind}/{name_pl(w.record.instance)}  {STATE_PL[w.state]}  repo:{HEALTH_PL[w.repo_health]}  "
                       f"klienci:{w.session.attached if w.session else 0}  {display(w.record.repo.path)}")
             for issue in s.issues:
                 print(pl(display(issue)), file=sys.stderr)
