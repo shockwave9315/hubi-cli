@@ -1,0 +1,65 @@
+Smoke with real agents on the owner's account, 2026-10-14 00:06-00:19 UTC (host clock)
+Installed build under test: b1d3b77fcc5a7d48eccb4234abad8206f8ec5027 (feat/hubi-v6-menu-pl)
+Claude Code 2.1.296, codex-cli 0.162.1, tmux client 65x26 in a separate driver terminal.
+Only sessions the owner opened for testing were used; prompts were "test, answer ok" and "run sleep 40".
+
+== 1. Owner's real SSH login (not driven by the test)
+sshd-session: dev@pts/3 (23:45:36) -> -bash (login shell) -> menu from the ~/.profile block -> sessions -> q
+Shell after q:           HUBI_NOAUTO=1, SSH_TTY=/dev/pts/3
+Workload environments:   PATH=/home/dev/ai-harness/bin:/home/dev/.local/bin:/home/dev/.local/node-v22.23.2/bin:...
+In terminal/primary:     node -v -> v22.23.2 ; command -v jc-impl later -> /home/dev/ai-harness/bin/jc-impl, /home/dev/bin/later
+
+== 2. Pane titles recorded every 30 ms while each agent worked
+Claude Code:
+  0.00s  x206  U+2733  '✳ Test odpowiedzi jednym słowem'      (waiting)
+  0.04s  x154  U+25D0  '◐ Test odpowiedzi jednym słowem'      (working; static, not animated)
+Codex:
+  0.00s  U+283C  '⠼ ⠼ | praca'            (ten braille frames, no topic yet)
+  1.87s  U+2838  '⠸ Potwierdź | praca'    (ten braille frames with the topic)
+  3.07s  U+0050  'Potwierdź | praca'      (waiting)
+Menu b1d3b77 while Claude worked:  "1  ✳  claude/primary  hubi-cli  czeka"   <- BUG: only braille counted as working
+Menu b1d3b77 while Codex worked:   "2  >_ codex/primary   praca     pracuje ⠸" then "czeka"
+
+== 3. Codex with its default shared server (argv ["codex"])
+Scope of the first Codex session (praca) after /exit in it; pane dead, status 0:
+  3560964 ppid=116  codex app-server --listen unix:// --analytics-default-enabled ... --managed-daemon
+  3561010 ppid=116  codex app-server daemon pid-update-loop
+  (116 = systemd --user; sockets ~/.codex/app-server-daemon/daemon-updater.sock, /tmp/codex-daemon-1000/<hash>)
+hubi list:  00aca8118c03433a9fd3-4a673e37f5ca450b  codex/primary  osierocony  repo:OK  klienci:0  /home/dev/repos/praca
+hubi inspect: "state": "ORPHANED", "exit_status": 0
+Second Codex session started afterwards (localthings), its own scope:
+  3574589 node /home/dev/.npm-global/bin/codex
+  3574628 <vendor>/bin/codex
+  and in the FIRST session's scope:  3574799 ppid=3560964 dart mcp-server --force-roots-fallback
+"sleep 40" requested in the second session:
+  sleep pid=3575289  ppid=3560964 (the shared server)
+  cgroup: hubi6-46726ee1f0db9d92a2c9-codex-00aca8118c03433a9fd3-4a673e37f5ca450b.scope   <- the first session's scope
+Removing the first (orphaned) session from the menu (d, 2, q) while that sleep ran; second session's pane:
+  • Failed (exit 130) sleep 40
+  ◦ Reconnecting to server… (47s)
+  ■ Server connection could not be restored
+  • Reconnect failed — check the endpoint, then relaunch (2m 30s)
+
+== 4. Codex with --no-daemon ([agents] codex = ["codex", "--no-daemon"], same installed build)
+codex --no-daemon resume --help -> accepted (rc 0)
+Two sessions, each scope holds its own processes; no app-server process exists:
+  codex-2f5081e1b91765bb5ec1-bedcce1750f041f3.scope: node codex --no-daemon ; <vendor>/bin/codex --no-daemon ; dart mcp-server ; dart_mcp_server
+  codex-406eafac9b02a81c6115-93d002e398244078.scope: node codex --no-daemon ; <vendor>/bin/codex --no-daemon ; dart mcp-server
+"sleep 40" requested in the second session:
+  sleep pid=3578197 ppid=3577412  cgroup=codex-406eafac9b02a81c6115-93d002e398244078.scope   <- its own scope
+Stopping the first session (d, 3, q): "codex/primary: zatrzymano"; sleep still alive; second session answered
+  • ok   Worked for 46s
+Menu row of the second session: "pracuje ⠙ ... ⠼" for 46 s, then "czeka".
+/exit in the second session: back in the menu, "codex/primary: koniec pracy, posprzątane", no codex scope left.
+
+== 5. Leaving sessions (installed build b1d3b77)
+terminal: exit        -> menu after 222 ms, session removed
+terminal: exit 3      -> detail screen "błąd (kod 3)", v shows the output, d + q removes it
+claude:   /exit       -> menu, "claude/primary: koniec pracy, posprzątane"
+claude:   Esc on the resume picker -> exit status 1 -> detail screen "błąd (kod 1)" (kept, by design)
+New terminal from the menu (t, 6): started and attached in 491 ms; new Codex (c, 6): 428 ms.
+Status bar inside sessions: " ✳ claude/primary · hubi-cli    ^b d menu | 00:10", Ctrl-b ) ( L switch between sessions.
+
+== 6. Emulated login (SSH_TTY set, bash -l), menu started by the ~/.profile block
+Footer: "q shell  x rozłącz". Ctrl-Z twice: process state stays S+, ? and 0 still answer.
+x: the login shell ends ("login shell zakonczony rc=0"), which closes a real SSH session.

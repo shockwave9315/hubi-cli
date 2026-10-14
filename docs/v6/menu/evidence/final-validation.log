@@ -1,7 +1,7 @@
-HEAD 0e30afdebbfe735179fb5d3deb26c488dade46e0
-REVISION 0e30afdebbfe735179fb5d3deb26c488dade46e0
-started 2026-10-13T21:44:35Z
-Running as unit: hubi6-test-driver.service; invocation ID: d37032d3284c4b63aa0b1b1c1933e6a8
+HEAD 21a186a53e5adb585a8f0dffdeaf76d5fde70bae
+REVISION 21a186a53e5adb585a8f0dffdeaf76d5fde70bae
+run 2 of 2 (see REPORT.md section 8), finished 2026-10-14T00:33:46Z
+Running as unit: hubi6-test-driver.service; invocation ID: e602380bcdae4b6dbcf20aefd9d88413
 test_auth_error_redaction_timeout_and_path (test_clone_runtime.CloneRuntimeTests.test_auth_error_redaction_timeout_and_path) ... ok
 test_clone_term_sigkill_and_staging_recovery (test_clone_runtime.CloneRuntimeTests.test_clone_term_sigkill_and_staging_recovery) ... ok
 test_private_clone_real_git_and_service (test_clone_runtime.CloneRuntimeTests.test_private_clone_real_git_and_service) ... ok
@@ -68,7 +68,7 @@ ok
 test_uninstall_preserves_changed_unit_and_can_retry (test_install.InstallTests.test_uninstall_preserves_changed_unit_and_can_retry) ... ok
 test_uninstall_resumes_after_partial_failure_and_is_idempotent (test_install.InstallTests.test_uninstall_resumes_after_partial_failure_and_is_idempotent) ... Resumable uninstall: partial cache-permission failure, retry with absent unit, repeated uninstall, exact v5 fallback once: PASS
 ok
-test_owner_signals_sockets_and_cgroups_denied (test_isolation.IsolationTests.test_owner_signals_sockets_and_cgroups_denied) ... Isolation: 23 owner PIDs deny signals; sockets/cgroup writes denied
+test_owner_signals_sockets_and_cgroups_denied (test_isolation.IsolationTests.test_owner_signals_sockets_and_cgroups_denied) ... Isolation: 18 owner PIDs deny signals; sockets/cgroup writes denied
 ok
 test_any_other_key_cancels_a_pending_stop (test_menu.ControllerTests.test_any_other_key_cancels_a_pending_stop) ... ok
 test_attached_session_asks_how_to_join (test_menu.ControllerTests.test_attached_session_asks_how_to_join) ... ok
@@ -81,6 +81,7 @@ test_failed_start_is_reported_in_polish (test_menu.ControllerTests.test_failed_s
 test_finished_instance_is_replaced_only_after_q (test_menu.ControllerTests.test_finished_instance_is_replaced_only_after_q) ... ok
 test_github_open_local_and_clone_needs_typed_tak (test_menu.ControllerTests.test_github_open_local_and_clone_needs_typed_tak) ... ok
 test_invalid_instance_name_is_refused_in_polish (test_menu.ControllerTests.test_invalid_instance_name_is_refused_in_polish) ... ok
+test_label_prompt_and_the_default_label (test_menu.ControllerTests.test_label_prompt_and_the_default_label) ... ok
 test_named_instance_and_resume (test_menu.ControllerTests.test_named_instance_and_resume) ... ok
 test_new_agent_is_two_keys_and_attaches (test_menu.ControllerTests.test_new_agent_is_two_keys_and_attaches) ... ok
 test_repository_view_and_details (test_menu.ControllerTests.test_repository_view_and_details) ... ok
@@ -89,6 +90,7 @@ test_terminal_has_no_resume (test_menu.ControllerTests.test_terminal_has_no_resu
 test_dashboard_fault_falls_back_to_the_line_menu (test_menu.DashboardRuntimeTests.test_dashboard_fault_falls_back_to_the_line_menu) ... ok
 test_exit_codes_and_terminal_restoration (test_menu.DashboardRuntimeTests.test_exit_codes_and_terminal_restoration) ... ok
 test_failed_exit_is_kept_and_reported (test_menu.DashboardRuntimeTests.test_failed_exit_is_kept_and_reported) ... ok
+test_label_is_asked_in_polish_and_the_default_stays_primary (test_menu.DashboardRuntimeTests.test_label_is_asked_in_polish_and_the_default_stays_primary) ... ok
 test_one_command_opens_and_tidies (test_menu.DashboardRuntimeTests.test_one_command_opens_and_tidies) ... ok
 test_session_ended_after_switching_inside_tmux_is_tidied_too (test_menu.DashboardRuntimeTests.test_session_ended_after_switching_inside_tmux_is_tidied_too) ... ok
 test_session_presentation_and_guards_in_tmux (test_menu.DashboardRuntimeTests.test_session_presentation_and_guards_in_tmux) ... ok
@@ -107,6 +109,7 @@ test_unused_keys_are_ignored_not_bursts (test_menu.KeyTests.test_unused_keys_are
 test_menu_terminal_mode_cannot_be_suspended (test_menu.LifecycleUnitTests.test_menu_terminal_mode_cannot_be_suspended) ... ok
 test_only_a_clean_unattached_exit_is_reaped (test_menu.LifecycleUnitTests.test_only_a_clean_unattached_exit_is_reaped) ... ok
 test_colour_can_be_disabled (test_menu.RenderTests.test_colour_can_be_disabled) ... ok
+test_default_instance_is_shown_as_a_polish_label_everywhere (test_menu.RenderTests.test_default_instance_is_shown_as_a_polish_label_everywhere) ... ok
 test_describe (test_menu.RenderTests.test_describe) ... ok
 test_footer_survives_a_short_terminal (test_menu.RenderTests.test_footer_survives_a_short_terminal) ... ok
 test_hostile_text_cannot_inject_terminal_controls (test_menu.RenderTests.test_hostile_text_cannot_inject_terminal_controls) ... ok
@@ -114,8 +117,11 @@ test_message_wraps_instead_of_being_cut (test_menu.RenderTests.test_message_wrap
 test_no_frame_wraps_or_overflows_at_any_size (test_menu.RenderTests.test_no_frame_wraps_or_overflows_at_any_size) ... ok
 test_numbering_follows_creation_order (test_menu.RenderTests.test_numbering_follows_creation_order) ... ok
 test_phone_sized_main_screen_content (test_menu.RenderTests.test_phone_sized_main_screen_content) ... ok
+test_repository_row_says_how_many_sessions_did_not_fit (test_menu.RenderTests.test_repository_row_says_how_many_sessions_did_not_fit) ... ok
 test_screen_sends_only_changed_lines (test_menu.RenderTests.test_screen_sends_only_changed_lines) ... ok
+test_working_is_read_from_real_agent_titles (test_menu.RenderTests.test_working_is_read_from_real_agent_titles) ... ok
 test_age_and_plural (test_menu.TextTests.test_age_and_plural) ... ok
+test_default_label_maps_both_ways_and_never_changes_identity (test_menu.TextTests.test_default_label_maps_both_ways_and_never_changes_identity) ... ok
 test_every_error_has_polish_wording (test_menu.TextTests.test_every_error_has_polish_wording) ... ok
 test_status_label_is_inert (test_menu.TextTests.test_status_label_is_inert) ... ok
 test_template_fields_are_preserved (test_menu.TextTests.test_template_fields_are_preserved) ... ok
@@ -162,58 +168,58 @@ test_tui_signals_eof_and_terminal_restoration (test_runtime.RuntimeTests.test_tu
 test_types_unified_view_and_cli_json_F14 (test_runtime.RuntimeTests.test_types_unified_view_and_cli_json_F14) ... ok
 
 ----------------------------------------------------------------------
-Ran 153 tests in 229.955s
+Ran 159 tests in 192.705s
 
 OK
 Finished with result: success
 Main processes terminated with: code=exited, status=0/SUCCESS
-Service runtime: 3min 50.065s
-CPU time consumed: 1min 8.411s
-Memory peak: 87.1M (swap: 0B)
-Running as unit: hubi6-mutations.service; invocation ID: 21e26eabd73c4af4bf0d81ca2e6ac96a
+Service runtime: 3min 12.816s
+CPU time consumed: 1min 1.370s
+Memory peak: 87.5M (swap: 0B)
+Running as unit: hubi6-mutations.service; invocation ID: 51e4df428bce4ce2adaa1d35c88fda63
 line-quarantine: mutant detected by tests_v6.test_polish.PolishPtyTests.test_line_quarantine_blocks_split_burst_without_confirmation
 optional-git-locks: mutant detected by tests_v6.test_fixset.FixsetRuntimeTests.test_git_read_status_write_deterministic_F8
 Finished with result: success
 Main processes terminated with: code=exited, status=0/SUCCESS
-Service runtime: 627ms
-CPU time consumed: 335ms
-Memory peak: 38.9M (swap: 0B)
-Running as unit: hubi6-benchmark.service; invocation ID: 3b6735e6222642e9a83e0441796209be
+Service runtime: 631ms
+CPU time consumed: 336ms
+Memory peak: 39.5M (swap: 0B)
+Running as unit: hubi6-benchmark.service; invocation ID: d06da377a79045868160d284451ada96
 {
   "baseline_head": null,
   "snapshots_before": [],
   "snapshots": [
     {
-      "median_ms": 10.845322161912918,
-      "p95_ms": 11.976828798651695,
+      "median_ms": 11.273431591689587,
+      "p95_ms": 11.853410862386227,
       "subprocesses": 2,
       "repos": 7,
       "workloads": 0
     },
     {
-      "median_ms": 28.04326545447111,
-      "p95_ms": 29.75272946059704,
+      "median_ms": 28.46857998520136,
+      "p95_ms": 30.669049359858036,
       "subprocesses": 2,
       "repos": 7,
       "workloads": 6
     },
     {
-      "median_ms": 54.50665391981602,
-      "p95_ms": 57.11975786834955,
+      "median_ms": 54.73372433334589,
+      "p95_ms": 58.01187362521887,
       "subprocesses": 2,
       "repos": 200,
       "workloads": 6
     },
     {
-      "median_ms": 146.81642409414053,
-      "p95_ms": 152.26651076227427,
+      "median_ms": 144.22600343823433,
+      "p95_ms": 150.54450184106827,
       "subprocesses": 2,
       "repos": 1000,
       "workloads": 0
     },
     {
-      "median_ms": 278.7893293425441,
-      "p95_ms": 292.96113923192024,
+      "median_ms": 277.9319863766432,
+      "p95_ms": 285.1390643045306,
       "subprocesses": 2,
       "repos": 1000,
       "workloads": 50
@@ -221,16 +227,16 @@ Running as unit: hubi6-benchmark.service; invocation ID: 3b6735e6222642e9a83e044
   ],
   "runtime_snapshots": [
     {
-      "median_ms": 26.26565471291542,
-      "p95_ms": 26.94366592913866,
+      "median_ms": 26.238064281642437,
+      "p95_ms": 26.60052292048931,
       "subprocesses": 2,
       "repos": 0,
       "workloads": 6,
       "repo_root_entries": 7
     },
     {
-      "median_ms": 139.95934184640646,
-      "p95_ms": 145.8945432677865,
+      "median_ms": 140.398602001369,
+      "p95_ms": 142.78093725442886,
       "subprocesses": 2,
       "repos": 0,
       "workloads": 50,
@@ -242,9 +248,9 @@ Running as unit: hubi6-benchmark.service; invocation ID: 3b6735e6222642e9a83e044
       "repos": 7,
       "workloads": 6,
       "median_ms": {
-        "inspect": 29.94032483547926,
-        "attach": 191.28907471895218,
-        "stop": 140.77677857130766
+        "inspect": 29.015920124948025,
+        "attach": 190.51809143275023,
+        "stop": 140.85077587515116
       },
       "subprocesses": {
         "inspect": [
@@ -262,9 +268,9 @@ Running as unit: hubi6-benchmark.service; invocation ID: 3b6735e6222642e9a83e044
       "repos": 7,
       "workloads": 50,
       "median_ms": {
-        "inspect": 141.41891431063414,
-        "attach": 788.1557159125805,
-        "stop": 370.85087038576603
+        "inspect": 142.9013004526496,
+        "attach": 793.4101289138198,
+        "stop": 373.98936972022057
       },
       "subprocesses": {
         "inspect": [
@@ -282,9 +288,9 @@ Running as unit: hubi6-benchmark.service; invocation ID: 3b6735e6222642e9a83e044
       "repos": 1000,
       "workloads": 50,
       "median_ms": {
-        "inspect": 144.05198395252228,
-        "attach": 788.9405330643058,
-        "stop": 370.0128635391593
+        "inspect": 143.88555567711592,
+        "attach": 792.3914892598987,
+        "stop": 373.13822004944086
       },
       "subprocesses": {
         "inspect": [
@@ -304,47 +310,47 @@ Running as unit: hubi6-benchmark.service; invocation ID: 3b6735e6222642e9a83e044
       "repos": 7,
       "workloads": 9,
       "enter_next_prompt": {
-        "p50_ms": 37.63907076790929,
-        "p90_ms": 38.33747003227472,
+        "p50_ms": 37.1939348988235,
+        "p90_ms": 38.20561710745096,
         "samples_ms": [
-          37.07032185047865,
-          37.673113867640495,
-          37.54339553415775,
-          37.66449727118015,
-          36.86791658401489,
-          37.48886287212372,
-          38.33747003227472,
-          37.613644264638424,
-          35.85027065128088,
-          37.790930829942226,
-          37.93601971119642,
-          37.80925553292036,
-          40.07724113762379,
-          37.21821401268244,
-          38.93474210053682,
-          37.2133357450366,
-          38.307080045342445,
-          37.92585153132677,
-          36.831069737672806,
-          36.649877205491066
+          36.92672587931156,
+          38.369568064808846,
+          37.917754612863064,
+          37.17862069606781,
+          36.91213019192219,
+          36.35457996279001,
+          38.14515471458435,
+          36.69211268424988,
+          37.91876696050167,
+          38.20561710745096,
+          38.24795410037041,
+          36.72558441758156,
+          37.11658623069525,
+          37.68528625369072,
+          37.01191395521164,
+          37.20924910157919,
+          37.992813624441624,
+          36.46931238472462,
+          37.04033698886633,
+          37.31443174183369
         ]
       },
       "stop_confirmation": {
-        "p50_ms": 80.58359660208225,
-        "p90_ms": 81.05454128235579,
+        "p50_ms": 80.74658131226897,
+        "p90_ms": 81.01302664726973,
         "samples_ms": [
-          80.57123888283968,
-          81.11787680536509,
-          80.33232856541872,
-          80.99689427763224,
-          80.89642878621817,
-          80.38510661572218,
-          80.59595432132483,
-          81.05454128235579,
-          81.18497300893068,
-          80.370819196105,
-          80.44749405235052,
-          80.529292114079
+          80.99568169564009,
+          80.34470118582249,
+          81.16394095122814,
+          80.98004292696714,
+          80.21397050470114,
+          80.88799379765987,
+          80.5918388068676,
+          81.01302664726973,
+          81.2413739040494,
+          80.60516882687807,
+          80.37990517914295,
+          80.4777666926384
         ]
       },
       "raw_paste_burst_safe": true
@@ -353,9 +359,9 @@ Running as unit: hubi6-benchmark.service; invocation ID: 3b6735e6222642e9a83e044
 }
 Finished with result: success
 Main processes terminated with: code=exited, status=0/SUCCESS
-Service runtime: 1min 12.864s
-CPU time consumed: 21.367s
-Memory peak: 168M (swap: 0B)
+Service runtime: 1min 10.714s
+CPU time consumed: 21.158s
+Memory peak: 209M (swap: 0B)
 {"user": "hubi6test", "uid": 1001, "home": "/home/hubi6test"}
 Pre-cleanup workload scopes: none
 PRE-TEARDOWN: {"scopes": 0, "sessions": 0, "clients": 0, "clone_units": 0}
@@ -365,5 +371,3 @@ Removed '/run/systemd/system.control/user-1001.slice.d/50-TasksMax.conf'.
 Removed '/run/systemd/system.control/user-1001.slice.d'.
 userdel: hubi6test mail spool (/var/mail/hubi6test) not found
 CLEAN: uid 1001; no processes, home, runtime, linger or slice overrides
-final suite exit=0
-finished 2026-10-13T21:49:40Z

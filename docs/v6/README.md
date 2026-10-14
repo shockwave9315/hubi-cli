@@ -1,8 +1,10 @@
-# Hubi v6 — development/review build
+# Hubi v6 — technical reference
 
-Python 3.11+, standard library only. The unchanged executable `../../hubi` is
-v5. V6 is `python3 -m hubi6`, a separate package and runtime. This branch does
-not install anything on the owner account, disable v5 or perform a cutover.
+Python 3.11+, standard library only. V6 is the package `hubi6` with its own
+runtime; installed, it is the `hubi` command. Overview, installation and everyday
+use are in the [top-level README](../../README.md). The executable `../../hubi`
+is v5, kept unchanged as the rollback source. From a checkout, v6 runs as
+`python3 -m hubi6`:
 
 ```console
 python3 -m hubi6 --version
@@ -126,7 +128,8 @@ wording.
 Configuration: `$XDG_CONFIG_HOME/hubi6/config.toml` (default
 `~/.config/hubi6/config.toml`). See [example](../../config/hubi6.example.toml).
 `--config FILE` selects another TOML file. Agent entries are argv arrays, not
-shell commands. Defaults retain the v5 Codex/Claude flags. Terminal defaults
+shell commands. Defaults retain the v5 Claude flags; Codex adds `--no-daemon`
+(see Menu). Terminal defaults
 to the valid $SHELL/passwd interactive shell with normal rc files. Workloads
 get HUBI6_ACTIVE=1; terminals also get HUBI_NOAUTO=1 to suppress v5 autologin.
 `[ui]` accepts `refresh` (seconds), `color` and `icons` (false = ASCII only);

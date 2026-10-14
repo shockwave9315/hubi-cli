@@ -1,7 +1,8 @@
 # Hubi v6 — clean cutover and rollback runbook
 
-These are operator instructions for a **separately authorized future cutover**.
-They have not been run on the owner's account. No session import, live handover,
+These are operator instructions for a **separately authorized cutover**. The
+owner's account was cut over with them on 2026-10-13; they remain the procedure
+for another host, an upgrade and a rollback. No session import, live handover,
 or dual production runtime is supported. Run user commands as the target owner,
 not root. Destructive development validation belongs only in the disposable UID.
 Keep launchers and automation quiescent during install/uninstall; these operator
