@@ -23,12 +23,12 @@ Test na żywym runtime, w osobnym terminalu 65×26, bez dotykania sesji ownera.
 | 4 | Wejście do 80 ms po Enterze jest po cichu odrzucane; brak reakcji na nieznany klawisz, wielką literę, strzałkę | Pojedyncze klawisze bez kwarantanny między nimi; każda odrzucona seria i każdy nieznany klawisz mają komunikat |
 | 5 | `inspect` wypycha menu poza 25 wierszy, JSON ucięty | Ekran szczegółów mieszczący się w oknie; pełny JSON zostaje w `hubi inspect` |
 | 6 | Przy 65 kolumnach zawijają się nagłówek, lista i pasek akcji; brak nazw instancji | Kolumny przycinane do szerokości, nic się nie zawija od 24 kolumn |
-| 7 | Pasek tmux pokazuje `[hubi6-46…` zamiast repo i instancji | Opis `typ/etykieta · repo`, kolor paska zależny od typu |
+| 7 | Pasek tmux pokazuje `[hubi6-46…` zamiast repo i instancji | Opis `typ/nazwa · repo`, kolor paska zależny od typu |
 | 8 | `[x] exit SSH` przy ręcznym `hubi` tylko wraca do shella | `x` oferowane tylko pod autologinem (`HUBI_AUTOLOGIN`) |
 | 9 | Numery na liście przesuwają się po dodaniu sesji | Numeracja w kolejności utworzenia |
 | 10 | Odświeżenie GitHuba zamraża ekran bez komunikatu | Spinner; zapisana lista pokazywana od razu |
 | 11 | Większy klient przy tej samej sesji zostawia telefonowi wycinek okna | `window-size latest` |
-| 12 | Brak polecenia „wystartuj i wejdź” (v5 miało `hubi claude REPO`) | `hubi claude\|codex\|terminal REPO [ETYKIETA]`; start z menu wchodzi sam |
+| 12 | Brak polecenia „wystartuj i wejdź” (v5 miało `hubi claude REPO`) | `hubi claude\|codex\|terminal REPO [NAZWA]`; start z menu wchodzi sam |
 
 Pomiar wyjściowy na koncie ownera: start menu 69 ms, przejście między ekranami
 20 ms, attach 53 ms, powrót 23 ms. Sam rendering nie był problemem; czas
@@ -56,10 +56,15 @@ zabierały Enter po każdym klawiszu, gubione wciśnięcia i liczba kroków.
 - **Tytuły paneli** ustawia sam agent, więc czyta je osobne, pobłażliwe zapytanie
   (`Tmux.titles`). Nie trafiają do parsera inventory, weryfikacji własności ani
   wyznaczania stanu; cały tekst zewnętrzny przechodzi przez `display()`.
-- **Etykieta zamiast nazwy instancji** (decyzja ownera). Pytanie brzmi
-  `Etykieta [główna]:`, a domyślna instancja jest wszędzie pokazywana jako
-  `główna`. To wyłącznie warstwa wyświetlania: rekord, klucz, JSON i wiersz
-  poleceń zachowują `primary`, więc tożsamość sesji się nie zmienia.
+- **Nazwa sesji zamiast nazwy instancji** (decyzja ownera, sekcja 10). Domyślna
+  instancja jest wszędzie pokazywana jako `główna`. To wyłącznie warstwa
+  wyświetlania: rekord, klucz, JSON i wiersz poleceń zachowują `primary`, więc
+  tożsamość sesji się nie zmienia.
+- **`l` / `c` / `t` zawsze startują nową sesję** (decyzja ownera, sekcja 10).
+  Bez wpisanej nazwy sesja dostaje nazwę automatyczną: domyślną albo pierwszy
+  wolny numer. Start automatyczny nigdy nie wchodzi do innej sesji, niczego nie
+  zastępuje i o nic nie pyta. Wiersz poleceń zachowuje „uruchom w razie potrzeby
+  i wejdź”.
 - **Codex bez współdzielonego serwera.** Domyślne polecenie to
   `["codex", "--no-daemon"]`; uzasadnienie i pomiary w sekcji 9.
 - **Tłumaczenia przy wyświetlaniu.** Komunikaty wyjątków, logi i JSON zachowują
@@ -72,14 +77,14 @@ zabierały Enter po każdym klawiszu, gubione wciśnięcia i liczba kroków.
   malarz ekranu, kontroler.
 - `hubi6/i18n.py` (nowy): polskie brzmienie komunikatów, stanów i wieku.
 - `hubi6/tui.py`: tryb terminala menu bez suspend (znak i sygnał).
-- `hubi6/adapters/tmux.py`: etykieta i kolor paska, hak `pane-died` z warunkiem
+- `hubi6/adapters/tmux.py`: opis i kolor paska, hak `pane-died` z warunkiem
   `session_attached`, `window-size latest`, odpięcie `C-z`, `titles()`.
 - `hubi6/services.py`: `reap_clean_exit`, `open`.
 - `hubi6/cli.py`: wybór menu z zapasem, polecenia `claude|codex|terminal`,
   polska pomoc i komunikaty.
 - `hubi6/config.py`, `config/hubi6.example.toml`: sekcja `[ui]`; domyślne
   polecenie Codexa z `--no-daemon`.
-- `config/hubi6-tmux.conf`: pasek stanu, lista sesji z etykietami, `C-z`.
+- `config/hubi6-tmux.conf`: pasek stanu, lista sesji z opisami, `C-z`.
 - `config/hubi6-autologin.sh` (nowy), `docs/v6/README.md`, `docs/v6/CUTOVER.md`.
 - `README.md`: nowy, krótki opis v6 z instalacją (na prośbę ownera); dotychczasowy
   opis v5 przeniesiony bez zmian treści do `docs/v5/README.md`.
@@ -100,7 +105,7 @@ nie jest w żadnym trybie.
 Testy jednostkowe (dowolny UID): parser klawiszy, serie i wklejki, brak
 dławienia osobnych klawiszy, opróżnienie przed potwierdzeniem, ramki wszystkich
 ekranów dla szerokości 24–200 i wysokości 8–50, wrogi tekst w tytule, numeracja,
-malowanie tylko zmienionych wierszy, komplet tłumaczeń, etykieta paska, `[ui]`,
+malowanie tylko zmienionych wierszy, komplet tłumaczeń, opis paska, `[ui]`,
 warunki sprzątania, tryb terminala bez suspend. Kontroler menu na atrapach:
 wejście cyfrą, dołączenie do zajętej sesji, zatrzymanie tylko po `q`, nazwa
 instancji i wznowienie, zastąpienie zakończonej instancji, nieudany start,
@@ -140,27 +145,30 @@ Commity:
 2. `0e30afdebbfecc6a40e1826dd89a34fedcf393e7` — `test(v6): cover dashboard controller flows with fakes` (tylko testy).
 3. `b1d3b77fcc5a7d48eccb4234abad8206f8ec5027` — raport i dowody pierwszej walidacji.
 4. `21a186a53e5adb585a8f0dffdeaf76d5fde70bae` — `fix(v6): isolate Codex per session, read Claude activity, Polish labels`
-   (poprawki ze smoke na prawdziwych agentach, etykiety).
-5. Commit dokumentacji: nowe README, ten raport, dowody. Bez zmian w kodzie i testach.
+   (poprawki ze smoke na prawdziwych agentach).
+5. `27c70ba12be543bdf2d5f8f1b97a51fcd7bcf9fe` — nowe README, raport i dowody. Bez zmian w kodzie i testach.
+6. `4a506347880654f160bc718d4fc822d40b9c66cf` — `fix(v6): resume always resumes, automatic session names, visible switch`
+   (uwagi ownera po instalacji, sekcja 10).
+7. Commit raportu i dowodów. Bez zmian w kodzie i testach.
 
-Testowany czysty HEAD: `21a186a53e5adb585a8f0dffdeaf76d5fde70bae`, bundle z
-`dirty: false` (`evidence/build-source.json`). Wcześniejsza walidacja commitu 2
-(153/153) dotyczyła stanu sprzed poprawek z sekcji 9.
+Testowany czysty HEAD: `4a506347880654f160bc718d4fc822d40b9c66cf`, bundle z
+`dirty: false` (`evidence/build-source.json`). Wcześniejsze walidacje: commit 2
+(153/153) i commit 4 (159/159).
 
-- **Jednostkowe, UID ownera: 159 testów, 88 wykonanych, 71 pominiętych** (pominięte
+- **Jednostkowe, UID ownera: 164 testy, 93 wykonane, 71 pominiętych** (pominięte
   to testy runtime, które z założenia nie działają poza labem). `evidence/unit.log`.
-- **Pełny zestaw w labie: 159/159, bez pominięć; 100/100 przerwanych startów
+- **Pełny zestaw w labie: 164/164, bez pominięć; 100/100 przerwanych startów
   odzyskanych.**
 - **Oba mutanty wykryte:** kwarantanna linii oraz `GIT_OPTIONAL_LOCKS=0`.
 - **Benchmark bez regresji** względem poprzedniego przebiegu: snapshot 7 repo /
-  6 sesji 28,47 ms (było 28,04), 200/6 54,73 ms (54,51), 1000/50 277,93 ms
-  (278,79), nadal 2 podprocesy; attach 7 i stop 15 podprocesów jak poprzednio;
-  menu liniowe Enter do promptu p50 37,19 ms (37,64). `evidence/performance.json`.
+  6 sesji 28,60 ms (było 28,47), 200/6 55,50 ms (54,73), 1000/50 278,37 ms
+  (277,93), nadal 2 podprocesy; attach 7 i stop 15 podprocesów jak poprzednio;
+  menu liniowe Enter do promptu p50 37,65 ms (37,19). `evidence/performance.json`.
 - **Lab:** przed zamknięciem scopes/sessions/clients/clone units = 0; po
   zamknięciu użytkownik, HOME, runtime i linger usunięte.
   `evidence/final-validation.log`.
 
-Pełny zestaw uruchomiono na tym commicie dwa razy. Pierwszy przebieg dał
+Na commicie 4 pełny zestaw uruchomiono dwa razy. Pierwszy przebieg dał
 158/159: test izolacji (`test_owner_signals_sockets_and_cgroups_denied`) wymaga
 ponad 10 procesów ownera odmawiających sygnału, a po zatrzymaniu wszystkich
 sesji było ich dokładnie 10 („10 not greater than 10”). Niepowodzenie przerwało
@@ -168,6 +176,8 @@ etap mutantów i benchmarku. Drugi przebieg, z ośmioma bezczynnymi procesami
 `sleep` na koncie ownera jako dodatkowymi celami sondy, przeszedł w całości
 (18 procesów odmówiło sygnału). Samego testu nie zmieniano; jego próg jest
 kruchy na pustym koncie. `evidence/validation-run1-isolation-threshold.log`.
+Walidacja commitu 6 poszła od razu z takimi samymi dodatkowymi procesami
+(30 procesów odmówiło sygnału) i przeszła za pierwszym razem.
 
 Na koncie ownera przed instalacją: dwie sesje ownera nietknięte (0 klientów z
 tej pracy poza dwoma wejściami do `claude/rev` uzgodnionymi w teście, bez
@@ -239,13 +249,46 @@ Obserwacje bez zmian w kodzie:
 - Menu uruchomione z okrojonym PATH nie znajdzie agenta („Brak programu agenta:
   codex”). Pod autologinem na końcu `~/.profile` PATH jest pełny.
 
-## 10. Świadome ograniczenia
+## 10. Uwagi ownera po instalacji (2026-10-14)
+
+Owner używał zainstalowanego buildu (27c70ba) i zgłosił trzy rzeczy. Poprawki są
+w commicie 6.
+
+| # | Zgłoszenie | Poprawka |
+|---|---|---|
+| 18 | Z wybranym „wznów” i repo, w którym agent już działał, menu tylko wchodziło do działającej sesji. Lista rozmów pojawiała się dopiero po wpisaniu nowej nazwy | `l` / `c` / `t` zawsze startują nową sesję. Bez wpisanej nazwy dostaje ona nazwę domyślną albo pierwszy wolny numer (`codex/2`, `codex/3`), więc „wznów” zawsze otwiera listę rozmów |
+| 19 | Stan nowa/wznów był szarym słowem u góry; nie było widać, że coś się przełączyło ani czego dotyczy | Dwustronny przełącznik z wyróżnioną aktywną stroną, tytuł ekranu `NOWY` / `WZNÓW`, wiersz „Wybierz repo, otworzy się lista rozmów” i potwierdzenie przełączenia w wierszu komunikatów |
+| 20 | „Etykieta” dalej była niezrozumiała | Termin „nazwa sesji”; pytanie `Nazwa sesji [automatyczna]:`, wpisana nazwa jest pokazywana na ekranie wyboru |
+
+Przyczyna 18: `Menu.launch` szukał sesji o tej samej nazwie i przy działającej
+kończył na „już działa”, zanim w ogóle spojrzał na przełącznik. Owner wybrał
+wariant „zawsze nowa sesja obok” spośród trzech (nowa obok, wejście do
+działającej, pytanie za każdym razem).
+
+Zasady po zmianie:
+
+- Nazwa automatyczna (`menu.free_name`): domyślna, jeśli ten typ nie ma jeszcze
+  sesji w repo, inaczej pierwszy wolny numer od 2. Zajęta jest każda zapisana
+  sesja tego typu w repo, niezależnie od stanu, więc sesja zakończona błędem
+  zostaje do obejrzenia i nie jest zastępowana.
+- Tylko wpisana nazwa może wskazać istniejącą sesję: działająca jest otwierana,
+  zakończona jest zastępowana po `q`, jak wcześniej.
+- Do działającej sesji wchodzi się cyfrą z listy głównej albo z widoku repo.
+
+Testy: kontroler na atrapach (numeracja, przypadek ownera z trzema sesjami
+Codexa, luka w numeracji, brak zatrzymania i pytania, wpisana nazwa działającej
+i zakończonej sesji, potwierdzenie przełączenia), ramki (obie strony
+przełącznika, styl aktywnej strony, brak przełącznika dla terminala) oraz test
+runtime w labie (`główna`, potem `2`, wpisana nazwa, opis na pasku tmux,
+`hubi list`).
+
+## 11. Świadome ograniczenia
 
 - Menu liniowe zostaje po angielsku; to zapas, nie interfejs docelowy.
 - `tools/install_v6.py` nadal wypisuje komunikaty po angielsku.
 - Dwa klawisze dostarczone w jednym odczycie (zator na łączu) są odrzucane
   razem, z komunikatem. To cena ochrony przed wklejką bez bracketed paste.
-- `Ctrl-b s` nie potrafi ukryć nazwy sesji, więc etykieta jest czytelna dopiero
+- `Ctrl-b s` nie potrafi ukryć nazwy sesji, więc opis jest czytelny dopiero
   na szerokim ekranie. Na wąskim zostają `Ctrl-b )`, `(` i `L`.
 - Aktywność agenta jest odczytywana z tytułu panelu (glif spinnera na początku).
   Sprawdzone dla Claude Code 2.1.296 i Codex 0.162.1; agent, który nie ustawia
@@ -254,5 +297,5 @@ Obserwacje bez zmian w kodzie:
   w konfiguracji nie będzie `codex = ["codex"]`.
 - Lab nadal używa atrap agentów; prawdziwi agenci byli sprawdzani ręcznie na
   koncie ownera (sekcja 9), nie w zestawie automatycznym.
-- Sesje utworzone starym kodem nie mają etykiety ani haka do czasu ponownego
+- Sesje utworzone starym kodem nie mają opisu na pasku ani haka do czasu ponownego
   utworzenia.
