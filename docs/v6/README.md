@@ -55,14 +55,20 @@ One key is one action, without Enter:
 | `?` | help |
 | `q` / `x` | shell (98) / end the SSH session (99, only offered under autologin) |
 
-While choosing a repository, `n` names the instance and `r` switches between a
-new conversation and resume. `0`, Esc and Backspace go back; arrows or `j`/`k`
+While choosing a repository, `n` asks for a label (`Etykieta [główna]:`) and `r`
+switches between a new conversation and resume. The label is the workload's
+instance. Its stored, stable name stays ASCII and the default stays `primary` in
+records, JSON and the command line; people see the default as `główna`, and
+typing nothing or `główna` selects it. `0`, Esc and Backspace go back; arrows or `j`/`k`
 move a cursor and Enter activates it; Space turns pages. Keys are not case
 sensitive, and an unknown key is answered with a hint instead of silence.
 
-Each row shows the type icon, `type/instance`, repository, activity, attached
+Each row shows the type icon, `type/label`, repository, activity, attached
 clients and age. Activity comes from the pane title the agent sets itself: a
-leading spinner means "pracuje" and the rest of the title is shown underneath.
+leading spinner glyph means "pracuje" and the rest of the title is shown
+underneath. Codex animates a braille spinner; Claude Code shows `◐` while it
+works and `✳` while it waits, so only glyphs from spinner sets count
+(`menu.working`, recorded from Claude Code 2.1.296 and Codex 0.162.1).
 Titles are fetched by a separate, lenient tmux query (`Tmux.titles`) and never
 reach the inventory parser, ownership checks or state derivation. Sessions are
 numbered in creation order, so starting something never renumbers the others.
@@ -88,6 +94,18 @@ pane and its exit status are still retained. A clean exit (status 0, no signal,
 no clients) is then removed automatically by `App.reap_clean_exit`; nothing is
 signalled, because the scope is already gone. A failed exit stays EXITED and
 opens its detail screen, where `v` shows the output and `d` removes it.
+
+Codex is started with `--no-daemon` by default. Without it, Codex 0.162 starts a
+per-user background server (`codex app-server --managed-daemon`) from the first
+Codex session, which leaves it inside that workload's scope, and every other
+Codex session runs its tools there. Measured on the owner's host: a `sleep`
+requested in a second session ran in the first session's cgroup; after `/exit`
+the first session stayed ORPHANED because its scope never emptied; stopping it
+ended the second session's command and left that session at "Server connection
+could not be restored". With `--no-daemon` each session's processes stay in its
+own scope, so stop, clean-exit removal and the full-cgroup kill mean what they
+say. `[agents] codex = ["codex"]` restores the shared server for a Codex too old
+to know the flag.
 
 Ctrl-Z cannot suspend the menu: under SSH autologin the parent is a login shell
 still reading its startup files, which waits without job control, so a stopped
@@ -196,7 +214,7 @@ changes. Sourcing a hostile-to-lifetime user config cannot leave the runtime
 permanently down. This is protection from accidental self-destruction, not a
 sandbox against deliberate socket targeting or `systemd-run` by an agent.
 
-Inside a session the status bar names it (`type/instance · repository`) in a
+Inside a session the status bar names it (`type/label · repository`) in a
 colour per type; the generation hash is no longer the only label. `Ctrl-b d`
 returns to the menu, `Ctrl-b )` / `(` / `L` move between sessions without
 leaving tmux, and `Ctrl-b s` lists them with their labels. Windows follow the

@@ -19,7 +19,8 @@ import unicodedata
 
 from .core.model import HubiError, RepoHealth, State, actions, display
 from .github import GitHub
-from .i18n import HEALTH_PL, KIND_PL, RUNTIME_PL, STATE_PL, age, pl, plural
+from .i18n import DEFAULT_INSTANCE, DEFAULT_LABEL, HEALTH_PL, KIND_PL, RUNTIME_PL, STATE_PL, age, instance_of, label_pl, \
+    pl, plural
 from .tui import Input, terminal
 
 PAGE = 9
@@ -155,7 +156,7 @@ class Item:
 
     @property
     def name(self):
-        return f"{self.kind}/{self.instance}"
+        return f"{self.kind}/{label_pl(self.instance)}"
 
 
 @dataclass
@@ -185,7 +186,24 @@ def describe(kind, command, title, repo):
     head, sep, tail = text.rpartition(" | ")
     if sep and tail.strip() == repo:
         text = head.strip()
+    if len(text) == 1 and not text.isalnum():         # a bare spinner frame: no topic yet
+        return ""
     return "" if text.lower() in GENERIC_TITLES or text == repo else text
+
+
+def working(title):
+    """The glyph an agent puts in front of its title while it works, or ''.
+
+    Codex animates a braille spinner. Claude Code shows a half circle while it
+    works and an eight-spoked asterisk while it waits, so "any symbol" is not
+    enough: only glyphs from spinner sets count.
+    """
+    head = title[:1]
+    if not head or title[1:2] not in ("", " "):
+        return ""
+    code = ord(head)
+    spinning = 0x2801 <= code <= 0x28ff or 0x25d0 <= code <= 0x25d7 or 0x25dc <= code <= 0x25e1 or 0x25f0 <= code <= 0x25f7
+    return head if spinning else ""
 
 
 def branch_of(ref):
@@ -207,7 +225,7 @@ def build_view(snapshot, titles, now=None):
         repo = os.path.basename(r.repo.path)
         command, title = titles.get(r.session, ("", ""))
         live = w.state in (State.RUNNING, State.ATTACHED)
-        spinner = title[:1] if title and 0x2800 <= ord(title[0]) <= 0x28ff else ""
+        spinner = working(title)
         items.append(Item(r.id, r.kind, r.instance, repo, r.repo.path, w.state, w.repo_health,
                           session.attached if session else 0, r.created,
                           session.exit_status if session else None, session.exit_signal if session else "",
@@ -225,7 +243,7 @@ class Ui:
     screen: str = "main"
     verb: str = ""              # main: "" | "stop" | "info"
     kind: str = ""              # pick: workload type being created, "" = open repo
-    instance: str = "primary"
+    instance: str = DEFAULT_INSTANCE
     resume: bool = False
     page: int = 0
     cursor: int = -1
@@ -291,13 +309,16 @@ def repo_row(label, row, width, glyphs, *, selected=False, kind=""):
     tail = max(0, rest-name-branch-2)
     cells = lead+[(pad(row.name, name), "bold" if label else ""), " ", (pad(row.branch, branch), "muted"), " "]
     marks = [i for i in row.items if not kind or i.kind == kind]
-    used = 0
+    used = shown = 0
     for item in marks:
-        piece = f"{glyphs.icons[item.kind]} {item.instance}  "
+        piece = f"{glyphs.icons[item.kind]} {label_pl(item.instance)}  "
         if used+width_of(piece) > tail:
             break
         cells.append((piece, item.kind))
         used += width_of(piece)
+        shown += 1
+    if shown < len(marks) and used+len(f"+{len(marks)-shown}") <= tail:
+        cells.append((f"+{len(marks)-shown}", "muted"))   # never hide a session without saying so
     return cells
 
 
@@ -376,7 +397,7 @@ def frame_pick(view, ui, width, height, glyphs):
     top = [head(view, what, width, glyphs)]
     if ui.kind:
         talk = "" if ui.kind == "terminal" else f"   rozmowa: {'wznów' if ui.resume else 'nowa'}"
-        top.append([(" instancja: ", "muted"), (ui.instance, "bold"), (talk, "muted")])
+        top.append([(" etykieta: ", "muted"), (label_pl(ui.instance), "bold"), (talk, "muted")])
     top.append([(" Wybierz repozytorium:", "section")])
     pages = max(1, (len(view.repos)+PAGE-1)//PAGE)
     page = min(ui.page, pages-1)
@@ -386,7 +407,7 @@ def frame_pick(view, ui, width, height, glyphs):
         rows = [[("    Brak repozytoriów w katalogu roboczym. ", "muted"), ("g", "key"), (" = GitHub", "muted")]]
     hints = [("1-9", "start" if ui.kind else "otwórz")]
     if ui.kind:
-        hints.append(("n", "nazwa instancji"))
+        hints.append(("n", "etykieta"))
         if ui.kind != "terminal":
             hints.append(("r", "wznów rozmowę"))
     if pages > 1:
@@ -402,11 +423,11 @@ def frame_repo(view, ui, width, height, glyphs):
     top = [head(view, "REPO "+name, width, glyphs),
            [(" "+clip(display(ui.repo.path), width-2), "muted"), ("  "+(row.branch if row else ""), "ok")]]
     talk = f"   rozmowa: {'wznów' if ui.resume else 'nowa'}"
-    top.append([(" instancja: ", "muted"), (ui.instance, "bold"), (talk, "muted")])
+    top.append([(" etykieta: ", "muted"), (label_pl(ui.instance), "bold"), (talk, "muted")])
     items = row.items if row else []
     body = [[(" Sesje w tym repo:", "section")]] if items else []
     body += [workload_row(n, item, width, glyphs) for n, item in enumerate(items[:PAGE], 1)]
-    hints = [("l", "Claude"), ("c", "Codex"), ("t", "terminal"), ("n", "nazwa instancji"), ("r", "wznów rozmowę"),
+    hints = [("l", "Claude"), ("c", "Codex"), ("t", "terminal"), ("n", "etykieta"), ("r", "wznów rozmowę"),
              ("s", "status Gita"), ("0", "wróć")]
     if items:
         hints.insert(0, ("1-9", "wejdź"))
@@ -488,7 +509,7 @@ def frame_github(view, ui, width, height, glyphs, catalogue, repos):
 HELP = (
     ("1-9", "wejdź do sesji z listy, bez Entera"),
     ("l c t", "nowy Claude / Codex / terminal, potem numer repo"),
-    ("n r", "przy wyborze repo: nazwa instancji / wznów rozmowę"),
+    ("n r", "przy wyborze repo: etykieta / wznów rozmowę"),
     ("d", "zatrzymaj: numer sesji, potem q potwierdza"),
     ("i", "szczegóły: podgląd, dołączenie, przejęcie, naprawa"),
     ("r", "widok repozytorium i status Gita"),
@@ -777,7 +798,7 @@ class Menu:
         # session that was alive when we went in is checked, not only this one.
         done = [w for w in [self.app.reap_clean_exit(ident)]+[self.app.reap_clean_exit(i.id) for i in live] if w]
         if done:
-            names = ", ".join(f"{w.record.kind}/{w.record.instance}" for w in done)
+            names = ", ".join(f"{w.record.kind}/{label_pl(w.record.instance)}" for w in done)
             self.say(f"{names}: koniec pracy, posprzątane", "ok")
             if self.ui.screen == "detail" and any(w.record.id == ident for w in done):
                 self.ui.screen = "main"
@@ -825,13 +846,13 @@ class Menu:
 
     def launch(self, kind, ref):
         instance, resume = self.ui.instance, self.ui.resume and kind != "terminal"
-        label = f"{kind}/{instance}"
+        label = f"{kind}/{label_pl(instance)}"
         for item in self.view.items:
             if (item.kind, item.path, item.instance) != (kind, ref.path, instance):
                 continue
             if item.state in (State.RUNNING, State.ATTACHED):
                 self.say(f"{label} już działa", "ok")
-                self.ui.instance, self.ui.resume = "primary", False
+                self.ui.instance, self.ui.resume = DEFAULT_INSTANCE, False
                 return self.enter(item)
             if item.state == State.EXITED:
                 if not self.confirm(f"Poprzednia sesja {label} jest zakończona. Usunąć ją i uruchomić nową?"):
@@ -849,7 +870,7 @@ class Menu:
             if failed:
                 self.ui.screen, self.ui.selected = "detail", failed[0].id
             raise
-        self.ui.instance, self.ui.resume = "primary", False
+        self.ui.instance, self.ui.resume = DEFAULT_INSTANCE, False
         self.attach(record.id)
 
     def open_repo(self, ref):
@@ -879,13 +900,13 @@ class Menu:
     def back(self):
         ui = self.ui
         ui.screen = {"pick": "main", "repo": "main", "detail": "main", "github": "main", "help": "main"}.get(ui.screen, "main")
-        ui.verb, ui.page, ui.cursor, ui.instance, ui.resume = "", 0, -1, "primary", False
+        ui.verb, ui.page, ui.cursor, ui.instance, ui.resume = "", 0, -1, DEFAULT_INSTANCE, False
 
     def name_instance(self):
-        answer = self.ask_line("Nazwa instancji [primary] + Enter: ")
+        answer = self.ask_line(f"Etykieta [{DEFAULT_LABEL}]: ")
         if answer is None:
             return False
-        answer = answer or "primary"
+        answer = instance_of(answer)
         from .core.model import validate_instance
         validate_instance(answer)
         self.ui.instance = answer

@@ -82,7 +82,11 @@ class Config:
         # Reconfiguring repo root must not hide existing workloads. The runtime
         # is its UID, socket, service and journal; workspace paths belong to keys.
         rid = runtime_identity(home, socket, service, state)
-        defaults = {"codex": ["codex"], "claude": ["claude", "--permission-mode", "bypassPermissions"],
+        # Codex otherwise starts a per-user background server inside the scope of
+        # whichever Codex workload came first and runs every other Codex
+        # session's tools there: that scope never empties, and stopping it
+        # breaks the rest. --no-daemon keeps each session's processes in its own scope.
+        defaults = {"codex": ["codex", "--no-daemon"], "claude": ["claude", "--permission-mode", "bypassPermissions"],
                     "terminal": [interactive_shell(), "-i"]}
         for name, spec in data.get("agents", {}).items():
             if name not in defaults or not isinstance(spec, list) or not spec or not spec[0] or any(not isinstance(x, str) or "\0" in x for x in spec):

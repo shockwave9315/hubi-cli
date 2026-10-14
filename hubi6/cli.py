@@ -10,56 +10,65 @@ import traceback
 from . import __version__
 from .config import Config
 from .core.model import HubiError, State, display
-from .i18n import HEALTH_PL, RUNTIME_PL, STATE_PL, pl
+from .i18n import DEFAULT_LABEL, HEALTH_PL, RUNTIME_PL, STATE_PL, instance_of, label_pl, pl
 
 
 class PolishHelp(argparse.HelpFormatter):
     def add_usage(self, usage, actions, groups, prefix=None):
-        return super().add_usage(usage, actions, groups, "użycie: ")
+        # argparse passes prefix="" when it only wants the program name of a subcommand.
+        return super().add_usage(usage, actions, groups, "użycie: " if prefix is None else prefix)
+
+
+def polish(**kw):
+    """A parser whose usage line, section titles and -h text are Polish."""
+    p = argparse.ArgumentParser(formatter_class=PolishHelp, add_help=False, **kw)
+    p._positionals.title, p._optionals.title = "argumenty", "opcje"
+    p.add_argument("-h", "--help", action="help", help="pokaż tę pomoc")
+    return p
 
 
 def parser():
-    p = argparse.ArgumentParser(prog="hubi", formatter_class=PolishHelp, add_help=False,
-                                description="Hubi v6: agenci i terminale w systemd/tmux. Bez polecenia otwiera menu.")
-    p._positionals.title, p._optionals.title = "polecenia", "opcje"
-    p.add_argument("-h", "--help", action="help", help="pokaż tę pomoc")
+    p = polish(prog="hubi", description="Hubi v6: agenci i terminale w systemd/tmux. Bez polecenia otwiera menu.")
+    p._positionals.title = "polecenia"
     p.add_argument("--version", action="version", version="Hubi "+__version__, help="pokaż wersję")
     p.add_argument("--config", help="inny plik konfiguracji TOML")
     p.add_argument("--debug", action="store_true", help="pełne ślady błędów")
     p.add_argument("--classic", action="store_true", help="klasyczne menu liniowe (awaryjne)")
-    sub = p.add_subparsers(dest="command", parser_class=lambda **kw: argparse.ArgumentParser(formatter_class=PolishHelp, **kw))
+    sub = p.add_subparsers(dest="command", parser_class=polish)
+    as_json = "wynik w formacie JSON"
     for name, text in (("doctor", "diagnostyka środowiska"), ("list", "lista sesji")):
         c = sub.add_parser(name, help=text)
-        c.add_argument("--json", action="store_true")
+        c.add_argument("--json", action="store_true", help=as_json)
     c = sub.add_parser("start", help="uruchom sesję w tle i wypisz jej ID")
-    c.add_argument("type", choices=("codex", "claude", "terminal"))
-    c.add_argument("repo")
-    c.add_argument("--instance", default="primary")
-    c.add_argument("--resume", action="store_true")
-    c.add_argument("--json", action="store_true")
+    c.add_argument("type", choices=("codex", "claude", "terminal"), help="rodzaj sesji")
+    c.add_argument("repo", help="nazwa albo ścieżka repozytorium")
+    c.add_argument("--instance", default="primary", metavar="ETYKIETA", help=f"etykieta sesji (domyślnie: {DEFAULT_LABEL})")
+    c.add_argument("--resume", action="store_true", help="wznów rozmowę")
+    c.add_argument("--json", action="store_true", help=as_json)
     for name in ("codex", "claude", "terminal"):
         c = sub.add_parser(name, help=f"uruchom {name} w repozytorium (jeśli trzeba) i wejdź")
-        c.add_argument("repo")
-        c.add_argument("instance", nargs="?", default="primary")
+        c.add_argument("repo", help="nazwa albo ścieżka repozytorium")
+        c.add_argument("instance", nargs="?", default="primary", metavar="ETYKIETA",
+                       help=f"etykieta sesji (domyślnie: {DEFAULT_LABEL})")
         if name != "terminal":
             c.add_argument("--resume", action="store_true", help="wznów rozmowę")
-        c.add_argument("--mode", choices=("normal", "view", "shared", "takeover"), default="normal")
+        c.add_argument("--mode", choices=("normal", "view", "shared", "takeover"), default="normal", help="tryb wejścia")
     for name, text in (("stop", "zatrzymaj sesję"), ("inspect", "szczegóły sesji (JSON)"), ("attach", "wejdź do sesji"),
                        ("reconcile", "napraw niespójną sesję")):
         c = sub.add_parser(name, help=text)
-        c.add_argument("id")
+        c.add_argument("id", help="ID sesji z polecenia list")
         if name in ("stop", "reconcile"):
             c.add_argument("--generation", help="odrzuć nieaktualne potwierdzenie")
         if name == "attach":
-            c.add_argument("--mode", choices=("normal", "view", "shared", "takeover"), default="normal")
+            c.add_argument("--mode", choices=("normal", "view", "shared", "takeover"), default="normal", help="tryb wejścia")
     c = sub.add_parser("github", help="repozytoria na GitHubie")
-    g = c.add_subparsers(dest="github_command", required=True)
-    ls = g.add_parser("list")
-    ls.add_argument("--json", action="store_true")
-    ls.add_argument("--refresh", action="store_true")
-    ls.add_argument("--offline", action="store_true")
-    clone = g.add_parser("clone")
-    clone.add_argument("repo")
+    g = c.add_subparsers(dest="github_command", required=True, parser_class=polish)
+    ls = g.add_parser("list", help="lista repozytoriów")
+    ls.add_argument("--json", action="store_true", help=as_json)
+    ls.add_argument("--refresh", action="store_true", help="pobierz listę na nowo")
+    ls.add_argument("--offline", action="store_true", help="tylko pamięć podręczna, bez sieci")
+    clone = g.add_parser("clone", help="sklonuj repozytorium do katalogu roboczego")
+    clone.add_argument("repo", help="nazwa repozytorium na GitHubie")
     return p
 
 
@@ -112,16 +121,16 @@ def execute(args):
         else:
             print("Runtime: "+RUNTIME_PL.get(s.runtime_health, s.runtime_health))
             for w in s.workloads:
-                print(f"{w.record.id}  {w.record.kind}/{w.record.instance}  {STATE_PL[w.state]}  repo:{HEALTH_PL[w.repo_health]}  "
+                print(f"{w.record.id}  {w.record.kind}/{label_pl(w.record.instance)}  {STATE_PL[w.state]}  repo:{HEALTH_PL[w.repo_health]}  "
                       f"klienci:{w.session.attached if w.session else 0}  {display(w.record.repo.path)}")
             for issue in s.issues:
                 print(pl(display(issue)), file=sys.stderr)
         return 0 if s.runtime_health == "OK" and all(w.state != State.UNKNOWN for w in s.workloads) else 1
     if args.command == "start":
-        r = app.start(args.type, args.repo, args.instance, args.resume)
+        r = app.start(args.type, args.repo, instance_of(args.instance), args.resume)
         print(json.dumps(r.data(), ensure_ascii=True) if args.json else r.id)
     elif args.command in ("codex", "claude", "terminal"):
-        return app.open(args.command, args.repo, args.instance, getattr(args, "resume", False), args.mode)
+        return app.open(args.command, args.repo, instance_of(args.instance), getattr(args, "resume", False), args.mode)
     elif args.command in ("stop", "reconcile"):
         app.stop(args.id, args.generation, repair=args.command == "reconcile")
     elif args.command == "inspect":

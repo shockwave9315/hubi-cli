@@ -17,7 +17,7 @@ from hubi6 import menu
 from hubi6.adapters.tmux import NEW_PANE_HINT, label
 from hubi6.config import Config
 from hubi6.core.model import HubiError, Record, RepoHealth, RepoRef, Session, State, Workload, key_id
-from hubi6.i18n import age, pl, plural
+from hubi6.i18n import age, instance_of, label_pl, pl, plural
 from hubi6.inventory import Snapshot
 from hubi6.services import App
 from hubi6.tui import terminal
@@ -158,12 +158,36 @@ class RenderTests(unittest.TestCase):
 
     def test_phone_sized_main_screen_content(self):
         text = "\n".join(menu.render(self.frames(64, 25)["main"], menu.Theme(False), 64))
-        for expected in ("claude/rev", "codex/cp5", "terminal/primary", "Zaimplementuj CP5: timer i sloty",
+        for expected in ("claude/rev", "codex/cp5", "terminal/główna", "Zaimplementuj CP5: timer i sloty",
                          "pracuje", "czeka", "błąd (kod 1)", "AGENCI I TERMINALE", "REPOZYTORIA", "x rozłącz"):
             self.assertIn(expected, text)
-        for english in ("RUNNING", "ATTACHED", "EXITED", "Choice", "workloads", "back"):
+        for english in ("RUNNING", "ATTACHED", "EXITED", "Choice", "workloads", "back", "primary"):
             self.assertNotIn(english, text)
         self.assertNotIn("Claude Code", text)        # a generic agent title is noise, not information
+
+    def test_default_instance_is_shown_as_a_polish_label_everywhere(self):
+        frames = self.frames(64, 25)
+        for name in ("main", "pick", "repo", "detail"):
+            text = "\n".join(menu.render(frames[name], menu.Theme(False), 64))
+            self.assertNotIn("primary", text, name)
+            self.assertNotIn("instanc", text.lower(), name)
+        for name in ("pick", "repo"):
+            text = "\n".join(menu.render(frames[name], menu.Theme(False), 64))
+            self.assertIn("etykieta: główna", text, name)
+            self.assertIn("n etykieta", text, name)
+        self.assertNotIn("instanc", " ".join(text for _keys, text in menu.HELP).lower())
+
+    def test_repository_row_says_how_many_sessions_did_not_fit(self):
+        now = time.time()
+        items = [workload(kind, name, "praca", State.RUNNING, created=now+n)
+                 for n, (kind, name) in enumerate((("codex", "primary"), ("claude", "rev"), ("terminal", "primary"), ("terminal", "t2")))]
+        with patch.object(menu, "branch_of", return_value="cp5-timer-trip"):
+            row = next(r for r in menu.build_view(snapshot(items), {}).repos if r.name == "praca")
+        draw = lambda width: "".join(menu.render([menu.repo_row("", row, width, menu.UNICODE)], menu.Theme(False), width))
+        self.assertTrue(draw(65).rstrip().endswith(">_ główna  ✳ rev  +2"), draw(65))
+        self.assertTrue(draw(40).rstrip().endswith("+4"), draw(40))
+        self.assertNotIn("+", draw(100))
+        self.assertIn("$ t2", draw(100))
 
     def test_footer_survives_a_short_terminal(self):
         text = "\n".join(menu.render(self.frames(64, 8)["main"], menu.Theme(False), 64))
@@ -197,6 +221,25 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(menu.describe("claude", "claude", "✳ Hubi v6 PR", "praca"), "Hubi v6 PR")
         self.assertEqual(menu.describe("terminal", "bash", "dev@box: ~", "praca"), "")
         self.assertEqual(menu.describe("terminal", "vim", "dev@box: ~", "praca"), "vim")
+        # Codex before it has a topic: the title is only spinner frames.
+        self.assertEqual(menu.describe("codex", "node", "⠼ ⠼ | praca", "praca"), "")
+        self.assertEqual(menu.describe("claude", "claude", "◐ Test odpowiedzi", "praca"), "Test odpowiedzi")
+
+    def test_working_is_read_from_real_agent_titles(self):
+        # Recorded on 2026-10-14 from Claude Code 2.1.296 and Codex 0.162.1.
+        for title in ("◐ Test odpowiedzi jednym słowem", "⠼ ⠼ | praca", "⠸ Potwierdź | praca", "⠏"):
+            self.assertEqual(menu.working(title), title[0], title)
+        for title in ("✳ Test odpowiedzi jednym słowem", "✳ Claude Code", "Potwierdź | praca", "praca", "claude · resume",
+                      "", "⠸bez spacji", "- lista", "* gwiazdka", "\u2800 pusty brajl"):
+            self.assertEqual(menu.working(title), "", title)
+        now = time.time()
+        claude = workload("claude", "primary", "praca", State.RUNNING, created=now)
+        shell = workload("terminal", "primary", "praca", State.RUNNING, created=now+1)
+        dead = workload("codex", "primary", "praca", State.EXITED, created=now+2, status=0)
+        titles = {w.record.session: ("x", "◐ Praca") for w in (claude, shell, dead)}
+        view = menu.build_view(snapshot([claude, shell, dead]), titles)
+        self.assertEqual([(i.kind, i.busy) for i in view.items], [("claude", True), ("terminal", False), ("codex", False)])
+        self.assertEqual(menu.state_cell(view.items[0], menu.UNICODE), ("pracuje ◐", "busy"))
 
     def test_message_wraps_instead_of_being_cut(self):
         ui = menu.Ui(message="słowo "*30, level="bad")
@@ -273,6 +316,16 @@ class TextTests(unittest.TestCase):
         self.assertIn("claude/rev", label(r))
         self.assertLessEqual(len(label(r)), 60)
         self.assertTrue(NEW_PANE_HINT)
+        self.assertIn("codex/główna · praca", label(workload("codex", "primary", "praca", State.RUNNING, created=1).record))
+
+    def test_default_label_maps_both_ways_and_never_changes_identity(self):
+        self.assertEqual([label_pl("primary"), label_pl("rev"), label_pl("Primary")], ["główna", "rev", "Primary"])
+        self.assertEqual([instance_of(x) for x in ("", "  ", "główna", "GŁÓWNA", " rev ", "primary", "glowna")],
+                         ["primary", "primary", "primary", "primary", "rev", "primary", "glowna"])
+        # The stored record and its key keep the ASCII name; only what is drawn changes.
+        r = workload("claude", "primary", "praca", State.RUNNING, created=1).record
+        self.assertEqual((r.instance, r.key), ("primary", key_id("claude", ref("praca").path, "primary")))
+        self.assertEqual(r.data()["instance"], "primary")
 
     def test_ui_configuration(self):
         import tempfile
@@ -281,6 +334,10 @@ class TextTests(unittest.TestCase):
             path.write_text("[ui]\nrefresh = 5\ncolor = false\nicons = false\n")
             c = Config.load(str(path))
             self.assertEqual((c.ui_refresh, c.ui_color, c.ui_icons), (5, False, False))
+            # Each Codex session must own its processes: no shared background server.
+            self.assertEqual(c.agents["codex"], ["codex", "--no-daemon"])
+            path.write_text('[agents]\ncodex = ["codex"]\n')
+            self.assertEqual(Config.load(str(path)).agents["codex"], ["codex"])
             for bad in ("[ui]\nrefresh = 0\n", "[ui]\ncolor = 1\n", "[ui]\nfancy = true\n"):
                 path.write_text(bad)
                 with self.assertRaises(HubiError):
@@ -475,8 +532,16 @@ class ControllerTests(unittest.TestCase):
         os.write(self.wr, "zła nazwa\n".encode())
         self.press(m, "l", "n")
         self.assertEqual(m.ui.instance, "primary")
-        self.assertIn("Nazwa instancji", m.ui.message)
+        self.assertIn("Etykieta", m.ui.message)
+        self.assertNotIn("instanc", m.ui.message.lower())
         self.assertEqual(app.calls, [])
+
+    def test_label_prompt_and_the_default_label(self):
+        for typed in ("\n", "główna\n", "Główna \n"):
+            m, app = self.make()
+            os.write(self.wr, typed.encode())
+            self.press(m, "t", "n", "1")
+            self.assertEqual(app.calls[0], ("start", "terminal", ref("alpha").path, "primary", False), typed)
 
     def test_terminal_has_no_resume(self):
         m, app = self.make()
@@ -629,6 +694,40 @@ class DashboardRuntimeTests(unittest.TestCase):
         client.send(b"exit\n")
         client.read_until("posprzątane".encode(), 10)
         self.assertFalse(self.app.runtime_snapshot().workloads)
+
+    def test_label_is_asked_in_polish_and_the_default_stays_primary(self):
+        from contextlib import redirect_stdout
+        from hubi6.cli import main
+        client = self.menu()
+        self.press(client, b"t", "Wybierz repozytorium")
+        self.assertIn("etykieta: główna", plain(client.output))
+        self.press(client, b"n", "Etykieta [główna]:")
+        client.output = b""
+        client.send(b"drugi\n")
+        client.read_until("Wybierz repozytorium".encode())
+        self.assertIn("etykieta: drugi", plain(client.output))
+        time.sleep(.12)
+        client.send(b"1")
+        named = self.only().record
+        self.attached(named.id)
+        self.assertEqual(named.instance, "drugi")
+        client.send(b"\x02d")
+        client.read_until("AGENCI I TERMINALE".encode())
+        # The default label is display only: identity, record and JSON keep "primary".
+        default = self.app.start("terminal", str(self.path))
+        self.assertEqual(default.instance, "primary")
+        show = lambda *args: self.app.tmux.command(*args).stdout
+        self.assertEqual(show("show-options", "-v", "-t", default.pane, "@hubi6-label").strip(), "$ terminal/główna · only")
+        out = io.StringIO()
+        with redirect_stdout(out):
+            main(["--config", str(self.config), "list"])
+        self.assertIn("terminal/główna", out.getvalue())
+        self.assertIn("terminal/drugi", out.getvalue())
+        self.assertNotIn("terminal/primary", out.getvalue())
+        with redirect_stdout(io.StringIO()):
+            main(["--config", str(self.config), "start", "terminal", str(self.path), "--instance", "główna", "--json"])
+        self.assertEqual(sorted(w.record.instance for w in self.app.runtime_snapshot().workloads), ["drugi", "primary"])
+        client.read_until("terminal/główna".encode(), 10)   # the live list picks the new session up by itself
 
     def test_session_ended_after_switching_inside_tmux_is_tidied_too(self):
         first = self.app.start("terminal", str(self.path), "first")

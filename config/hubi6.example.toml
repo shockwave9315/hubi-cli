@@ -1,7 +1,12 @@
 repos_root = "~/repos"
 
 [agents]
-codex = ["codex"]
+# --no-daemon: without it Codex (seen with 0.162) runs a shared per-user server
+# inside the first Codex session's scope, and every other Codex session's
+# commands run there too. Stopping or closing that first session then breaks the
+# others, and it never leaves the list by itself. Use ["codex"] only for a Codex
+# too old to know the flag.
+codex = ["codex", "--no-daemon"]
 claude = ["claude", "--permission-mode", "bypassPermissions"]
 # terminal defaults to valid $SHELL / passwd shell with normal rc files
 # terminal = ["/bin/bash", "-i"]
