@@ -35,16 +35,18 @@ def wait_for(fn, timeout=5):
 
 
 class Client:
-    def __init__(self, args, *, command=None):
+    def __init__(self, args, *, command=None, ui="classic", env=None, size=(24, 120)):
         self.master, self.slave = pty.openpty()
-        fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 120, 0, 0))
+        fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", size[0], size[1], 0, 0))
         self.before = termios.tcgetattr(self.slave)
         def setup():
             os.setsid()
             fcntl.ioctl(self.slave, termios.TIOCSCTTY, 0)
         self.p = subprocess.Popen(command or [sys.executable, "-m", "hubi6", *args], stdin=self.slave, stdout=self.slave,
                                   stderr=self.slave, preexec_fn=setup, close_fds=True,
-                                  env=dict(os.environ, TERM="xterm-256color"))
+                                  # Existing regressions exercise the line-oriented menu; the
+                                  # dashboard has its own tests and is selected with ui="dashboard".
+                                  env=dict(os.environ, TERM="xterm-256color", HUBI6_UI=ui, **(env or {})))
         self.output = b""
 
     def read_until(self, needle, timeout=5):

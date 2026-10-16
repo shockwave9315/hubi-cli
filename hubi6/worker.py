@@ -73,5 +73,5 @@ if __name__ == "__main__":
         raise SystemExit(main())
     except (HubiError, OSError, ValueError) as exc:
         # Environment and agent arguments are intentionally never printed.
-        print(f"Hubi v6 worker: {type(exc).__name__}: startup refused", file=sys.stderr)
+        print(f"Hubi v6 worker: {type(exc).__name__}: start odrzucony", file=sys.stderr)
         raise SystemExit(1)

@@ -18,6 +18,8 @@ from hubi6.adapters.git import Git, normalized_origin
 from hubi6.config import Config
 from hubi6.core.model import HubiError, State, RepoHealth
 from hubi6.doctor import doctor
+from hubi6.adapters.tmux import NEW_PANE_HINT
+from hubi6.i18n import pl
 from hubi6.services import App
 from tests_v6.support import LAB, bootstrap, repo
 from tests_v6.test_runtime import Client, wait_for
@@ -252,7 +254,7 @@ class FixsetRuntimeTests(unittest.TestCase):
         for key in ('c', '%', '"'):
             lines=[line for line in bindings.splitlines() if line.split()[3].replace('\\','') == key]
             self.assertTrue(lines, key)
-            self.assertTrue(all('Create another workload using Hubi' in line for line in lines), lines)
+            self.assertTrue(all(NEW_PANE_HINT in line for line in lines), lines)
         self.app.tmux.command('split-window','-d','-t',r.pane,'--','/usr/bin/sleep','999')
         self.app.tmux.command('new-window','-d','-t','='+r.session+':','--','/usr/bin/sleep','999')
         self.assertEqual(self.app.find(r.id).state,State.UNKNOWN)
@@ -328,7 +330,7 @@ class FixsetRuntimeTests(unittest.TestCase):
             client=Client([],command=['env','HUBI6_ACTIVE=1',sys.executable,'-m','hubi6'])
             try:
                 self.assertEqual(client.p.wait(3),2)
-                client.read_until(b'Hubi is already active')
+                client.read_until(pl('Hubi is already active').encode())  # CLI wording is Polish
             finally:client.close()
             client=Client([],command=['env','HUBI6_ACTIVE=1',sys.executable,'-m','hubi6','attach',r.id])
             try:self.assertEqual(client.p.wait(3),2)

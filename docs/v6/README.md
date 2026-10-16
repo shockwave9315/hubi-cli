@@ -1,8 +1,10 @@
-# Hubi v6 — development/review build
+# Hubi v6 — technical reference
 
-Python 3.11+, standard library only. The unchanged executable `../../hubi` is
-v5. V6 is `python3 -m hubi6`, a separate package and runtime. This branch does
-not install anything on the owner account, disable v5 or perform a cutover.
+Python 3.11+, standard library only. V6 is the package `hubi6` with its own
+runtime; installed, it is the `hubi` command. Overview, installation and everyday
+use are in the [top-level README](../../README.md). The executable `../../hubi`
+is v5, kept unchanged as the rollback source. From a checkout, v6 runs as
+`python3 -m hubi6`:
 
 ```console
 python3 -m hubi6 --version
@@ -11,6 +13,9 @@ python3 -m hubi6 list --json
 python3 -m hubi6 start codex my-repo --instance primary
 python3 -m hubi6 start claude my-repo --resume
 python3 -m hubi6 start terminal my-repo --instance shell2
+python3 -m hubi6 claude my-repo              # start if needed, then attach
+python3 -m hubi6 codex my-repo cp5 --resume  # named instance, resume picker
+python3 -m hubi6 terminal my-repo
 python3 -m hubi6 inspect WORKLOAD_ID
 python3 -m hubi6 attach WORKLOAD_ID --mode shared
 python3 -m hubi6 attach WORKLOAD_ID --mode view
@@ -30,27 +35,121 @@ session metadata; it does not sweep unverified objects. An unambiguous ID prefix
 of at least 8 hexadecimal characters is accepted; empty/short IDs are refused. Stop never requires the repository to exist. `--generation` protects
 a confirmation made earlier; IDs themselves also include an immutable generation.
 
-The menu uses a complete snapshot, one screen write, line + Enter input and a
-bounded bracketed-paste quarantine, rearmed for every prompt and after attach.
-Raw multiline bursts cannot answer subsequent prompts; confirmations drain stale
-input before exposing their prompt. Common keys: `w` workloads, `g` GitHub,
-`b` back, `>`/`<` pages, `q` shell (98), `x` disconnect (99). Repository actions:
-`c` Codex, `l` Claude, `t` terminal; agent creation asks new/resume. Workload
-actions: `a` attach, `v` view, `s` share, `o` takeover, `d` stop, `i` inspect,
-`f` reconcile. Actions unavailable in the current state are hidden.
-Accepted lines return immediately so snapshot/render can run during the 80 ms
-input quarantine. Before the next read, the remaining burst is discarded until
-80 ms of quiet since the last received byte; destructive prompts wait for that
-clean state before being displayed.
+## Menu
+
+`hubi` without a command opens the Polish dashboard (`hubi6/menu.py`). Every
+frame is rendered by pure functions from one complete snapshot and sent in one
+write; afterwards only lines that changed are redrawn, on the alternate screen.
+The list refreshes every `[ui] refresh` seconds (2 by default, 10 after a minute
+without a key press). No line is ever wider than the terminal: columns are
+clipped with an ellipsis, so nothing wraps at 65 columns or at 39.
+
+One key is one action, without Enter:
+
+| Key | Main screen |
+| --- | --- |
+| `1`-`9` | attach to that session |
+| `l` `c` `t` | new Claude / Codex / terminal session, then the repository number: started and attached |
+| `d` | stop: session number, then `q` confirms |
+| `i` | session details: view, share, take over, stop, repair |
+| `r` | repository view with `git status` |
+| `g` | GitHub catalogue and clone |
+| `?` | help |
+| `q` / `x` | shell (98) / end the SSH session (99, only offered under autologin) |
+
+`l`, `c` and `t` always start a new session; a running one is entered with
+its number. Without a typed name the session takes an automatic one
+(`menu.free_name`): the default instance if that type has no session in the
+repository yet, otherwise the first free number (`codex/2`, `codex/3`). Every
+recorded session counts as taken whatever its state, so an automatic start never
+enters, reuses or replaces another session and never asks a question. This is
+what makes resume dependable: with the agent already running there, choosing
+resume still opens the conversation picker, in a new session.
+
+While choosing a repository, `r` switches between a new conversation and resume.
+The switch is drawn as two labelled sides with the active one highlighted, the
+screen title changes between `NOWY` and `WZNÓW`, and the toggle is confirmed on
+the status line. `n` asks for a session name (`Nazwa sesji [automatyczna]:`);
+only a typed name can address an existing session (a running one is entered, a
+finished one is replaced after `q`). The session name is the workload's
+instance. Its stored, stable name stays ASCII and the default stays `primary` in
+records, JSON and the command line; people see the default as `główna`, and
+typing `główna` selects it. The command line keeps "start if needed, then
+attach" for `hubi claude|codex|terminal REPO [NAZWA]`.
+
+`0`, Esc and Backspace go back; arrows or `j`/`k`
+move a cursor and Enter activates it; Space turns pages. Keys are not case
+sensitive, and an unknown key is answered with a hint instead of silence.
+
+Each row shows the type icon, `type/name`, repository, activity, attached
+clients and age. Activity comes from the pane title the agent sets itself: a
+leading spinner glyph means "pracuje" and the rest of the title is shown
+underneath. Codex animates a braille spinner; Claude Code shows `◐` while it
+works and `✳` while it waits, so only glyphs from spinner sets count
+(`menu.working`, recorded from Claude Code 2.1.296 and Codex 0.162.1).
+Titles are fetched by a separate, lenient tmux query (`Tmux.titles`) and never
+reach the inventory parser, ownership checks or state derivation. Sessions are
+numbered in creation order, so starting something never renumbers the others.
+
+Input safety is the same contract as the line menu, adapted to single keys:
+
+- A read that is not exactly one key (a paste, or several keys delivered
+  together) is discarded as a whole, reported on screen and followed by 80 ms of
+  required silence. Bracketed paste is swallowed up to its closing marker.
+- Separate key presses are not throttled, so quick consecutive keys all count.
+- Before a stop/remove/repair question is displayed, the terminal must be silent
+  for 80 ms and is flushed; the answer is one deliberate `q`. The same drain
+  happens before every attach, so nothing typed earlier can reach an agent.
+- Cloning still asks for a typed `tak` + Enter.
+
+Long operations (start, stop, GitHub refresh, clone) show a spinner on the
+status line. The operation stays on the main thread, so signals interrupt it
+exactly as before; a helper thread only draws.
+
+When the primary process of a session ends, a `pane-died` hook detaches every
+client, which returns to the menu instead of staying on "Pane is dead". The dead
+pane and its exit status are still retained. A clean exit (status 0, no signal,
+no clients) is then removed automatically by `App.reap_clean_exit`; nothing is
+signalled, because the scope is already gone. A failed exit stays EXITED and
+opens its detail screen, where `v` shows the output and `d` removes it.
+
+Codex is started with `--no-daemon` by default. Without it, Codex 0.162 starts a
+per-user background server (`codex app-server --managed-daemon`) from the first
+Codex session, which leaves it inside that workload's scope, and every other
+Codex session runs its tools there. Measured on the owner's host: a `sleep`
+requested in a second session ran in the first session's cgroup; after `/exit`
+the first session stayed ORPHANED because its scope never emptied; stopping it
+ended the second session's command and left that session at "Server connection
+could not be restored". With `--no-daemon` each session's processes stay in its
+own scope, so stop, clean-exit removal and the full-cgroup kill mean what they
+say. `[agents] codex = ["codex"]` restores the shared server for a Codex too old
+to know the flag.
+
+Ctrl-Z cannot suspend the menu: under SSH autologin the parent is a login shell
+still reading its startup files, which waits without job control, so a stopped
+menu could not be resumed from the keyboard. The menu disables the terminal's
+suspend character and installs a no-op SIGTSTP handler; the tmux server unbinds
+`suspend-client` for the same reason.
+
+The reviewed line-oriented menu (`hubi6/tui.py`, English) is unchanged and
+remains as a fallback: `hubi --classic` or `HUBI6_UI=classic`. It is also
+started automatically if the dashboard raises an unexpected exception, because
+Hubi is the SSH login entry point. Human-readable CLI output and error messages
+are Polish through `hubi6/i18n.py`; raised messages, logs and JSON keep their
+stable English identifiers, and a test fails when a new message has no Polish
+wording.
 
 ## Configuration and deployment materials
 
 Configuration: `$XDG_CONFIG_HOME/hubi6/config.toml` (default
 `~/.config/hubi6/config.toml`). See [example](../../config/hubi6.example.toml).
 `--config FILE` selects another TOML file. Agent entries are argv arrays, not
-shell commands. Defaults retain the v5 Codex/Claude flags. Terminal defaults
+shell commands. Defaults retain the v5 Claude flags; Codex adds `--no-daemon`
+(see Menu). Terminal defaults
 to the valid $SHELL/passwd interactive shell with normal rc files. Workloads
 get HUBI6_ACTIVE=1; terminals also get HUBI_NOAUTO=1 to suppress v5 autologin.
+`[ui]` accepts `refresh` (seconds), `color` and `icons` (false = ASCII only);
+`NO_COLOR` and `TERM=dumb` also disable colour.
 Self-nesting and attach from a Hubi workload are refused. SSH_AUTH_SOCK, SHELL,
 LANG/LANGUAGE and standard LC_* join the explicit API/proxy/SSL allowlist.
 TERM identifies the virtual tmux terminal (screen-256color), independent of a
@@ -66,6 +165,13 @@ that later deployment. Development does not replace `~/.local/bin/hubi`.
 The bundle includes install.py; see the [install/uninstall, clean cutover and
 rollback runbook](CUTOVER.md). Fresh builds remove stale files and record dirty
 state plus source hashes; production installation rejects dirty bundles.
+
+SSH autologin: append [config/hubi6-autologin.sh](../../config/hubi6-autologin.sh)
+to the **end of `~/.profile`**, not to `~/.bashrc`. A typical `~/.profile`
+sources `~/.bashrc` first and extends PATH afterwards; a menu started from
+`~/.bashrc` gives every workload the PATH from before those additions (for
+example the system Node instead of the user's). The block sets
+`HUBI_AUTOLOGIN=1`, which is how the menu knows that `x` ends the SSH session.
 
 Runtime socket: `/run/user/UID/hubi6/tmux.sock`. Locks and one-use startup
 envelopes: `/run/user/UID/hubi6/RUNTIME_ID`. Journal:
@@ -126,6 +232,13 @@ creation preflight force `exit-empty off`; an option hook also guards ordinary
 changes. Sourcing a hostile-to-lifetime user config cannot leave the runtime
 permanently down. This is protection from accidental self-destruction, not a
 sandbox against deliberate socket targeting or `systemd-run` by an agent.
+
+Inside a session the status bar names it (`type/name · repository`) in a
+colour per type; the generation hash is no longer the only label. `Ctrl-b d`
+returns to the menu, `Ctrl-b )` / `(` / `L` move between sessions without
+leaving tmux, and `Ctrl-b s` lists them with their labels. Windows follow the
+most recently used client (`window-size latest`), so a small terminal is not
+left with a cropped slice of a window sized for a larger idle client.
 
 Manually adding panes/windows through tmux command mode is outside the
 single-primary-pane workload contract, as in v5. V6 disables their default

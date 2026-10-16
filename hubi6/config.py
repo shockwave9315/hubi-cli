@@ -43,6 +43,9 @@ class Config:
     terminal_term_grace: float = 1
     kill_grace: float = 2
     clone_timeout: float = 300
+    ui_refresh: float = 2
+    ui_color: bool = True
+    ui_icons: bool = True
 
     @classmethod
     def load(cls, path: str | None = None):
@@ -59,11 +62,11 @@ class Config:
                 data = tomllib.loads(source.read_text())
             except (OSError, ValueError) as e:
                 raise HubiError(f"Invalid config: {source}: {e}") from e
-        if not isinstance(data, dict) or set(data)-{"repos_root", "agents", "github", "stop", "lock_timeout"}:
+        if not isinstance(data, dict) or set(data)-{"repos_root", "agents", "github", "stop", "lock_timeout", "ui"}:
             raise HubiError("Unknown configuration keys")
         if "repos_root" in data and not isinstance(data["repos_root"], str):
             raise HubiError("repos_root must be a path string")
-        for section in ("agents", "github", "stop"):
+        for section in ("agents", "github", "stop", "ui"):
             if not isinstance(data.get(section, {}), dict):
                 raise HubiError(f"{section} must be a TOML table")
         uid = os.getuid()
@@ -79,7 +82,11 @@ class Config:
         # Reconfiguring repo root must not hide existing workloads. The runtime
         # is its UID, socket, service and journal; workspace paths belong to keys.
         rid = runtime_identity(home, socket, service, state)
-        defaults = {"codex": ["codex"], "claude": ["claude", "--permission-mode", "bypassPermissions"],
+        # Codex otherwise starts a per-user background server inside the scope of
+        # whichever Codex workload came first and runs every other Codex
+        # session's tools there: that scope never empties, and stopping it
+        # breaks the rest. --no-daemon keeps each session's processes in its own scope.
+        defaults = {"codex": ["codex", "--no-daemon"], "claude": ["claude", "--permission-mode", "bypassPermissions"],
                     "terminal": [interactive_shell(), "-i"]}
         for name, spec in data.get("agents", {}).items():
             if name not in defaults or not isinstance(spec, list) or not spec or not spec[0] or any(not isinstance(x, str) or "\0" in x for x in spec):
@@ -99,9 +106,16 @@ class Config:
             raise HubiError("Unknown stop configuration keys")
         values = {name: positive_number(stop.get(name, default), "stop."+name)
                   for name, default in grace_defaults.items()}
+        ui = data.get("ui", {})
+        if set(ui)-{"refresh", "color", "icons"}:
+            raise HubiError("Unknown ui configuration keys")
+        if type(ui.get("color", True)) is not bool or type(ui.get("icons", True)) is not bool:
+            raise HubiError("Invalid ui configuration")
         return cls(home, repos, runtime_base, state, cache, config_base, socket, service, rid,
                    defaults, owner, ttl, lock_timeout=positive_number(data.get("lock_timeout", 3), "lock_timeout"),
-                   clone_timeout=positive_number(github.get("clone_timeout", 300), "github.clone_timeout"), **values)
+                   clone_timeout=positive_number(github.get("clone_timeout", 300), "github.clone_timeout"),
+                   ui_refresh=positive_number(ui.get("refresh", 2), "ui.refresh"),
+                   ui_color=ui.get("color", True), ui_icons=ui.get("icons", True), **values)
 
     @property
     def runtime(self):
