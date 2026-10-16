@@ -145,6 +145,8 @@ EXACT = {
     "Repository changed before scope creation": "Repozytorium zmieniło się przed utworzeniem scope",
     "Repository changed before exec": "Repozytorium zmieniło się przed uruchomieniem",
     "Repository was replaced during startup": "Repozytorium zostało podmienione w trakcie startu",
+    "Launcher umask unavailable": "Nie można odczytać umask procesu uruchamiającego",
+    "Invalid session umask": "Nieprawidłowy umask sesji",
 }
 
 # English template -> Polish template. Named fields are copied verbatim.

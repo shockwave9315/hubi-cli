@@ -14,6 +14,14 @@ from hubi6.adapters.systemd import Systemd
 from hubi6.storage import Store, private_json
 
 
+def session_umask(payload):
+    """The launcher's umask from the envelope. Absent or invalid refuses the start."""
+    value = payload.get("umask") if isinstance(payload, dict) else None
+    if type(value) is not int or not 0 <= value <= 0o777:
+        raise HubiError("Invalid session umask")
+    return value
+
+
 def main():
     mode, record_path, payload_path = sys.argv[1:]
     # The journal's explicit canonical path supplies state location. Validate
@@ -43,6 +51,7 @@ def main():
         return 0
     payload = private_json(Path(payload_path))
     Path(payload_path).unlink()
+    mask = session_umask(payload)
     # fchdir pins the validated filesystem object instead of falling back to HOME.
     fd = os.open(r.repo.path, os.O_DIRECTORY | os.O_RDONLY | os.O_CLOEXEC)
     try:
@@ -65,6 +74,8 @@ def main():
     if r.kind == "terminal":
         env["HUBI_NOAUTO"] = "1"
     env.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
+    # Hubi's own files are written above under the service's 0077.
+    os.umask(mask)
     os.execvpe(payload["argv"][0], payload["argv"], env)
 
 

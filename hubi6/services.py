@@ -25,6 +25,27 @@ LOCALE_ENV = ("LC_ALL", "LC_CTYPE", "LC_COLLATE", "LC_MESSAGES", "LC_NUMERIC", "
               "LC_PAPER", "LC_NAME", "LC_ADDRESS", "LC_TELEPHONE", "LC_MEASUREMENT", "LC_IDENTIFICATION")
 
 
+def parse_umask(status):
+    """The Umask field of /proc/PID/status, or HubiError if absent or invalid."""
+    for line in status.splitlines():
+        if line.startswith("Umask:"):
+            value = line[len("Umask:"):].strip()
+            if re.fullmatch(r"[0-7]{1,4}", value, re.ASCII) and int(value, 8) <= 0o777:
+                return int(value, 8)
+            break
+    raise HubiError("Launcher umask unavailable")
+
+
+def launcher_umask():
+    # os.umask() can only be read by setting it. The menu runs a spinner thread,
+    # so even a brief change could apply to files it creates meanwhile.
+    try:
+        with open("/proc/self/status") as f:
+            return parse_umask(f.read())
+    except OSError as e:
+        raise HubiError("Launcher umask unavailable") from e
+
+
 class App:
     def __init__(self, config, runner=None):
         self.c = config
@@ -95,6 +116,7 @@ class App:
         if not executable:
             raise HubiError(f"Agent executable unavailable: {argv[0]}")
         argv[0] = executable
+        mask = launcher_umask()
         ref = pin_workspace(ref)
         workspace_lock = hashlib.sha256(f"{kind}:{instance}:{ref.workspace_id}:{ref.device}:{ref.inode}".encode()).hexdigest()[:20]
         with self.store.lock(workspace_lock), self.store.lock(key):
@@ -147,8 +169,9 @@ class App:
             payload = self.c.runtime/(r.id+".payload")
             # One-use 0600 envelope. Secrets never enter argv, tmux options, logs,
             # systemd environment properties or persistent workload metadata.
+            # The session gets its launcher's umask, not the service's 0077.
             environment = {k: os.environ[k] for k in ALLOW_ENV+LOCALE_ENV if k in os.environ}
-            atomic_json(payload, {"argv": argv, "env": environment})
+            atomic_json(payload, {"argv": argv, "env": environment, "umask": mask})
             self.tmux.create(r)
             self.store.save(r)
             self.git.validate(ref)

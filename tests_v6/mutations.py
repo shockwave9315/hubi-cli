@@ -23,6 +23,16 @@ def main():
          '        env.pop("GIT_OPTIONAL_LOCKS", None)',
          'tests_v6.test_fixset.FixsetRuntimeTests.test_git_read_status_write_deterministic_F8',
          'HubiError: git failed (exit 49)'),
+        ('session-umask', 'hubi6/worker.py',
+         '    os.umask(mask)\n    os.execvpe',
+         '    os.execvpe',
+         'tests_v6.test_umask.UmaskRuntimeTests.test_session_gets_the_launcher_umask_0002',
+         'AssertionError: 384 != 436'),
+        ('umask-fail-closed', 'hubi6/worker.py',
+         '    mask = session_umask(payload)',
+         '    mask = payload.get("umask", 0o022)',
+         'tests_v6.test_umask.UmaskRuntimeTests.test_invalid_umask_refuses_the_start',
+         'AssertionError: HubiError not raised'),
     ]
     for label, filename, before, after, test, expected in cases:
         with tempfile.TemporaryDirectory(prefix='hubi6-mutation-', dir=Path.home()) as tmp:
