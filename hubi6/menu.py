@@ -23,6 +23,10 @@ from .i18n import DEFAULT_INSTANCE, HEALTH_PL, KIND_PL, RUNTIME_PL, STATE_PL, ag
 from .tui import Input, terminal
 
 PAGE = 9
+# The menu draws its own spinner while an agent works. Agents redraw their pane
+# title too slowly (Claude alternates two glyphs about once a second) for a 2 s
+# snapshot to show movement, so the title only says busy or not.
+TICK = .12
 KINDS = {"l": "claude", "c": "codex", "t": "terminal"}
 HOME_KEY = "h"            # the home workspace: a shell or an agent outside any repository
 HOME_NOTE = "bez repo"
@@ -152,7 +156,6 @@ class Item:
     exit_signal: str
     title: str
     busy: bool
-    spinner: str
     issues: list
     generation: str
 
@@ -177,6 +180,7 @@ class View:
     repos: list
     now: float
     home: object = None       # RepoRow of the home workspace, None when disabled/unavailable
+    frame: int = 0            # spinner frame, from the menu's own clock
 
 
 def places(view):
@@ -248,12 +252,11 @@ def build_view(snapshot, titles, now=None, home=None):
         repo = place(r.repo)
         command, title = titles.get(r.session, ("", ""))
         live = w.state in (State.RUNNING, State.ATTACHED)
-        spinner = working(title)
         items.append(Item(r.id, r.kind, r.instance, repo, r.repo.path, w.state, w.repo_health,
                           session.attached if session else 0, r.created,
                           session.exit_status if session else None, session.exit_signal if session else "",
                           describe(r.kind, command, title, repo) if live else "",
-                          bool(spinner) and live and r.kind != "terminal", spinner, list(w.issues), r.generation))
+                          bool(working(title)) and live and r.kind != "terminal", list(w.issues), r.generation))
     # Creation order: starting something never renumbers what is already there.
     items.sort(key=lambda item: (item.created, item.id))
     repos = [RepoRow(ref, os.path.basename(ref.path), branch_of(ref), [i for i in items if i.path == ref.path])
@@ -282,7 +285,7 @@ class Ui:
 
 # ---------------------------------------------------------------- rendering
 
-def state_cell(item, glyphs):
+def state_cell(item, glyphs, frame=0):
     if item.health != RepoHealth.OK:
         return HEALTH_PL[item.health], "bad"
     if item.state == State.EXITED:
@@ -293,7 +296,7 @@ def state_cell(item, glyphs):
         return f"błąd (kod {item.exit_status})" if item.exit_status is not None else "zakończony", "bad"
     if item.state in (State.RUNNING, State.ATTACHED):
         if item.busy:
-            return ("pracuje "+item.spinner).strip(), "busy"
+            return "pracuje "+glyphs.spinner[frame % len(glyphs.spinner)], "busy"
         return ("działa", "ok") if item.kind == "terminal" else ("czeka", "idle")
     return STATE_PL[item.state], "warn" if item.state == State.STARTING else "bad"
 
@@ -311,8 +314,8 @@ def head(view, title, width, glyphs):
     return left
 
 
-def workload_row(index, item, width, glyphs, *, selected=False, labelled=True):
-    text, style = state_cell(item, glyphs)
+def workload_row(index, item, width, glyphs, *, selected=False, labelled=True, frame=0):
+    text, style = state_cell(item, glyphs, frame)
     lead = [(glyphs.cursor if selected else " ", "key"), (pad(str(index) if labelled else glyphs.sep, 2), "key" if labelled else "muted"), " "]
     icon = (pad(glyphs.icons[item.kind], 3), item.kind)
     clients = (pad(f"{glyphs.clients}{item.clients}" if item.clients else "", 3), "warn")
@@ -382,7 +385,7 @@ def frame_main(view, ui, width, height, glyphs):
         title.append((f"   strona {page+1}/{pages}, spacja = następna", "muted"))
     rows, details = [], {}
     for number, item in enumerate(shown, 1):
-        rows.append(workload_row(number, item, width, glyphs, selected=ui.cursor == number-1))
+        rows.append(workload_row(number, item, width, glyphs, selected=ui.cursor == number-1, frame=view.frame))
         if item.title:
             details[len(rows)-1] = [(" "*7+clip(display(item.title), width-8), "muted")]
     if not view.items:
@@ -472,7 +475,7 @@ def frame_repo(view, ui, width, height, glyphs):
     top += start_options(ui, talks=True)
     items = row.items if row else []
     body = [[(" Sesje w katalogu domowym:" if home else " Sesje w tym repo:", "section")]] if items else []
-    body += [workload_row(n, item, width, glyphs) for n, item in enumerate(items[:PAGE], 1)]
+    body += [workload_row(n, item, width, glyphs, frame=view.frame) for n, item in enumerate(items[:PAGE], 1)]
     hints = [("l", "Claude"), ("c", "Codex"), ("t", "terminal"), ("n", "nazwa sesji"), ("r", "nowa/wznów"),
              ("s", "status Gita"), ("0", "wróć")]
     if home:
@@ -495,7 +498,7 @@ def frame_detail(view, ui, width, height, glyphs):
     item = next((i for i in view.items if i.id == ui.selected), None)
     if item is None:
         return None
-    text, style = state_cell(item, glyphs)
+    text, style = state_cell(item, glyphs, view.frame)
     count = item.clients
     top = [head(view, "SESJA", width, glyphs),
            [" ", (glyphs.icons[item.kind]+" ", item.kind), (item.name, "bold"), ("  "+glyphs.sep+"  "+item.repo, ""),
@@ -754,7 +757,8 @@ class Menu:
         self.view = None
         self.repos = []
         self.home_error = ""
-        self.touched = time.monotonic()
+        self.clock = time.monotonic
+        self.touched = self.clock()
 
     # ---- presentation
 
@@ -1163,7 +1167,7 @@ class Menu:
         if key == "burst":
             self.say("Zignorowano serię znaków (wklejony tekst?). Naciskaj po jednym klawiszu.", "warn")
             return None
-        self.touched = time.monotonic()
+        self.touched = self.clock()
         self.say("")
         if len(key) == 1:
             key = key.lower()
@@ -1189,17 +1193,47 @@ class Menu:
             return None
         return result if isinstance(result, int) and not isinstance(result, bool) else None
 
+    def animating(self):
+        """A working agent is visible on the current screen, so its spinner must move."""
+        ui, view = self.ui, self.view
+        if ui.screen == "main":
+            page = min(ui.page, max(0, (len(view.items)-1)//PAGE))
+            shown = view.items[page*PAGE:page*PAGE+PAGE]
+        elif ui.screen == "repo" and ui.repo is not None:
+            shown = [i for i in view.items if i.path == ui.repo.path][:PAGE]
+        elif ui.screen == "detail":
+            shown = [i for i in view.items if i.id == ui.selected]
+        else:
+            shown = []
+        return any(item.busy for item in shown)
+
     def loop(self):
+        """Snapshot every ui_refresh seconds; redraw spinner frames in between.
+
+        Ticks repaint from the same snapshot, and Screen sends only changed lines,
+        so animation costs about one line per working agent and no subprocess.
+        """
+        due = 0.0
         while True:
-            self.refresh()
+            now = self.clock()
+            if now >= due:
+                self.refresh()
+                # Back off after a minute without keys, but never while an agent
+                # works: "pracuje" / "czeka" must not lag by ten seconds.
+                calm = now-self.touched >= 60 and not any(i.busy for i in self.view.items)
+                due = now+(max(10, self.app.c.ui_refresh) if calm else self.app.c.ui_refresh)
+            self.view.frame = int(now/TICK)
             self.draw()
-            idle = time.monotonic()-self.touched
-            key = self.reader.key(self.app.c.ui_refresh if idle < 60 else max(10, self.app.c.ui_refresh))
+            wait = max(0.0, due-self.clock())
+            if self.animating():
+                wait = min(wait, TICK)
+            key = self.reader.key(wait)
             if key is None:
                 continue
             code = self.handle(key)
             if code is not None:
                 return code
+            due = 0.0                                 # every key is followed by a fresh snapshot
 
 
 def run(app):

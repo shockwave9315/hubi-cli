@@ -267,7 +267,27 @@ class RenderTests(unittest.TestCase):
         titles = {w.record.session: ("x", "◐ Praca") for w in (claude, shell, dead)}
         view = menu.build_view(snapshot([claude, shell, dead]), titles)
         self.assertEqual([(i.kind, i.busy) for i in view.items], [("claude", True), ("terminal", False), ("codex", False)])
-        self.assertEqual(menu.state_cell(view.items[0], menu.UNICODE), ("pracuje ◐", "busy"))
+        # The title only says busy; the glyph comes from the menu's own clock.
+        self.assertEqual(menu.state_cell(view.items[0], menu.UNICODE), ("pracuje ⠋", "busy"))
+
+    def test_spinner_glyph_follows_the_menu_clock(self):
+        now = time.time()
+        busy = workload("claude", "primary", "praca", State.RUNNING, created=now)
+        idle = workload("codex", "primary", "praca", State.RUNNING, created=now+1)
+        view = menu.build_view(snapshot([busy, idle]), {busy.record.session: ("claude", "◐ Praca")})
+        for glyphs in (menu.UNICODE, menu.ASCII):
+            seen = [menu.state_cell(view.items[0], glyphs, frame)[0] for frame in range(2*len(glyphs.spinner))]
+            self.assertEqual(seen[:len(glyphs.spinner)], ["pracuje "+g for g in glyphs.spinner])
+            self.assertEqual(seen[len(glyphs.spinner):], seen[:len(glyphs.spinner)])     # it wraps around
+            self.assertEqual({menu.state_cell(view.items[1], glyphs, f) for f in range(5)}, {("czeka", "idle")})
+        draw = lambda frame: menu.render(menu.frame_main(replace(view, frame=frame), menu.Ui(), 64, 25, menu.UNICODE),
+                                         menu.Theme(False), 64)
+        changed = [n for n, (a, b) in enumerate(zip(draw(0), draw(1))) if a != b]
+        self.assertEqual(len(changed), 1)                                  # only the working agent's row moves
+        self.assertIn("pracuje", draw(1)[changed[0]])
+        detail = lambda frame: menu.render(menu.frame_detail(replace(view, frame=frame), menu.Ui(screen="detail", selected=view.items[0].id),
+                                                             64, 25, menu.UNICODE), menu.Theme(False), 64)
+        self.assertNotEqual(detail(0), detail(1))
 
     def test_message_wraps_instead_of_being_cut(self):
         ui = menu.Ui(message="słowo "*30, level="bad")
@@ -486,6 +506,86 @@ class FakeApp:
 
     def reap_clean_exit(self, identity):
         return None
+
+
+class FakeClock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
+class TickReader:
+    """Times out after the requested wait on a fake clock; presses q at the end."""
+
+    def __init__(self, clock, until, keys=()):
+        self.clock, self.until, self.keys, self.waits = clock, until, list(keys), []
+
+    def key(self, timeout=None):
+        self.waits.append(timeout)
+        if self.keys and self.clock.now >= self.keys[0][0]:
+            return self.keys.pop(0)[1]
+        if self.clock.now >= self.until:
+            return "q"
+        self.clock.now += timeout
+        return None
+
+
+class LoopTests(unittest.TestCase):
+    """Menu.loop timing: spinner ticks repaint, snapshots stay every ui_refresh."""
+
+    def run_loop(self, workloads, titles, *, seconds=6, idle=False, screen="main", keys=()):
+        class Stream(io.StringIO):
+            def fileno(self):
+                raise OSError()
+        app = FakeApp(workloads, titles)
+        app.c = replace(app.c, ui_refresh=2)
+        calls = []
+        snap = app.snapshot
+        app.snapshot = lambda: calls.append(clock.now) or snap()
+        clock = FakeClock()
+        reader = TickReader(clock, clock.now+seconds, [(clock.now+t, k) for t, k in keys])
+        m = menu.Menu(app, reader, menu.Screen(Stream()))
+        m.clock = clock
+        m.touched = clock.now-(120 if idle else 0)
+        m.ui.screen = screen
+        frames = []
+        draw = m.draw
+        m.draw = lambda: frames.append(m.view.frame) or draw()
+        self.assertEqual(m.loop(), 98)
+        return calls, reader.waits, frames, m
+
+    def busy(self):
+        claude = workload("claude", "primary", "praca", State.RUNNING, created=1)
+        return [claude], {claude.record.session: ("claude", "◐ Praca")}
+
+    def test_working_agent_animates_without_extra_snapshots(self):
+        calls, waits, frames, m = self.run_loop(*self.busy())
+        self.assertTrue(all(w <= menu.TICK+1e-9 for w in waits[:-1]), waits)
+        self.assertGreater(len(set(frames)), 30)                         # ~8 frames a second for 6 s
+        gaps = [b-a for a, b in zip(calls, calls[1:])]
+        self.assertTrue(all(g >= 2-1e-6 for g in gaps), gaps)               # snapshots still every ui_refresh
+        self.assertLessEqual(len(calls), 4)
+
+    def test_without_work_the_loop_sleeps_as_before(self):
+        idle = workload("codex", "primary", "praca", State.RUNNING, created=1)
+        calls, waits, frames, m = self.run_loop([idle], {})
+        self.assertEqual(set(waits[:-1]), {2})
+        self.assertEqual(len(calls), len(waits))
+        calls, waits, frames, m = self.run_loop([idle], {}, seconds=40, idle=True)
+        self.assertEqual(set(waits[:-1]), {10})                             # quiet backoff after a minute
+
+    def test_no_quiet_backoff_while_an_agent_works(self):
+        calls, waits, frames, m = self.run_loop(*self.busy(), seconds=12, idle=True, screen="help")
+        self.assertEqual(set(waits[:-1]), {2})                              # not visible: no ticks, no 10 s backoff
+        gaps = [b-a for a, b in zip(calls, calls[1:])]
+        self.assertTrue(all(abs(g-2) < 1e-6 for g in gaps), gaps)
+
+    def test_a_key_still_brings_a_fresh_snapshot(self):
+        calls, waits, frames, m = self.run_loop(*self.busy(), seconds=3, keys=[(.5, "?")])
+        self.assertTrue(any(abs(c-(1000.5+menu.TICK*0)) < menu.TICK+1e-6 for c in calls), calls)
+        self.assertEqual(m.ui.screen, "help")
 
 
 class ControllerTests(unittest.TestCase):
