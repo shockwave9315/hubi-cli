@@ -276,11 +276,15 @@ class App:
             self._stop(current.record, expected=expected or r.generation, repair=repair, initial=snapshot)
 
     def reap_clean_exit(self, identity):
-        """Remove one generation whose primary process already ended with status 0.
+        """Remove one generation whose primary process already ended by itself.
 
         Nothing is signalled: the scope is gone and only the retained dead pane
-        and its journal remain. A failed or signalled exit is left EXITED so its
-        output stays inspectable. Returns the reaped workload, or None.
+        and its journal remain. An agent is removed only after status 0; a failed
+        agent stays EXITED so its output stays inspectable (contract 19). A
+        terminal is removed after any exit status, because `exit` in a shell
+        carries the status of the last command and is still the user's own way
+        out. A signalled exit (killed, crashed) always stays. Returns the reaped
+        workload, or None.
         """
         try:
             w = self.find(identity, health_check=False)
@@ -288,7 +292,9 @@ class App:
             return None
         s = w.session
         if (w.state != State.EXITED or s is None or not s.dead or s.attached or s.panes != 1 or
-                s.exit_status != 0 or s.exit_signal or (w.unit and w.unit.live)):
+                s.exit_status is None or s.exit_signal or (w.unit and w.unit.live)):
+            return None
+        if s.exit_status != 0 and w.record.kind != "terminal":
             return None
         self.stop(w.record.id, expected=w.record.generation)
         return w

@@ -32,8 +32,10 @@ zostawiona na wypadek wycofania zmian ([opis v5](docs/v5/README.md)).
 - Jeden klawisz na akcję, bez Entera. Mieści się na ekranie telefonu (65 kolumn).
 - Lista pokazuje, który agent pracuje, a który czeka, razem z tematem rozmowy.
 - Zatrzymanie sesji kończy cały jej cgroup, więc nie zostają procesy potomne.
-- Po `exit` albo `/exit` wracasz do menu. Czyste wyjście sprząta się samo,
-  wyjście z błędem zostaje do obejrzenia.
+- Po `exit` albo `/exit` wracasz do menu. Terminal po `exit` sprząta się sam,
+  z dowolnym kodem wyjścia (menu podaje kod, jeśli nie był 0). Agent zakończony
+  błędem zostaje do obejrzenia, tak samo jak terminal zabity sygnałem albo taki,
+  który padł już przy starcie.
 - Lista repozytoriów z GitHuba z klonowaniem.
 - Terminal albo agent poza repozytorium, w katalogu domowym (`h`): trwała
   powłoka do zwykłej pracy na devboksie, do której wracasz jak do każdej sesji.

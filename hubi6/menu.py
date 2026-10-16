@@ -731,6 +731,17 @@ class Screen:
         return max(1, len(self.previous or [""]))
 
 
+def tidied(done):
+    """What was cleaned up after it ended by itself, with a non-zero exit status said aloud."""
+    code = lambda w: w.session.exit_status if w.session else None
+    if len(done) == 1:
+        w = done[0]
+        status = f" (kod {code(w)})" if code(w) else ""
+        return f"{w.record.kind}/{name_pl(w.record.instance)}: koniec pracy{status}, posprzątane"
+    names = ", ".join(f"{w.record.kind}/{name_pl(w.record.instance)}"+(f" (kod {code(w)})" if code(w) else "") for w in done)
+    return f"{names}: koniec pracy, posprzątane"
+
+
 class Menu:
     def __init__(self, app, reader, screen):
         self.app, self.reader, self.screen = app, reader, screen
@@ -857,8 +868,7 @@ class Menu:
         # session that was alive when we went in is checked, not only this one.
         done = [w for w in [self.app.reap_clean_exit(ident)]+[self.app.reap_clean_exit(i.id) for i in live] if w]
         if done:
-            names = ", ".join(f"{w.record.kind}/{name_pl(w.record.instance)}" for w in done)
-            self.say(f"{names}: koniec pracy, posprzątane", "ok")
+            self.say(tidied(done), "ok")
             if self.ui.screen == "detail" and any(w.record.id == ident for w in done):
                 self.ui.screen = "main"
         if any(w.record.id == ident for w in done):
@@ -870,7 +880,9 @@ class Menu:
         if after.state == State.EXITED:
             self.ui.screen, self.ui.selected = "detail", ident
             status = after.session.exit_status if after.session else None
-            self.say(f"Sesja zakończyła się błędem (kod {status}); v = podgląd wyjścia, d = usuń", "bad")
+            signal_name = after.session.exit_signal if after.session else ""
+            why = f"przerwana sygnałem {signal_name}" if signal_name else f"zakończyła się błędem (kod {status})"
+            self.say(f"Sesja {why}; v = podgląd wyjścia, d = usuń", "bad")
         elif code:
             self.say(f"Nie udało się wejść do sesji (kod {code})", "bad")
 

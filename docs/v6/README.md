@@ -109,10 +109,20 @@ exactly as before; a helper thread only draws.
 
 When the primary process of a session ends, a `pane-died` hook detaches every
 client, which returns to the menu instead of staying on "Pane is dead". The dead
-pane and its exit status are still retained. A clean exit (status 0, no signal,
-no clients) is then removed automatically by `App.reap_clean_exit`; nothing is
-signalled, because the scope is already gone. A failed exit stays EXITED and
-opens its detail screen, where `v` shows the output and `d` removes it.
+pane and its exit status are still retained. A session that ended by itself
+(no signal, no clients, one pane, scope gone) is then removed automatically by
+`App.reap_clean_exit`, after attach in the menu (also for sessions reached with
+`Ctrl-b ( ) L`) and in `hubi claude|codex|terminal`; nothing is signalled, because
+the scope is already gone, and the stop still carries the exact generation.
+
+The EXITED rule depends on the type. An agent (Claude, Codex) is removed only
+after status 0; a failed agent stays EXITED (contract 19) and opens its detail
+screen, where `v` shows the output and `d` removes it. A terminal is removed
+after `exit` with any status, since a shell's `exit` carries the status of its
+last command and is still the user's way out; the menu then says the code
+(`terminal/główna: koniec pracy (kod 1), posprzątane`). A terminal killed by a
+signal stays EXITED as `przerwany`, and one that died during start (start
+reports the failure) stays inspectable as before.
 
 Codex is started with `--no-daemon` by default. Without it, Codex 0.162 starts a
 per-user background server (`codex app-server --managed-daemon`) from the first
