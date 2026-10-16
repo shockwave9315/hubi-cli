@@ -31,6 +31,8 @@ zostawiona na wypadek wycofania zmian ([opis v5](docs/v5/README.md)).
 - Sesje przeżywają zerwanie SSH, zamknięcie menu i odpięcie klienta tmux.
 - Jeden klawisz na akcję, bez Entera. Mieści się na ekranie telefonu (65 kolumn).
 - Lista pokazuje, który agent pracuje, a który czeka, razem z tematem rozmowy.
+- Pliki tworzone w sesji dostają takie uprawnienia jak w shellu, z którego ją
+  uruchomiono (ten sam `umask`).
 - Zatrzymanie sesji kończy cały jej cgroup, więc nie zostają procesy potomne.
 - Po `exit` albo `/exit` wracasz do menu. Terminal po `exit` sprząta się sam,
   z dowolnym kodem wyjścia (menu podaje kod, jeśli nie był 0). Agent zakończony

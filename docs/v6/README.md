@@ -263,7 +263,13 @@ recover on the next start. Startup API environment and argv use a one-use 0600
 envelope in the private runtime directory, removed before agent exec. Secrets
 do not enter helper argv, tmux options, systemd properties or logs. Only the
 allowlist in `services.py` reaches the workload; `TMUX`, `TMUX_PANE` and launcher
-markers are removed. A normal stop sends INT (agent) or HUP (terminal), then TERM
+markers are removed. The session gets the umask of the process that launched
+it, not the service's `UMask=0077`: `App.start` reads it from
+`/proc/self/status` (`os.umask` would have to change it, and the menu runs a
+spinner thread), the envelope freezes it with the environment, and the worker
+validates it and applies it just before exec, after its own journal writes. An
+absent or invalid value refuses the start. The tmux server and Hubi's own state
+keep 0077 and explicit 0600/0700 modes. A normal stop sends INT (agent) or HUP (terminal), then TERM
 and KILL to the complete verified cgroup and removes the exact session.
 
 The service restarts even after a clean tmux exit. Its configuration and every
