@@ -43,6 +43,8 @@ def doctor(app):
         checks["full_cgroup_kill"] = app.systemd.capabilities()
     except HubiError:
         checks["linger"], checks["full_cgroup_kill"] = "unknown", False
+    # Informational: work outside repositories. Not part of readiness.
+    checks["home_workspace"] = str(app.c.home_workspace) if app.c.home_workspace else "disabled"
     checks["namespace"] = {"service": app.c.service, "socket": str(app.c.socket), "runtime_id": app.c.runtime_id,
                            "records": str(app.c.records)}
     required = ("exit_empty_off", "restart_always", "systemd_reachable", "inventory_consistent", "exact_server_ownership",

@@ -1,4 +1,7 @@
 repos_root = "~/repos"
+# Work outside any repository: a persistent shell or an agent in this directory
+# (menu key h, `hubi terminal` without a repository). "" switches it off.
+home_workspace = "~"
 
 [agents]
 # --no-daemon: without it Codex (seen with 0.162) runs a shared per-user server

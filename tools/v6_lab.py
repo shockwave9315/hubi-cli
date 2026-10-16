@@ -55,6 +55,7 @@ def create():
         assert not HOME.exists()
         run(["useradd", "--create-home", "--shell", "/bin/bash", USER])
         MARKER.write_text("hubi6-only\n")
+        MARKER.chmod(0o644)   # readable by the lab UID even under a private umask (v6 workloads run with 0077)
     entry = identity()
     run(["loginctl", "enable-linger", USER])
     run(["systemctl", "start", f"user@{entry.pw_uid}.service"])

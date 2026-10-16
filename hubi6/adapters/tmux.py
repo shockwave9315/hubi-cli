@@ -2,7 +2,7 @@ import os
 import re
 
 from ..core.model import HubiError, Record, Session, display, tmux_format
-from ..i18n import name_pl
+from ..i18n import name_pl, place
 
 
 KIND_ICON = {"claude": "\u2733", "codex": ">_", "terminal": "$"}
@@ -21,7 +21,7 @@ def label(record):
     is replaced, because tmux draws '#[...]' found in an expanded option as a
     style directive.
     """
-    name = display(record.repo.path.rsplit("/", 1)[-1]).replace("#", "\u266f")
+    name = display(place(record.repo)).replace("#", "\u266f")
     return f"{KIND_ICON.get(record.kind, '?')} {record.kind}/{name_pl(record.instance)} \u00b7 {name}"[:60]
 
 

@@ -19,7 +19,7 @@ import unicodedata
 
 from .core.model import HubiError, RepoHealth, State, actions, display
 from .github import GitHub
-from .i18n import DEFAULT_INSTANCE, HEALTH_PL, KIND_PL, RUNTIME_PL, STATE_PL, age, instance_of, name_pl, pl, plural
+from .i18n import DEFAULT_INSTANCE, HEALTH_PL, KIND_PL, RUNTIME_PL, STATE_PL, age, instance_of, name_pl, place, pl, plural
 from .tui import Input, terminal
 
 PAGE = 9
@@ -28,6 +28,8 @@ PAGE = 9
 # snapshot to show movement, so the title only says busy or not.
 TICK = .12
 KINDS = {"l": "claude", "c": "codex", "t": "terminal"}
+HOME_KEY = "h"            # the home workspace: a shell or an agent outside any repository
+HOME_NOTE = "bez repo"
 SHELLS = {"bash", "zsh", "sh", "dash", "fish", "ksh", "tmux", "python3", "sleep", ""}
 GENERIC_TITLES = {"", "claude", "claude code", "codex", "openai codex"}
 
@@ -177,7 +179,13 @@ class View:
     items: list
     repos: list
     now: float
+    home: object = None       # RepoRow of the home workspace, None when disabled/unavailable
     frame: int = 0            # spinner frame, from the menu's own clock
+
+
+def places(view):
+    """Where sessions can live, in menu order: the home workspace, then repositories."""
+    return ([view.home] if view.home else [])+view.repos
 
 
 def describe(kind, command, title, repo):
@@ -237,11 +245,11 @@ def branch_of(ref):
     return value[:7] if value and not value.startswith("ref:") else ""
 
 
-def build_view(snapshot, titles, now=None):
+def build_view(snapshot, titles, now=None, home=None):
     items = []
     for w in snapshot.workloads:
         r, session = w.record, w.session
-        repo = os.path.basename(r.repo.path)
+        repo = place(r.repo)
         command, title = titles.get(r.session, ("", ""))
         live = w.state in (State.RUNNING, State.ATTACHED)
         items.append(Item(r.id, r.kind, r.instance, repo, r.repo.path, w.state, w.repo_health,
@@ -253,7 +261,8 @@ def build_view(snapshot, titles, now=None):
     items.sort(key=lambda item: (item.created, item.id))
     repos = [RepoRow(ref, os.path.basename(ref.path), branch_of(ref), [i for i in items if i.path == ref.path])
              for ref in snapshot.repos]
-    return View(snapshot.runtime_health, list(snapshot.issues), items, repos, now or time.time())
+    row = RepoRow(home, place(home), HOME_NOTE, [i for i in items if i.path == home.path]) if home else None
+    return View(snapshot.runtime_health, list(snapshot.issues), items, repos, now or time.time(), row)
 
 
 @dataclass
@@ -381,10 +390,15 @@ def frame_main(view, ui, width, height, glyphs):
             details[len(rows)-1] = [(" "*7+clip(display(item.title), width-8), "muted")]
     if not view.items:
         rows.append([("    Nic nie działa. ", "muted"), ("l", "key"), (" Claude  ", "muted"), ("c", "key"),
-                     (" Codex  ", "muted"), ("t", "key"), (" terminal", "muted")])
-    repos = [repo_row("", row, width, glyphs, selected=ui.cursor == len(shown)+n) for n, row in enumerate(view.repos)]
+                     (" Codex  ", "muted"), ("t", "key"), (" terminal", "muted")]
+                    +([("  ", ""), (HOME_KEY, "key"), (" ~ bez repo", "muted")] if view.home else []))
+    repos = [repo_row(HOME_KEY if row is view.home else "", row, width, glyphs, selected=ui.cursor == len(shown)+n)
+             for n, row in enumerate(places(view))]
     hints = [("1-9", "wejdź"), ("l", "Claude"), ("c", "Codex"), ("t", "terminal"), ("d", "zatrzymaj"),
-             ("i", "szczegóły"), ("r", "repo"), ("g", "GitHub"), ("?", "pomoc"), ("q", "shell" if ui.autologin else "wyjdź")]
+             ("i", "szczegóły"), ("r", "repo"), (HOME_KEY, "~ bez repo"), ("g", "GitHub"), ("?", "pomoc"),
+             ("q", "shell" if ui.autologin else "wyjdź")]
+    if view.home is None:
+        hints.remove((HOME_KEY, "~ bez repo"))
     if ui.autologin:
         hints.append(("x", "rozłącz"))
     bottom = [rule(width, glyphs)]+flow(hints, width)
@@ -435,7 +449,11 @@ def frame_pick(view, ui, width, height, glyphs):
             for n, row in enumerate(view.repos[page*PAGE:page*PAGE+PAGE], 1)]
     if not view.repos:
         rows = [[("    Brak repozytoriów w katalogu roboczym. ", "muted"), ("g", "key"), (" = GitHub", "muted")]]
+    if view.home:                                     # on every page: it is a key, not a number
+        rows.insert(0, repo_row(HOME_KEY, view.home, width, glyphs, kind=ui.kind))
     hints = [("1-9", "start" if ui.kind else "otwórz")]
+    if view.home:
+        hints.append((HOME_KEY, "~ bez repo"))
     if ui.kind:
         hints.append(("n", "nazwa sesji"))
         if ui.kind != "terminal":
@@ -448,16 +466,20 @@ def frame_pick(view, ui, width, height, glyphs):
 
 
 def frame_repo(view, ui, width, height, glyphs):
-    row = next((r for r in view.repos if r.ref.path == ui.repo.path), None)
-    name = os.path.basename(ui.repo.path)
-    top = [head(view, "REPO "+name, width, glyphs),
-           [(" "+clip(display(ui.repo.path), width-2), "muted"), ("  "+(row.branch if row else ""), "ok")]]
+    row = next((r for r in places(view) if r.ref.path == ui.repo.path), None)
+    home = ui.repo.plain
+    title = "KATALOG DOMOWY ~" if home else "REPO "+os.path.basename(ui.repo.path)
+    top = [head(view, title, width, glyphs),
+           [(" "+clip(display(ui.repo.path), width-2), "muted"),
+            ("  "+(row.branch if row else ""), "muted" if home else "ok")]]
     top += start_options(ui, talks=True)
     items = row.items if row else []
-    body = [[(" Sesje w tym repo:", "section")]] if items else []
+    body = [[(" Sesje w katalogu domowym:" if home else " Sesje w tym repo:", "section")]] if items else []
     body += [workload_row(n, item, width, glyphs, frame=view.frame) for n, item in enumerate(items[:PAGE], 1)]
     hints = [("l", "Claude"), ("c", "Codex"), ("t", "terminal"), ("n", "nazwa sesji"), ("r", "nowa/wznów"),
              ("s", "status Gita"), ("0", "wróć")]
+    if home:
+        hints.remove(("s", "status Gita"))
     if items:
         hints.insert(0, ("1-9", "wejdź"))
     bottom = [rule(width, glyphs)]+flow(hints, width)+message_lines(ui, width)
@@ -537,7 +559,8 @@ def frame_github(view, ui, width, height, glyphs, catalogue, repos):
 
 HELP = (
     ("1-9", "wejdź do sesji z listy, bez Entera"),
-    ("l c t", "nowa sesja: Claude / Codex / terminal, potem repo"),
+    ("l c t", "nowa sesja: Claude / Codex / terminal, potem repo albo h"),
+    ("h", "katalog domowy ~: terminal albo agent poza repozytorium"),
     ("r n", "przy wyborze repo: wznów rozmowę / własna nazwa"),
     ("d", "zatrzymaj: numer sesji, potem q potwierdza"),
     ("i", "szczegóły: podgląd, dołączenie, przejęcie, naprawa"),
@@ -711,6 +734,17 @@ class Screen:
         return max(1, len(self.previous or [""]))
 
 
+def tidied(done):
+    """What was cleaned up after it ended by itself, with a non-zero exit status said aloud."""
+    code = lambda w: w.session.exit_status if w.session else None
+    if len(done) == 1:
+        w = done[0]
+        status = f" (kod {code(w)})" if code(w) else ""
+        return f"{w.record.kind}/{name_pl(w.record.instance)}: koniec pracy{status}, posprzątane"
+    names = ", ".join(f"{w.record.kind}/{name_pl(w.record.instance)}"+(f" (kod {code(w)})" if code(w) else "") for w in done)
+    return f"{names}: koniec pracy, posprzątane"
+
+
 class Menu:
     def __init__(self, app, reader, screen):
         self.app, self.reader, self.screen = app, reader, screen
@@ -722,6 +756,7 @@ class Menu:
         self.snapshot = None
         self.view = None
         self.repos = []
+        self.home_error = ""
         self.clock = time.monotonic
         self.touched = self.clock()
 
@@ -735,7 +770,16 @@ class Menu:
 
     def refresh(self):
         self.snapshot = self.app.snapshot()
-        self.view = build_view(self.snapshot, self.app.tmux.titles())
+        try:
+            home, self.home_error = self.app.git.home(), ""
+        except HubiError as e:
+            home, self.home_error = None, str(e)
+        self.view = build_view(self.snapshot, self.app.tmux.titles(), home=home)
+
+    def home(self):
+        if self.view.home is None:
+            raise HubiError(self.home_error or "Home workspace is unavailable")
+        return self.view.home.ref
 
     def draw(self):
         width, height = self.screen.size()
@@ -828,8 +872,7 @@ class Menu:
         # session that was alive when we went in is checked, not only this one.
         done = [w for w in [self.app.reap_clean_exit(ident)]+[self.app.reap_clean_exit(i.id) for i in live] if w]
         if done:
-            names = ", ".join(f"{w.record.kind}/{name_pl(w.record.instance)}" for w in done)
-            self.say(f"{names}: koniec pracy, posprzątane", "ok")
+            self.say(tidied(done), "ok")
             if self.ui.screen == "detail" and any(w.record.id == ident for w in done):
                 self.ui.screen = "main"
         if any(w.record.id == ident for w in done):
@@ -841,7 +884,9 @@ class Menu:
         if after.state == State.EXITED:
             self.ui.screen, self.ui.selected = "detail", ident
             status = after.session.exit_status if after.session else None
-            self.say(f"Sesja zakończyła się błędem (kod {status}); v = podgląd wyjścia, d = usuń", "bad")
+            signal_name = after.session.exit_signal if after.session else ""
+            why = f"przerwana sygnałem {signal_name}" if signal_name else f"zakończyła się błędem (kod {status})"
+            self.say(f"Sesja {why}; v = podgląd wyjścia, d = usuń", "bad")
         elif code:
             self.say(f"Nie udało się wejść do sesji (kod {code})", "bad")
 
@@ -913,6 +958,8 @@ class Menu:
 
     def open_repo(self, ref):
         self.ui.screen, self.ui.repo, self.ui.page, self.ui.cursor, self.ui.git = "repo", ref, 0, -1, ""
+        if ref.plain:
+            return
         try:
             self.ui.git = self.app.git.summary(ref)
         except HubiError as e:
@@ -984,6 +1031,8 @@ class Menu:
             ui.screen, ui.kind, ui.page, ui.cursor = "pick", KINDS[key], 0, -1
         elif key == "r":
             ui.screen, ui.kind, ui.page, ui.cursor = "pick", "", 0, -1
+        elif key == HOME_KEY:
+            self.open_repo(self.home())
         elif key in ("d", "i"):
             if not view.items:
                 return self.say("Nie ma żadnej sesji", "warn")
@@ -995,12 +1044,12 @@ class Menu:
         elif key == " ":
             ui.page, ui.cursor = (page+1) % pages, -1
         elif key in ("down", "j", "up", "k"):
-            self.move(len(shown)+len(view.repos), 1 if key in ("down", "j") else -1)
+            self.move(len(shown)+len(places(view)), 1 if key in ("down", "j") else -1)
         elif key == "enter" and ui.cursor >= 0:
             if ui.cursor < len(shown):
                 return self.enter(shown[ui.cursor])
-            if ui.cursor-len(shown) < len(view.repos):
-                self.open_repo(view.repos[ui.cursor-len(shown)].ref)
+            if ui.cursor-len(shown) < len(places(view)):
+                self.open_repo(places(view)[ui.cursor-len(shown)].ref)
         else:
             return False
 
@@ -1016,6 +1065,12 @@ class Menu:
             chosen = shown[int(key)-1]
         elif key == "enter" and 0 <= ui.cursor < len(shown):
             chosen = shown[ui.cursor]
+        elif key == HOME_KEY:
+            ref = self.home()
+            if not ui.kind:
+                return self.open_repo(ref)
+            ui.screen = "main"
+            return self.launch(ui.kind, ref)
         if chosen:
             if not ui.kind:
                 return self.open_repo(chosen.ref)
@@ -1036,7 +1091,7 @@ class Menu:
 
     def on_repo(self, key):
         ui = self.ui
-        row = next((r for r in self.view.repos if r.ref.path == ui.repo.path), None)
+        row = next((r for r in places(self.view) if r.ref.path == ui.repo.path), None)
         items = row.items[:PAGE] if row else []
         if key in "123456789":
             if int(key) > len(items):
@@ -1049,6 +1104,8 @@ class Menu:
         elif key == "r":
             self.toggle_resume()
         elif key == "s":
+            if ui.repo.plain:
+                return self.say("Katalog domowy nie jest repozytorium Git", "muted")
             ui.git = self.app.git.summary(ui.repo)
             self.say("Status Gita odświeżony", "ok")
         else:

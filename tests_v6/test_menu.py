@@ -16,7 +16,7 @@ from unittest.mock import patch
 from hubi6 import menu
 from hubi6.adapters.tmux import NEW_PANE_HINT, label
 from hubi6.config import Config
-from hubi6.core.model import HubiError, Record, RepoHealth, RepoRef, Session, State, Workload, key_id
+from hubi6.core.model import HubiError, Record, RepoHealth, RepoRef, Session, State, Unit, Workload, key_id
 from hubi6.i18n import age, instance_of, name_pl, pl, plural
 from hubi6.inventory import Snapshot
 from hubi6.services import App
@@ -400,20 +400,36 @@ class LifecycleUnitTests(unittest.TestCase):
         app.stop = lambda identity, expected=None, repair=False: app.stopped.append((identity, expected))
         return app
 
-    def test_only_a_clean_unattached_exit_is_reaped(self):
+    def test_reap_rules_per_type_status_and_signal(self):
         now = time.time()
-        clean = workload("terminal", "a", "alpha", State.EXITED, created=now, status=0)
-        app = self.app(clean)
-        self.assertIs(app.reap_clean_exit(clean.record.id), clean)
-        self.assertEqual(app.stopped, [(clean.record.id, clean.record.generation)])
-        for kept in (workload("terminal", "a", "alpha", State.EXITED, created=now, status=1),
-                     workload("terminal", "a", "alpha", State.EXITED, created=now, status=0, exit_signal="9"),
-                     workload("terminal", "a", "alpha", State.EXITED, created=now, status=0, attached=1),
-                     workload("terminal", "a", "alpha", State.EXITED, created=now, status=None),
+        exited = lambda kind, **kw: workload(kind, "a", "alpha", State.EXITED, created=now, **kw)
+        # A terminal's `exit` carries the last command's status: any status is the user's own way out.
+        for gone in (exited("terminal", status=0), exited("terminal", status=1), exited("terminal", status=127),
+                     exited("codex", status=0), exited("claude", status=0)):
+            app = self.app(gone)
+            self.assertIs(app.reap_clean_exit(gone.record.id), gone, (gone.record.kind, gone.session.exit_status))
+            self.assertEqual(app.stopped, [(gone.record.id, gone.record.generation)])
+        two_panes = exited("terminal", status=1)
+        two_panes.session.panes = 2
+        live_scope = exited("terminal", status=1)
+        live_scope.unit = Unit(live_scope.record.scope, "active")
+        for kept in (exited("codex", status=1), exited("claude", status=3),          # failed agents stay (contract 19)
+                     exited("terminal", status=None, exit_signal="9"),               # killed: not the user's exit
+                     exited("terminal", status=0, exit_signal="15"), exited("codex", status=None, exit_signal="9"),
+                     exited("terminal", status=None),                                # status unknown
+                     exited("terminal", status=1, attached=1), two_panes, live_scope,
                      workload("terminal", "a", "alpha", State.RUNNING, created=now)):
             app = self.app(kept)
-            self.assertIsNone(app.reap_clean_exit(kept.record.id))
+            self.assertIsNone(app.reap_clean_exit(kept.record.id), (kept.record.kind, kept.session.exit_status, kept.session.exit_signal))
             self.assertEqual(app.stopped, [])
+
+    def test_tidy_message_says_a_non_zero_code(self):
+        now = time.time()
+        term = workload("terminal", "primary", "alpha", State.EXITED, created=now, status=1)
+        clean = workload("terminal", "2", "alpha", State.EXITED, created=now, status=0)
+        self.assertEqual(menu.tidied([term]), "terminal/główna: koniec pracy (kod 1), posprzątane")
+        self.assertEqual(menu.tidied([clean]), "terminal/2: koniec pracy, posprzątane")
+        self.assertEqual(menu.tidied([term, clean]), "terminal/główna (kod 1), terminal/2: koniec pracy, posprzątane")
 
     def test_menu_terminal_mode_cannot_be_suspended(self):
         master, slave = pty.openpty()
@@ -449,6 +465,9 @@ class FakeGit:
 
     def resolve(self, value):
         return ref(Path(value).name)
+
+    def home(self):
+        raise HubiError("Home workspace is disabled in the configuration")
 
 
 class FakeApp:
@@ -1011,6 +1030,47 @@ class DashboardRuntimeTests(unittest.TestCase):
         keys = show("list-keys", "-T", "prefix")
         self.assertFalse([line for line in keys.splitlines() if line.split()[3] == "C-z"], keys)
         self.assertEqual(self.app.tmux.titles().keys(), {r.session})
+
+    def test_terminal_exit_with_any_status_is_tidied(self):
+        w = self.app.start("terminal", str(self.path))
+        client = self.menu()
+        time.sleep(.12)
+        client.output = b""
+        client.send(b"1")
+        self.attached(w.id)
+        client.send(b"false; exit 3\n")
+        client.read_until("terminal/główna: koniec pracy (kod 3), posprzątane".encode(), 10)
+        self.assertFalse(self.app.runtime_snapshot().workloads)
+
+    def test_signalled_terminal_and_failed_agent_stay(self):
+        w = self.app.start("terminal", str(self.path))
+        client = self.menu()
+        time.sleep(.12)
+        client.output = b""
+        client.send(b"1")
+        self.attached(w.id)
+        client.send(b"kill -9 $$\n")
+        client.read_until("przerwana sygnałem".encode(), 10)
+        client.read_until("przerwany".encode(), 5)                      # the detail screen's state cell
+        kept = self.only()
+        self.assertEqual((kept.record.id, kept.state, kept.session.exit_signal), (w.id, State.EXITED, "9"))
+        self.app.stop(w.id)
+        self.config.write_text(self.config.read_text().replace(
+            'codex = [', 'codex = ["/bin/sh", "-c", "sleep 1; exit 4"]\n#codex = [', 1))
+        app = App(Config.load(str(self.config)))
+        agent = app.start("codex", str(self.path))
+        wait_for(lambda: app.find(agent.id).state == State.EXITED, 6)
+        self.assertIsNone(app.reap_clean_exit(agent.id))                # contract 19: a failed agent stays
+        self.assertEqual(app.find(agent.id).session.exit_status, 4)
+
+    def test_one_command_terminal_tidies_after_a_failing_exit(self):
+        client = Client(["--config", str(self.config), "terminal", "only"], ui="dashboard")
+        self.addCleanup(client.close)
+        w = self.only()
+        self.attached(w.record.id)
+        client.send(b"exit 5\n")
+        self.assertEqual(client.p.wait(5), 0)
+        self.assertFalse(self.app.runtime_snapshot().workloads)
 
     def test_one_command_opens_and_tidies(self):
         client = Client(["--config", str(self.config), "terminal", "only"], ui="dashboard")

@@ -53,6 +53,7 @@ One key is one action, without Enter:
 | `d` | stop: session number, then `q` confirms |
 | `i` | session details: view, share, take over, stop, repair |
 | `r` | repository view with `git status` |
+| `h` | home workspace view (sessions outside any repository) |
 | `g` | GitHub catalogue and clone |
 | `?` | help |
 | `q` / `x` | shell (98) / end the SSH session (99, only offered under autologin) |
@@ -108,10 +109,20 @@ exactly as before; a helper thread only draws.
 
 When the primary process of a session ends, a `pane-died` hook detaches every
 client, which returns to the menu instead of staying on "Pane is dead". The dead
-pane and its exit status are still retained. A clean exit (status 0, no signal,
-no clients) is then removed automatically by `App.reap_clean_exit`; nothing is
-signalled, because the scope is already gone. A failed exit stays EXITED and
-opens its detail screen, where `v` shows the output and `d` removes it.
+pane and its exit status are still retained. A session that ended by itself
+(no signal, no clients, one pane, scope gone) is then removed automatically by
+`App.reap_clean_exit`, after attach in the menu (also for sessions reached with
+`Ctrl-b ( ) L`) and in `hubi claude|codex|terminal`; nothing is signalled, because
+the scope is already gone, and the stop still carries the exact generation.
+
+The EXITED rule depends on the type. An agent (Claude, Codex) is removed only
+after status 0; a failed agent stays EXITED (contract 19) and opens its detail
+screen, where `v` shows the output and `d` removes it. A terminal is removed
+after `exit` with any status, since a shell's `exit` carries the status of its
+last command and is still the user's way out; the menu then says the code
+(`terminal/główna: koniec pracy (kod 1), posprzątane`). A terminal killed by a
+signal stays EXITED as `przerwany`, and one that died during start (start
+reports the failure) stays inspectable as before.
 
 Codex is started with `--no-daemon` by default. Without it, Codex 0.162 starts a
 per-user background server (`codex app-server --managed-daemon`) from the first
@@ -138,6 +149,34 @@ Hubi is the SSH login entry point. Human-readable CLI output and error messages
 are Polish through `hubi6/i18n.py`; raised messages, logs and JSON keep their
 stable English identifiers, and a test fails when a new message has no Polish
 wording.
+
+### Home workspace
+
+Work that belongs to no repository (a persistent shell for general work on the
+machine, or an agent doing machine administration) runs in the home workspace,
+`home_workspace` in the configuration (default `~`, the account's passwd home;
+`""` disables it). It must lie outside `repos_root`, so that no path is both a
+repository and the plain home workspace: an explicit setting inside it is a
+configuration error, while the default simply switches off (for `repos_root =
+"~"`). In the dashboard `h` opens it, and `l`/`c`/`t` followed by
+`h` starts a session there and attaches. The command line accepts `~` (or the
+directory itself) wherever it takes a repository. Only `hubi terminal` without a
+repository means the home workspace: an agent there acts on the whole home
+directory (Claude runs with `bypassPermissions` by default), so `hubi claude` and
+`hubi codex` require an explicit `~`, an empty repository argument is an error,
+and `App.start` refuses an agent without a repository. The line menu
+(`--classic`) has the same `h` entry, shown only when the home workspace is usable.
+
+It is a plain directory, never treated as a Git working tree even when it holds
+a dotfiles repository. Its identity is the directory's device and inode; Hubi
+writes nothing into it (no workspace UUID) and runs no Git subprocess for it, so
+there is no `git status` view. A workload record keeps the usual schema: empty
+Git fields mark the plain workspace, and JSON adds `"workspace": "home"` (or
+`"repo"`). Health still applies: a removed or replaced directory shows as
+MISSING or REPLACED and the session stays stoppable. Only the configured
+directory is accepted for new sessions; sessions created before a change of
+`home_workspace` remain visible and stoppable. Agents started there act on the
+whole home directory with their usual permissions.
 
 ## Configuration and deployment materials
 
