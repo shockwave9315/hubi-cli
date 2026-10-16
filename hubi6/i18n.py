@@ -5,6 +5,8 @@ the JSON interface depend on it. Only what a person reads in the menu or on the
 CLI is translated here, at the moment of display. An untranslated message is
 shown unchanged, never hidden.
 """
+import os
+import pwd
 import re
 
 from .core.model import RepoHealth, State
@@ -38,6 +40,16 @@ EXACT = {
     "Invalid .git file": "Nieprawidłowy plik .git",
     "Repository is unavailable": "Repozytorium jest niedostępne",
     "Repository escapes repo root": "Repozytorium wychodzi poza katalog repozytoriów",
+    # home workspace (work outside any repository)
+    "Home workspace is disabled in the configuration": "Katalog domowy (bez repo) jest wyłączony w konfiguracji: home_workspace",
+    "Home workspace is unavailable": "Katalog domowy (bez repo) jest niedostępny",
+    "Home workspace is not a directory": "Katalog domowy (bez repo) nie jest katalogiem",
+    "Home workspace changed or is not the configured one": "Katalog domowy zmienił się albo nie jest tym z konfiguracji",
+    "The home workspace is not a Git repository": "Katalog domowy nie jest repozytorium Git",
+    "home_workspace must be a path string": "home_workspace musi być ścieżką zapisaną jako tekst",
+    "home_workspace must be outside repos_root": "home_workspace musi leżeć poza katalogiem repozytoriów (repos_root)",
+    "Repository name is empty": "Pusta nazwa repozytorium (katalog domowy podaj jawnie jako ~)",
+    "An agent needs an explicit repository or ~": "Agent wymaga jawnie podanego repozytorium albo ~ (katalog domowy)",
     # systemd adapter
     "Malformed systemd inventory: missing or duplicate unit identity": "Nieprawidłowa lista jednostek systemd: brak lub duplikat identyfikatora",
     "Refusing foreign systemd unit": "Odmowa: obca jednostka systemd",
@@ -209,6 +221,17 @@ def pl(message):
         if match:
             return target.format(**match.groupdict())
     return text
+
+
+def place(ref):
+    """What a person calls a workspace: the repository name, or ~ for the home directory."""
+    if ref.plain:
+        try:
+            if ref.path == os.path.realpath(pwd.getpwuid(os.getuid()).pw_dir):
+                return "~"
+        except KeyError:
+            pass
+    return os.path.basename(ref.path.rstrip("/")) or ref.path
 
 
 def name_pl(instance):

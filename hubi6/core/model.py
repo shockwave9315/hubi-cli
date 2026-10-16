@@ -85,6 +85,15 @@ class RepoRef:
     origin: str = ""
     workspace_id: str = ""
 
+    @property
+    def plain(self):
+        """A plain directory (the home workspace), not a Git working tree.
+
+        It is identified by device and inode only; the empty Git fields are the
+        marker, so journals keep the same schema as for repositories.
+        """
+        return not self.git_dir
+
 
 @dataclass
 class Record:
@@ -147,11 +156,15 @@ class Record:
             for value in (r.repo.device, r.repo.inode, r.repo.git_device, r.repo.git_inode):
                 if type(value) is not int or value < 0:
                     raise ValueError("Invalid filesystem identity")
-            if not isinstance(r.repo.git_dir, str) or not r.repo.git_dir.startswith("/"):
-                raise ValueError("Invalid Git directory")
-            safe_path(r.repo.git_dir)
-            if not isinstance(r.repo.origin, str):
-                raise ValueError("Invalid origin")
+            if not isinstance(r.repo.git_dir, str) or not isinstance(r.repo.origin, str):
+                raise ValueError("Invalid workspace fields")
+            if r.repo.plain:
+                if r.repo.git_device or r.repo.git_inode or r.repo.origin or r.repo.workspace_id:
+                    raise ValueError("Invalid directory workspace")
+            else:
+                if not r.repo.git_dir.startswith("/"):
+                    raise ValueError("Invalid Git directory")
+                safe_path(r.repo.git_dir)
             if r.repo.workspace_id and not re.fullmatch(r"[0-9a-f]{32}", r.repo.workspace_id):
                 raise ValueError("Invalid workspace identity")
             return r
@@ -243,7 +256,8 @@ class Workload:
 
     def data(self) -> dict:
         r = self.record
-        return {"id": r.id, "type": r.kind, "repo": r.repo.path, "repo_health": self.repo_health.value,
+        return {"id": r.id, "type": r.kind, "repo": r.repo.path, "workspace": "home" if r.repo.plain else "repo",
+                "repo_health": self.repo_health.value,
                 "instance": r.instance, "tmux_session": r.session, "scope": r.scope,
                 "generation": r.generation, "invocation": r.invocation,
                 "state": self.state.value, "attached_clients": self.session.attached if self.session else 0,

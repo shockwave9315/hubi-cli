@@ -2,6 +2,7 @@ import configparser
 import os
 from pathlib import Path
 import re
+import stat
 import uuid
 import tempfile
 from urllib.parse import urlparse
@@ -77,8 +78,29 @@ def reference(path: Path, *, resolved=False) -> RepoRef:
     return RepoRef(str(path), s.st_dev, s.st_ino, str(gitdir), g.st_dev, g.st_ino, read_origin(gitdir), workspace)
 
 
+def directory_reference(path: Path) -> RepoRef:
+    """The home workspace: a plain directory identified by device and inode.
+
+    Nothing is read from or written to it; it may even contain a dotfiles
+    repository, which is deliberately not treated as a Git working tree here.
+    """
+    path = path.resolve(strict=True)
+    safe_path(str(path))
+    s = path.stat()
+    if not stat.S_ISDIR(s.st_mode):
+        raise HubiError("Home workspace is not a directory")
+    return RepoRef(str(path), s.st_dev, s.st_ino, "", 0, 0)
+
+
 def pin_workspace(ref: RepoRef) -> RepoRef:
     """A UUID in untracked Git administrative data defeats inode reuse too."""
+    if ref.plain:
+        # No Git administrative directory exists to hold a marker, and nothing
+        # is ever written into the home directory itself.
+        current = directory_reference(Path(ref.path))
+        if (current.device, current.inode) != (ref.device, ref.inode):
+            raise HubiError("Repository changed while pinning workspace identity")
+        return current
     current = reference(Path(ref.path))
     identity = lambda r: (r.device, r.inode, r.git_device, r.git_inode)
     if identity(current) != identity(ref):
@@ -113,6 +135,8 @@ def health(ref: RepoRef) -> RepoHealth:
         return RepoHealth.INVALID
     if (s.st_dev, s.st_ino) != (ref.device, ref.inode):
         return RepoHealth.REPLACED
+    if ref.plain:
+        return RepoHealth.OK if stat.S_ISDIR(s.st_mode) else RepoHealth.INVALID
     try:
         gitdir = git_directory(path)
         g = gitdir.stat()
@@ -172,10 +196,35 @@ class Git:
                 errors.append(f"Invalid repository {entry.name}: {type(e).__name__}")
         return refs, errors
 
-    def resolve(self, value: str) -> RepoRef:
+    def home(self) -> RepoRef:
+        """The configured home workspace: work outside any repository."""
+        if self.c.home_workspace is None:
+            raise HubiError("Home workspace is disabled in the configuration")
+        try:
+            return directory_reference(self.c.home_workspace)
+        except (OSError, RuntimeError) as e:
+            raise HubiError("Home workspace is unavailable") from e
+
+    def is_home(self, path: Path) -> bool:
+        if self.c.home_workspace is None:
+            return False
+        try:
+            return path.resolve() == self.c.home_workspace
+        except (OSError, RuntimeError):
+            return False
+
+    def resolve(self, value: str | None) -> RepoRef:
+        """A repository under repos_root, or the home workspace (None, ~ or its path)."""
+        if value is None:
+            ref = self.home()
+            return self.validate(ref)
+        if not value:
+            raise HubiError("Repository name is empty")   # an unset $REPO never means ~
         path = Path(safe_path(value)).expanduser()
         if not path.is_absolute():
             path = self.c.repos/path
+        if self.is_home(path):
+            return self.validate(self.home())
         try:
             ref = reference(path)
         except (OSError, UnicodeError) as e:
@@ -185,6 +234,12 @@ class Git:
 
     def validate(self, ref: RepoRef):
         path = Path(ref.path)
+        if ref.plain:
+            # Only the configured home workspace is a valid plain directory, and
+            # its identity needs no Git subprocess.
+            if self.c.home_workspace is None or path != self.c.home_workspace or health(ref) != RepoHealth.OK:
+                raise HubiError("Home workspace changed or is not the configured one")
+            return ref
         if not path.is_relative_to(self.c.repos) or path == self.c.repos or health(ref) != RepoHealth.OK:
             raise HubiError("Repository missing, invalid, replaced or outside repo root")
         result = self.r.run(["git", "-C", str(path), "rev-parse", "--show-toplevel"], env=self.env())
@@ -193,5 +248,7 @@ class Git:
         return ref
 
     def summary(self, ref):
+        if ref.plain:
+            raise HubiError("The home workspace is not a Git repository")
         p = self.r.run(["git", "-C", ref.path, "status", "--short", "--branch"], env=self.env())
         return p.stdout
