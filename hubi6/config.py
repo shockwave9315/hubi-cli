@@ -118,7 +118,7 @@ class Config:
             raise HubiError("Invalid ui configuration")
         return cls(home, repos, runtime_base, state, cache, config_base, socket, service, rid,
                    defaults, owner, ttl, lock_timeout=positive_number(data.get("lock_timeout", 3), "lock_timeout"),
-                   home_workspace=home_workspace(data.get("home_workspace", "~"), home),
+                   home_workspace=home_workspace(data.get("home_workspace"), home, repos),
                    clone_timeout=positive_number(github.get("clone_timeout", 300), "github.clone_timeout"),
                    ui_refresh=positive_number(ui.get("refresh", 2), "ui.refresh"),
                    ui_color=ui.get("color", True), ui_icons=ui.get("icons", True), **values)
@@ -149,8 +149,15 @@ def positive_number(value, name):
     return value
 
 
-def home_workspace(value, home):
-    """The home workspace path ("" disables it); ~ means the account home."""
+def home_workspace(value, home, repos):
+    """The home workspace path ("" disables it); ~ (the default) means the account home.
+
+    It must lie outside repos_root, otherwise one path would be both a repository
+    and the plain home workspace. The default simply switches off in that case
+    (repos_root = "~"); an explicit setting is an error.
+    """
+    explicit = value is not None
+    value = "~" if value is None else value
     if not value:
         return None
     if value == "~" or value.startswith("~/"):
@@ -161,9 +168,14 @@ def home_workspace(value, home):
         raise HubiError("home_workspace must be an absolute path")
     safe_path(str(path))
     try:
-        return path.resolve()
+        path = path.resolve()
     except (OSError, RuntimeError) as e:
         raise HubiError("Invalid home_workspace path") from e
+    if path == repos or path.is_relative_to(repos):
+        if explicit:
+            raise HubiError("home_workspace must be outside repos_root")
+        return None
+    return path
 
 
 def xdg_path(name, default):

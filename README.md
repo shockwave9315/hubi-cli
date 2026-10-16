@@ -154,8 +154,10 @@ hubi doctor                   # diagnostyka
 hubi --classic                # starsze menu liniowe, awaryjne
 ```
 
-`REPO` to nazwa katalogu w `~/repos` albo ścieżka; `~` oznacza katalog domowy
-(w `hubi claude|codex|terminal` także brak `REPO`). Opcje każdego polecenia
+`REPO` to nazwa katalogu w `~/repos` albo ścieżka; `~` oznacza katalog domowy.
+Brak `REPO` oznacza katalog domowy tylko w `hubi terminal`: agent (`claude`,
+`codex`) działa tam na całym katalogu domowym, więc wymaga jawnego `~`, a puste
+`$REPO` w skrypcie kończy się błędem. Opcje każdego polecenia
 pokazuje `hubi POLECENIE --help`.
 
 ## Konfiguracja
@@ -166,7 +168,7 @@ Plik `~/.config/hubi6/config.toml` jest opcjonalny. Wzór z opisem:
 | Klucz | Domyślnie | Znaczenie |
 |---|---|---|
 | `repos_root` | `~/repos` | gdzie szukać repozytoriów |
-| `home_workspace` | `~` | katalog dla sesji poza repozytorium; `""` wyłącza |
+| `home_workspace` | `~` | katalog dla sesji poza repozytorium, poza `repos_root`; `""` wyłącza |
 | `[agents] claude` | `["claude", "--permission-mode", "bypassPermissions"]` | polecenie Claude |
 | `[agents] codex` | `["codex", "--no-daemon"]` | polecenie Codexa |
 | `[ui] refresh` | `2` | odświeżanie listy w sekundach |

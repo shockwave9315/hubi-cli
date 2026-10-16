@@ -145,11 +145,17 @@ wording.
 Work that belongs to no repository (a persistent shell for general work on the
 machine, or an agent doing machine administration) runs in the home workspace,
 `home_workspace` in the configuration (default `~`, the account's passwd home;
-`""` disables it). In the dashboard `h` opens it, and `l`/`c`/`t` followed by
+`""` disables it). It must lie outside `repos_root`, so that no path is both a
+repository and the plain home workspace: an explicit setting inside it is a
+configuration error, while the default simply switches off (for `repos_root =
+"~"`). In the dashboard `h` opens it, and `l`/`c`/`t` followed by
 `h` starts a session there and attaches. The command line accepts `~` (or the
-directory itself) wherever it takes a repository; `hubi claude|codex|terminal`
-without a repository means the home workspace. The line menu (`--classic`) has
-the same `h` entry.
+directory itself) wherever it takes a repository. Only `hubi terminal` without a
+repository means the home workspace: an agent there acts on the whole home
+directory (Claude runs with `bypassPermissions` by default), so `hubi claude` and
+`hubi codex` require an explicit `~`, an empty repository argument is an error,
+and `App.start` refuses an agent without a repository. The line menu
+(`--classic`) has the same `h` entry, shown only when the home workspace is usable.
 
 It is a plain directory, never treated as a Git working tree even when it holds
 a dotfiles repository. Its identity is the directory's device and inode; Hubi

@@ -221,12 +221,16 @@ def run(app):
         catalogue = None
         while True:
             snapshot = app.snapshot()
+            try:
+                home = app.git.home()
+            except HubiError:
+                home = None
             rows = ["Hubi v6   runtime: "+snapshot.runtime_health, ""]
             choices = []
             if screen == "main":
                 choices = snapshot.repos
                 active = len(snapshot.workloads)
-                rows += [f"Workloads: {active}   [w] workloads  [h] home (no repository)  [g] GitHub repositories  [q] shell  [x] exit SSH"]
+                rows += [f"Workloads: {active}   [w] workloads  {'[h] home (no repository)  ' if home else ''}[g] GitHub repositories  [q] shell  [x] exit SSH"]
                 rows += [f"{w.record.kind}/{display(w.record.instance)} {w.state.value} repo:{w.repo_health.value}  {display(w.record.repo.path)}"
                          for w in snapshot.workloads if w.repo_health.value != "OK"]
                 for index, ref in enumerate(choices[page*9:page*9+9], 1):
@@ -292,8 +296,8 @@ def run(app):
                     screen, page = "workloads", 0
                 elif action == "g" and screen == "main":
                     screen, page = "github", 0
-                elif action == "h" and screen == "main":
-                    selected, screen, page = app.git.resolve(None), "repo", 0
+                elif action == "h" and screen == "main" and home:
+                    selected, screen, page = app.git.validate(home), "repo", 0
                 elif len(action) == 1 and action in "123456789" and (page*9+int(action)-1) < len(choices):
                     picked = choices[page*9+int(action)-1]
                     if screen == "main":

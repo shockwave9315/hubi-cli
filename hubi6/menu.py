@@ -387,7 +387,8 @@ def frame_main(view, ui, width, height, glyphs):
             details[len(rows)-1] = [(" "*7+clip(display(item.title), width-8), "muted")]
     if not view.items:
         rows.append([("    Nic nie działa. ", "muted"), ("l", "key"), (" Claude  ", "muted"), ("c", "key"),
-                     (" Codex  ", "muted"), ("t", "key"), (" terminal", "muted")])
+                     (" Codex  ", "muted"), ("t", "key"), (" terminal", "muted")]
+                    +([("  ", ""), (HOME_KEY, "key"), (" ~ bez repo", "muted")] if view.home else []))
     repos = [repo_row(HOME_KEY if row is view.home else "", row, width, glyphs, selected=ui.cursor == len(shown)+n)
              for n, row in enumerate(places(view))]
     hints = [("1-9", "wejdź"), ("l", "Claude"), ("c", "Codex"), ("t", "terminal"), ("d", "zatrzymaj"),

@@ -66,11 +66,40 @@ class HomeConfigTests(unittest.TestCase):
         self.assertEqual(self.load('home_workspace = "/srv"').home_workspace, Path("/srv").resolve())
         self.assertIsNone(self.load('home_workspace = ""').home_workspace)
 
+    def test_home_workspace_must_lie_outside_repos_root(self):
+        for text in ('repos_root = "/srv/r"\nhome_workspace = "/srv/r/x"', 'repos_root = "/srv/r"\nhome_workspace = "/srv/r"',
+                     'repos_root = "~"\nhome_workspace = "~"', 'home_workspace = "~/repos/alpha"'):
+            with self.subTest(text=text), self.assertRaisesRegex(HubiError, "outside repos_root"):
+                self.load(text)
+        self.assertIsNone(self.load('repos_root = "~"').home_workspace)    # the default switches off instead
+        self.assertEqual(self.load('repos_root = "~/code"\nhome_workspace = "~/scratch"').home_workspace, ACCOUNT_HOME/"scratch")
+
     def test_invalid_values_are_actionable_errors(self):
         for text in ('home_workspace = "relative/dir"', 'home_workspace = 5', 'home_workspace = "/tmp/a\\nb"',
                      'home_workspace = ["~"]'):
             with self.subTest(text=text), self.assertRaises(HubiError):
                 self.load(text)
+
+
+class HomeCommandLineTests(unittest.TestCase):
+    def test_only_the_terminal_defaults_to_the_home_workspace(self):
+        from hubi6.cli import parser
+        self.assertIsNone(parser().parse_args(["terminal"]).repo)
+        self.assertEqual(parser().parse_args(["terminal", "alpha", "x"]).instance, "x")
+        for kind in ("claude", "codex"):
+            with self.subTest(kind=kind), patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit) as stop:
+                parser().parse_args([kind])               # `hubi claude $REPO` with an unset REPO
+            self.assertEqual(stop.exception.code, 2)
+            self.assertEqual(parser().parse_args([kind, "~"]).repo, "~")
+
+    def test_agents_never_start_without_an_explicit_place(self):
+        app = App(Config.load())
+        for kind in ("claude", "codex"):
+            with self.subTest(kind=kind), self.assertRaisesRegex(HubiError, "explicit repository"):
+                app.start(kind, None)                     # refused before any filesystem or runtime access
+        git = Git(Config.load(), NoSubprocess())
+        with self.assertRaisesRegex(HubiError, "empty"):
+            git.resolve("")                               # `hubi claude "$REPO"` with an empty REPO
 
 
 class HomeRecordTests(unittest.TestCase):
@@ -275,6 +304,9 @@ class HomeMenuTests(unittest.TestCase):
         self.assertIn(" h  ~", main)
         self.assertIn("bez repo", main)
         self.assertIn("h ~ bez repo", main)
+        empty = menu.build_view(snapshot([]), {}, home=HOME)
+        idle = "\n".join(menu.render(menu.frame_main(empty, menu.Ui(), 64, 25, g), menu.Theme(False), 64))
+        self.assertIn("h ~ bez repo", [line for line in idle.splitlines() if "Nic nie działa" in line][0])
         pick = "\n".join(menu.render(frames["pick"](64, 25), menu.Theme(False), 64))
         self.assertIn(" h  ~", pick)
         self.assertIn("$ główna", pick)
@@ -304,6 +336,13 @@ class HomeRuntimeTests(unittest.TestCase):
                     app.stop(w.record.id, repair=True)
         for f in Path.home().glob(".agent-*"):
             f.unlink()
+
+    def clients(self, identity, count):
+        """The journal is written before the tmux session exists: wait for both."""
+        def check():
+            session = self.app.find(identity, health_check=False).session
+            return session is not None and session.attached == count
+        return wait_for(check, 8)
 
     def config(self, line):
         path = Path.home()/(f"home-{self._testMethodName}.toml")
@@ -345,7 +384,7 @@ class HomeRuntimeTests(unittest.TestCase):
         self.addCleanup(client.close)
         w = wait_for(lambda: self.app.runtime_snapshot().workloads)[0]
         self.assertTrue(w.record.repo.plain)
-        wait_for(lambda: self.app.find(w.record.id).session.attached == 1)
+        self.clients(w.record.id, 1)
         client.send(b"echo $PWD > ~/home-pwd.txt; exit\n")
         self.assertEqual(client.p.wait(8), 0)
         self.assertEqual((Path.home()/"home-pwd.txt").read_text().strip(), str(Path.home()))
@@ -365,17 +404,17 @@ class HomeRuntimeTests(unittest.TestCase):
         client.send(b"h")
         w = wait_for(lambda: self.app.runtime_snapshot().workloads)[0]
         self.assertEqual((w.record.kind, w.record.repo.path), ("terminal", str(Path.home())))
-        wait_for(lambda: self.app.find(w.record.id).session.attached == 1)
+        self.clients(w.record.id, 1)
         client.output = b""
         client.send(b"\x02d")                          # detach: back to the menu, the shell keeps running
         client.read_until("AGENCI I TERMINALE".encode())
-        wait_for(lambda: self.app.find(w.record.id).session.attached == 0)
+        self.clients(w.record.id, 0)
         screen = plain(client.output)
         self.assertIn("terminal/główna", screen)
         self.assertIn("~", screen)
         time.sleep(.12)
         client.send(b"1")                              # remembered: one key brings it back
-        wait_for(lambda: self.app.find(w.record.id).session.attached == 1)
+        self.clients(w.record.id, 1)
         self.assertEqual(self.app.find(w.record.id).record.id, w.record.id)
         client.send(b"exit\n")
         client.read_until("posprzątane".encode(), 10)
@@ -414,6 +453,32 @@ class HomeRuntimeTests(unittest.TestCase):
         self.assertEqual(self.cli("stop", p.stdout.strip(), config=config).returncode, 0)
         self.assertEqual(tree(dotfiles), before)
         shutil.rmtree(dotfiles)
+
+    def test_agent_commands_need_an_explicit_place(self):
+        for args in (["claude"], ["codex"], ["claude", ""], ["start", "codex", ""]):
+            p = self.cli(*args)
+            self.assertEqual(p.returncode, 2, (args, p.stdout, p.stderr))
+        self.assertFalse(self.app.runtime_snapshot().workloads)
+        p = self.cli("start", "codex", "~")
+        self.assertEqual(p.returncode, 0, p.stderr)              # an explicit ~ is honoured
+        self.assertEqual(json.loads(self.cli("inspect", p.stdout.strip()).stdout)["workspace"], "home")
+
+    def test_classic_menu_offers_h_only_when_usable(self):
+        for line, offered in (("", True), ('home_workspace = ""', False)):
+            config = self.config(line) if line else None
+            args = ["--config", config] if config else []
+            client = Client(args, ui="classic")
+            try:
+                client.read_until(b"Choice + Enter:")
+                self.assertEqual(b"[h] home" in client.output, offered, line)
+                time.sleep(.12)
+                client.output = b""
+                client.send(b"h\n")
+                client.read_until(b"Choice + Enter:")
+                self.assertEqual(b"home, no repository" in client.output, offered, line)
+            finally:
+                client.close()
+        self.assertFalse(self.app.runtime_snapshot().workloads)
 
     def test_disabled_home_workspace_is_refused_cleanly(self):
         config = self.config('home_workspace = ""')

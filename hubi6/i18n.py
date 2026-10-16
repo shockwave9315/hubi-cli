@@ -47,6 +47,9 @@ EXACT = {
     "Home workspace changed or is not the configured one": "Katalog domowy zmienił się albo nie jest tym z konfiguracji",
     "The home workspace is not a Git repository": "Katalog domowy nie jest repozytorium Git",
     "home_workspace must be a path string": "home_workspace musi być ścieżką zapisaną jako tekst",
+    "home_workspace must be outside repos_root": "home_workspace musi leżeć poza katalogiem repozytoriów (repos_root)",
+    "Repository name is empty": "Pusta nazwa repozytorium (katalog domowy podaj jawnie jako ~)",
+    "An agent needs an explicit repository or ~": "Agent wymaga jawnie podanego repozytorium albo ~ (katalog domowy)",
     # systemd adapter
     "Malformed systemd inventory: missing or duplicate unit identity": "Nieprawidłowa lista jednostek systemd: brak lub duplikat identyfikatora",
     "Refusing foreign systemd unit": "Odmowa: obca jednostka systemd",

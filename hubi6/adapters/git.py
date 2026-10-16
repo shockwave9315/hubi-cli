@@ -218,6 +218,8 @@ class Git:
         if value is None:
             ref = self.home()
             return self.validate(ref)
+        if not value:
+            raise HubiError("Repository name is empty")   # an unset $REPO never means ~
         path = Path(safe_path(value)).expanduser()
         if not path.is_absolute():
             path = self.c.repos/path

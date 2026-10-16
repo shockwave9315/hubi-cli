@@ -84,6 +84,10 @@ class App:
         return w
 
     def start(self, kind, repo, instance="primary", resume=False):
+        if repo is None and kind != "terminal":
+            # Only a plain shell may default to the home workspace; an agent there
+            # acts on the whole home directory, so it needs an explicit ~.
+            raise HubiError("An agent needs an explicit repository or ~")
         ref = self.git.resolve(repo)
         key = key_id(kind, ref.path, instance)
         argv = list(self.c.agents[kind])
