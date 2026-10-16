@@ -430,6 +430,9 @@ class FakeGit:
     def resolve(self, value):
         return ref(Path(value).name)
 
+    def home(self):
+        raise HubiError("Home workspace is disabled in the configuration")
+
 
 class FakeApp:
     """Records lifecycle calls; nothing here touches tmux, systemd or a PTY."""

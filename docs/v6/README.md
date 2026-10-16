@@ -53,6 +53,7 @@ One key is one action, without Enter:
 | `d` | stop: session number, then `q` confirms |
 | `i` | session details: view, share, take over, stop, repair |
 | `r` | repository view with `git status` |
+| `h` | home workspace view (sessions outside any repository) |
 | `g` | GitHub catalogue and clone |
 | `?` | help |
 | `q` / `x` | shell (98) / end the SSH session (99, only offered under autologin) |
@@ -138,6 +139,28 @@ Hubi is the SSH login entry point. Human-readable CLI output and error messages
 are Polish through `hubi6/i18n.py`; raised messages, logs and JSON keep their
 stable English identifiers, and a test fails when a new message has no Polish
 wording.
+
+### Home workspace
+
+Work that belongs to no repository (a persistent shell for general work on the
+machine, or an agent doing machine administration) runs in the home workspace,
+`home_workspace` in the configuration (default `~`, the account's passwd home;
+`""` disables it). In the dashboard `h` opens it, and `l`/`c`/`t` followed by
+`h` starts a session there and attaches. The command line accepts `~` (or the
+directory itself) wherever it takes a repository; `hubi claude|codex|terminal`
+without a repository means the home workspace. The line menu (`--classic`) has
+the same `h` entry.
+
+It is a plain directory, never treated as a Git working tree even when it holds
+a dotfiles repository. Its identity is the directory's device and inode; Hubi
+writes nothing into it (no workspace UUID) and runs no Git subprocess for it, so
+there is no `git status` view. A workload record keeps the usual schema: empty
+Git fields mark the plain workspace, and JSON adds `"workspace": "home"` (or
+`"repo"`). Health still applies: a removed or replaced directory shows as
+MISSING or REPLACED and the session stays stoppable. Only the configured
+directory is accepted for new sessions; sessions created before a change of
+`home_workspace` remain visible and stoppable. Agents started there act on the
+whole home directory with their usual permissions.
 
 ## Configuration and deployment materials
 

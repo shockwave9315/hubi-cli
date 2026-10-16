@@ -46,6 +46,9 @@ class Config:
     ui_refresh: float = 2
     ui_color: bool = True
     ui_icons: bool = True
+    # Work outside any repository (a persistent shell or an agent in ~).
+    # None disables it. Always a plain directory, never a Git working tree.
+    home_workspace: Path | None = None
 
     @classmethod
     def load(cls, path: str | None = None):
@@ -62,10 +65,12 @@ class Config:
                 data = tomllib.loads(source.read_text())
             except (OSError, ValueError) as e:
                 raise HubiError(f"Invalid config: {source}: {e}") from e
-        if not isinstance(data, dict) or set(data)-{"repos_root", "agents", "github", "stop", "lock_timeout", "ui"}:
+        if not isinstance(data, dict) or set(data)-{"repos_root", "agents", "github", "stop", "lock_timeout", "ui", "home_workspace"}:
             raise HubiError("Unknown configuration keys")
         if "repos_root" in data and not isinstance(data["repos_root"], str):
             raise HubiError("repos_root must be a path string")
+        if not isinstance(data.get("home_workspace", ""), str):
+            raise HubiError("home_workspace must be a path string")
         for section in ("agents", "github", "stop", "ui"):
             if not isinstance(data.get(section, {}), dict):
                 raise HubiError(f"{section} must be a TOML table")
@@ -113,6 +118,7 @@ class Config:
             raise HubiError("Invalid ui configuration")
         return cls(home, repos, runtime_base, state, cache, config_base, socket, service, rid,
                    defaults, owner, ttl, lock_timeout=positive_number(data.get("lock_timeout", 3), "lock_timeout"),
+                   home_workspace=home_workspace(data.get("home_workspace", "~"), home),
                    clone_timeout=positive_number(github.get("clone_timeout", 300), "github.clone_timeout"),
                    ui_refresh=positive_number(ui.get("refresh", 2), "ui.refresh"),
                    ui_color=ui.get("color", True), ui_icons=ui.get("icons", True), **values)
@@ -141,6 +147,23 @@ def positive_number(value, name):
     if type(value) not in (int, float) or not math.isfinite(value) or not 0 < value <= 86400:
         raise HubiError(f"{name} must be a positive number up to 86400 seconds")
     return value
+
+
+def home_workspace(value, home):
+    """The home workspace path ("" disables it); ~ means the account home."""
+    if not value:
+        return None
+    if value == "~" or value.startswith("~/"):
+        path = home/value[2:]
+    else:
+        path = Path(value)
+    if not path.is_absolute():
+        raise HubiError("home_workspace must be an absolute path")
+    safe_path(str(path))
+    try:
+        return path.resolve()
+    except (OSError, RuntimeError) as e:
+        raise HubiError("Invalid home_workspace path") from e
 
 
 def xdg_path(name, default):

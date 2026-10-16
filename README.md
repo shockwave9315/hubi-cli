@@ -35,6 +35,8 @@ zostawiona na wypadek wycofania zmian ([opis v5](docs/v5/README.md)).
 - Po `exit` albo `/exit` wracasz do menu. Czyste wyjście sprząta się samo,
   wyjście z błędem zostaje do obejrzenia.
 - Lista repozytoriów z GitHuba z klonowaniem.
+- Terminal albo agent poza repozytorium, w katalogu domowym (`h`): trwała
+  powłoka do zwykłej pracy na devboksie, do której wracasz jak do każdej sesji.
 
 Restart maszyny kończy sesje. Rozmowę z agentem wznowisz potem klawiszem `r`
 przy starcie.
@@ -106,7 +108,8 @@ Ominięcie menu: `ssh -t HOST 'HUBI_NOAUTO=1 bash -il'`.
 | Klawisz | Działanie |
 |---|---|
 | `1`-`9` | wejdź do sesji |
-| `l` `c` `t` | nowa sesja: Claude / Codex / terminal, potem numer repo |
+| `l` `c` `t` | nowa sesja: Claude / Codex / terminal, potem numer repo albo `h` |
+| `h` | katalog domowy `~`: sesje poza repozytorium |
 | `d` | zatrzymaj: numer sesji, potem `q` potwierdza |
 | `i` | szczegóły sesji: podgląd, współdzielenie, przejęcie, naprawa |
 | `r` | widok repozytorium i `git status` |
@@ -141,6 +144,8 @@ hubi                          # menu
 hubi claude REPO [NAZWA]      # uruchom w razie potrzeby i wejdź
 hubi codex REPO --resume      # to samo dla Codexa, ze wznowieniem rozmowy
 hubi terminal REPO            # terminal w repo
+hubi terminal                 # trwały terminal w katalogu domowym, bez repo
+hubi claude ~ [NAZWA]         # agent w katalogu domowym
 hubi list                     # sesje i ich ID
 hubi stop ID                  # zatrzymaj sesję
 hubi inspect ID               # szczegóły (JSON)
@@ -149,7 +154,8 @@ hubi doctor                   # diagnostyka
 hubi --classic                # starsze menu liniowe, awaryjne
 ```
 
-`REPO` to nazwa katalogu w `~/repos` albo ścieżka. Opcje każdego polecenia
+`REPO` to nazwa katalogu w `~/repos` albo ścieżka; `~` oznacza katalog domowy
+(w `hubi claude|codex|terminal` także brak `REPO`). Opcje każdego polecenia
 pokazuje `hubi POLECENIE --help`.
 
 ## Konfiguracja
@@ -160,6 +166,7 @@ Plik `~/.config/hubi6/config.toml` jest opcjonalny. Wzór z opisem:
 | Klucz | Domyślnie | Znaczenie |
 |---|---|---|
 | `repos_root` | `~/repos` | gdzie szukać repozytoriów |
+| `home_workspace` | `~` | katalog dla sesji poza repozytorium; `""` wyłącza |
 | `[agents] claude` | `["claude", "--permission-mode", "bypassPermissions"]` | polecenie Claude |
 | `[agents] codex` | `["codex", "--no-daemon"]` | polecenie Codexa |
 | `[ui] refresh` | `2` | odświeżanie listy w sekundach |

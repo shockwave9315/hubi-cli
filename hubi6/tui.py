@@ -226,7 +226,7 @@ def run(app):
             if screen == "main":
                 choices = snapshot.repos
                 active = len(snapshot.workloads)
-                rows += [f"Workloads: {active}   [w] workloads  [g] GitHub repositories  [q] shell  [x] exit SSH"]
+                rows += [f"Workloads: {active}   [w] workloads  [h] home (no repository)  [g] GitHub repositories  [q] shell  [x] exit SSH"]
                 rows += [f"{w.record.kind}/{display(w.record.instance)} {w.state.value} repo:{w.repo_health.value}  {display(w.record.repo.path)}"
                          for w in snapshot.workloads if w.repo_health.value != "OK"]
                 for index, ref in enumerate(choices[page*9:page*9+9], 1):
@@ -239,8 +239,9 @@ def run(app):
                     rows.append(f"[{index}] {w.record.kind}/{display(w.record.instance)}  {display(w.record.repo.path)}  "
                                 f"{w.state.value}  repo:{w.repo_health.value}  clients:{w.session.attached if w.session else 0}")
             elif screen == "repo":
-                rows += [display(selected.path), "[c] Codex  [l] Claude  [t] persistent terminal",
-                         "[w] workloads  [i] inspect Git status"]
+                rows += [display(selected.path)+("  (home, no repository)" if selected.plain else ""),
+                         "[c] Codex  [l] Claude  [t] persistent terminal",
+                         "[w] workloads" if selected.plain else "[w] workloads  [i] inspect Git status"]
             elif screen == "detail":
                 try:
                     w = app.find(selected, snapshot)
@@ -291,6 +292,8 @@ def run(app):
                     screen, page = "workloads", 0
                 elif action == "g" and screen == "main":
                     screen, page = "github", 0
+                elif action == "h" and screen == "main":
+                    selected, screen, page = app.git.resolve(None), "repo", 0
                 elif len(action) == 1 and action in "123456789" and (page*9+int(action)-1) < len(choices):
                     picked = choices[page*9+int(action)-1]
                     if screen == "main":
@@ -328,7 +331,7 @@ def run(app):
                     r = app.start({"c":"codex", "l":"claude", "t":"terminal"}[action],
                                   selected.path, instance or "primary", resume)
                     selected, screen = r.id, "detail"
-                elif screen == "repo" and action == "i":
+                elif screen == "repo" and action == "i" and not selected.plain:
                     message = app.git.summary(selected)
                 elif screen == "detail":
                     if action in ("a", "v", "s", "o"):

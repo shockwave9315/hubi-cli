@@ -41,13 +41,13 @@ def parser():
         c.add_argument("--json", action="store_true", help=as_json)
     c = sub.add_parser("start", help="uruchom sesję w tle i wypisz jej ID")
     c.add_argument("type", choices=("codex", "claude", "terminal"), help="rodzaj sesji")
-    c.add_argument("repo", help="nazwa albo ścieżka repozytorium")
+    c.add_argument("repo", help="nazwa albo ścieżka repozytorium; ~ = katalog domowy (bez repo)")
     c.add_argument("--instance", default="primary", metavar="NAZWA", help=f"nazwa sesji (domyślnie: {DEFAULT_NAME})")
     c.add_argument("--resume", action="store_true", help="wznów rozmowę")
     c.add_argument("--json", action="store_true", help=as_json)
     for name in ("codex", "claude", "terminal"):
-        c = sub.add_parser(name, help=f"uruchom {name} w repozytorium (jeśli trzeba) i wejdź")
-        c.add_argument("repo", help="nazwa albo ścieżka repozytorium")
+        c = sub.add_parser(name, help=f"uruchom {name} w repozytorium albo w katalogu domowym (jeśli trzeba) i wejdź")
+        c.add_argument("repo", nargs="?", help="nazwa albo ścieżka repozytorium; bez niej albo ~ = katalog domowy (bez repo)")
         c.add_argument("instance", nargs="?", default="primary", metavar="NAZWA",
                        help=f"nazwa sesji (domyślnie: {DEFAULT_NAME})")
         if name != "terminal":
