@@ -295,6 +295,9 @@ class App:
         """
         try:
             base = Path(os.environ.get("CLAUDE_CONFIG_DIR") or self.c.home/".claude")
+            # One conversation, one name: two names resuming one transcript
+            # would run two Claude processes on it.
+            owners = {b["conversation"]: key_id(b["kind"], b["repo"], b["instance"]) for b in self.store.bindings()}
             for w in self.runtime_snapshot().workloads if workloads is None else workloads:
                 s = w.session
                 if w.record.kind != "claude" or w.state not in (State.RUNNING, State.ATTACHED) or not s or s.pid <= 0:
@@ -312,8 +315,11 @@ class App:
                         continue
                 except HubiError:
                     pass                               # a damaged binding is replaced by a valid one
+                if owners.get(conversation, w.record.key) != w.record.key:
+                    continue                           # already another name's conversation
                 if self.transcript_exists(conversation):
                     self.store.bind_conversation(w.record, conversation)
+                    owners[conversation] = w.record.key
         except (HubiError, OSError, ValueError):
             pass
 

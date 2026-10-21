@@ -157,10 +157,10 @@ class ConversationRuntimeTests(unittest.TestCase):
         self.assertNotEqual(first, second)
         self.assertEqual(self.saved(), second)
 
-    def follow(self, conversation, *, transcript=True, cwd=None, pid=None):
+    def follow(self, conversation, *, transcript=True, cwd=None, pid=None, instance="primary"):
         """A running session whose Claude moved to another conversation (/clear); returns its record."""
         before = set(self.path.glob(".agent-*"))
-        r = self.app.start("claude", str(self.path))
+        r = self.app.start("claude", str(self.path), instance)
         marker = wait_for(lambda: next(iter(set(self.path.glob(".agent-*"))-before), None))
         agent = int(marker.name.split("-")[1])
         sessions = Path.home()/".claude/sessions"
@@ -191,6 +191,14 @@ class ConversationRuntimeTests(unittest.TestCase):
         self.app.capture_conversations()                     # what App.attach does on return
         self.assertEqual(self.saved(), U2)
         self.app.stop(r.id)
+
+    def test_never_moves_a_name_onto_another_names_conversation(self):
+        first = self.run_agent()[0][-1]                       # "1" holds this conversation
+        r = self.follow(first, instance="rev")              # in "rev" the owner opens it from Claude's list
+        rev = self.saved("rev")
+        self.assertNotEqual(rev, first)
+        self.app.stop(r.id)
+        self.assertEqual((self.saved(), self.saved("rev")), (first, rev))   # still one name per conversation
 
     def test_codex_is_unchanged(self):
         args, env = self.run_agent("codex", resume=True)
