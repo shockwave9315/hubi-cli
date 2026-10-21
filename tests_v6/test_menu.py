@@ -216,6 +216,12 @@ class RenderTests(unittest.TestCase):
         self.assertTrue(draw(40).rstrip().endswith("+4"), draw(40))
         self.assertNotIn("+", draw(100))
         self.assertIn("$ t2", draw(100))
+        # At every width the shown sessions plus the counter account for all four.
+        for width in range(30, 101):
+            text = draw(width)
+            shown = sum(text.count(mark) for mark in (">_ 1", "✳ rev", "$ 1", "$ t2"))
+            hidden = int(text.rstrip().rsplit("+", 1)[1]) if text.rstrip().split()[-1].startswith("+") else 0
+            self.assertEqual(shown+hidden, 4, (width, text))
 
     def test_footer_survives_a_short_terminal(self):
         text = "\n".join(menu.render(self.frames(64, 8)["main"], menu.Theme(False), 64))

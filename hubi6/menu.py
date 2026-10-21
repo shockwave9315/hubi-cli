@@ -337,9 +337,11 @@ def repo_row(label, row, width, glyphs, *, selected=False, kind=""):
     cells = lead+[(pad(row.name, name), "bold" if label else ""), " ", (pad(row.branch, branch), "muted"), " "]
     marks = [i for i in row.items if not kind or i.kind == kind]
     used = shown = 0
-    for item in marks:
+    for index, item in enumerate(marks):
         piece = f"{glyphs.icons[item.kind]} {name_pl(item.instance)}  "
-        if used+width_of(piece) > tail:
+        left = len(marks)-index-1
+        # Keep room for the "+N" of the sessions after this one.
+        if used+width_of(piece)+(len(f"+{left}") if left else 0) > tail:
             break
         cells.append((piece, item.kind))
         used += width_of(piece)
