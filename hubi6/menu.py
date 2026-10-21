@@ -333,9 +333,13 @@ def repo_row(label, row, width, glyphs, *, selected=False, kind=""):
     rest = width-4
     name = max(12, min(22, rest*36//100))
     branch = max(0, min(16, rest-name-1))
-    tail = max(0, rest-name-branch-2)
-    cells = lead+[(pad(row.name, name), "bold" if label else ""), " ", (pad(row.branch, branch), "muted"), " "]
     marks = [i for i in row.items if not kind or i.kind == kind]
+    room = rest-name-branch-2
+    if marks and room < len(f"+{len(marks)}"):         # never hide every session without a counter
+        give = min(branch, len(f"+{len(marks)}")-room)
+        branch, room = branch-give, room+give
+    tail = max(0, room)
+    cells = lead+[(pad(row.name, name), "bold" if label else ""), " ", (pad(row.branch, branch), "muted"), " "]
     used = shown = 0
     for index, item in enumerate(marks):
         piece = f"{glyphs.icons[item.kind]} {name_pl(item.instance)}  "
@@ -975,7 +979,10 @@ class Menu:
         if answer is None:
             self.say("Anulowano", "muted")
             return None
-        name = instance_of(answer) if answer.strip() else choices[0]
+        if not answer.strip():
+            self.say("Anulowano: wpisz nazwę sesji do wznowienia", "muted")
+            return None
+        name = instance_of(answer)
         if name not in choices:
             self.say(f"Nie ma zatrzymanej sesji {kind}/{name_pl(name)} z zapisaną rozmową", "bad")
             return None

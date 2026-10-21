@@ -8,7 +8,7 @@ import tempfile
 import time
 
 from .config import private_dir
-from .core.model import HubiError, Record, HEX20, KINDS, UUID
+from .core.model import HubiError, Record, HEX20, KINDS, UUID, key_id
 
 
 def atomic_json(path: Path, data):
@@ -85,6 +85,12 @@ class Store:
         if (not isinstance(data, dict) or not isinstance(data.get("conversation"), str) or
                 not UUID.fullmatch(data["conversation"]) or data.get("kind") not in KINDS or
                 not isinstance(data.get("repo"), str) or not isinstance(data.get("instance"), str)):
+            raise HubiError("Saved conversation of this session is unreadable; start a new conversation")
+        try:
+            owner = key_id(data["kind"], data["repo"], data["instance"])
+        except HubiError:
+            owner = None
+        if owner != key:                               # a file copied or moved under another name
             raise HubiError("Saved conversation of this session is unreadable; start a new conversation")
         return data
 

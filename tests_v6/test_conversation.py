@@ -65,6 +65,16 @@ class BindingStoreTests(unittest.TestCase):
         with self.assertRaises(HubiError):
             self.store.bind_conversation(main, "../../etc")
 
+    def test_binding_filed_under_another_name_is_refused(self):
+        main, other = self.record(), self.record("x")
+        self.store.bind_conversation(main, U1)
+        source = self.store.c.conversations/(main.key+".json")
+        (self.store.c.conversations/(other.key+".json")).write_bytes(source.read_bytes())
+        os.chmod(self.store.c.conversations/(other.key+".json"), 0o600)
+        with self.assertRaisesRegex(HubiError, "start a new conversation"):
+            self.store.conversation(other.key)             # never another name's conversation
+        self.assertEqual([b["instance"] for b in self.store.bindings()], ["primary"])
+
     def test_default_name_is_one_everywhere(self):
         self.assertEqual((display_name("primary"), display_name("rev")), ("1", "rev"))
 
@@ -88,6 +98,7 @@ class ConversationRuntimeTests(unittest.TestCase):
         for w in self.app.runtime_snapshot().workloads:
             self.app.stop(w.record.id, repair=True)
         shutil.rmtree(Path.home()/".claude/projects", ignore_errors=True)
+        shutil.rmtree(Path.home()/".claude/sessions", ignore_errors=True)
 
     def run_agent(self, kind="claude", instance="primary", resume=False):
         """Start, read the agent's argv and env from its marker, stop. Returns (argv tail, env)."""
@@ -145,6 +156,41 @@ class ConversationRuntimeTests(unittest.TestCase):
         second = self.run_agent()[0][-1]
         self.assertNotEqual(first, second)
         self.assertEqual(self.saved(), second)
+
+    def follow(self, conversation, *, transcript=True, cwd=None, pid=None):
+        """A running session whose Claude moved to another conversation (/clear); returns its record."""
+        before = set(self.path.glob(".agent-*"))
+        r = self.app.start("claude", str(self.path))
+        marker = wait_for(lambda: next(iter(set(self.path.glob(".agent-*"))-before), None))
+        agent = int(marker.name.split("-")[1])
+        sessions = Path.home()/".claude/sessions"
+        sessions.mkdir(parents=True, exist_ok=True)
+        (sessions/f"{agent}.json").write_text(json.dumps({"pid": pid or agent, "sessionId": conversation,
+                                                          "cwd": cwd or str(self.path)}))
+        if transcript:
+            (self.projects/(conversation+".jsonl")).write_text("{}\n")
+        return r
+
+    def test_clear_in_claude_moves_the_name_to_the_new_conversation_at_stop(self):
+        r = self.follow(U2)
+        self.assertNotEqual(self.saved(), U2)
+        self.app.stop(r.id)
+        self.assertEqual(self.saved(), U2)
+        self.assertEqual(self.run_agent(resume=True)[0][-2:], ["--resume", U2])
+
+    def test_capture_after_attach_needs_a_matching_file_and_transcript(self):
+        for kw in ({"transcript": False}, {"cwd": "/elsewhere"}, {"pid": 1}):
+            with self.subTest(**kw):
+                r = self.follow(U2, **kw)
+                first = self.saved()
+                self.app.capture_conversations()
+                self.assertEqual(self.saved(), first)
+                self.app.stop(r.id)
+                self.assertEqual(self.saved(), first)
+        r = self.follow(U2)
+        self.app.capture_conversations()                     # what App.attach does on return
+        self.assertEqual(self.saved(), U2)
+        self.app.stop(r.id)
 
     def test_codex_is_unchanged(self):
         args, env = self.run_agent("codex", resume=True)

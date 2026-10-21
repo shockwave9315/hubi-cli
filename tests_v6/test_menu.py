@@ -752,12 +752,15 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual((m.ui.instance, m.ui.resume), ("", False))
 
     def test_claude_resume_asks_which_name_when_several_are_saved(self):
-        for typed, expected in ((b"1\n", "primary"), (b"rev\n", "rev"), (b"\n", "rev")):
+        for typed, expected in ((b"1\n", "primary"), (b"rev\n", "rev"), (b"glowna\n", None), (b"\n", None)):
             m, app = self.make()
             app.saved[("claude", ref("alpha").path)] = ["rev", "primary"]
             os.write(self.wr, typed)
             self.press(m, "l", "r", "1")
-            self.assertEqual(app.calls[0], ("start", "claude", ref("alpha").path, expected, True), typed)
+            if expected:
+                self.assertEqual(app.calls[0], ("start", "claude", ref("alpha").path, expected, True), typed)
+            else:                                     # no silent default: Enter alone resumes nobody
+                self.assertEqual(app.calls, [], typed)
 
     def test_claude_resume_refuses_an_unknown_name_and_skips_running_ones(self):
         m, app = self.make()

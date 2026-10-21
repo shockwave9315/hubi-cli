@@ -129,9 +129,11 @@ Numer nie oznacza ważności. Sesji z rolą daj nazwę (`n`), np. `claude/rev`.
 Każda nazwa sesji Claude ma swoją rozmowę. Nowa rozmowa dostaje stały
 identyfikator, a „wznów” wraca dokładnie do niej, nie do innej. Co pracowało w
 `claude/rev`, po restarcie wraca do `claude/rev`. Gdy w repo jest kilka
-zatrzymanych sesji z rozmowami, menu pyta, którą wznowić. Lista rozmów Claude
-pojawia się tylko dla nazwy, która nie ma jeszcze zapisanej rozmowy. Codex na
-razie zawsze pokazuje swoją listę.
+zatrzymanych sesji z rozmowami, menu pyta, którą wznowić (po nazwie, bez
+domyślnej). Po `/clear` w Claude albo wyborze innej rozmowy z jego listy Hubi
+przepina nazwę na bieżącą rozmowę, gdy wychodzisz z sesji i gdy ją zatrzymujesz.
+Lista rozmów Claude pojawia się tylko dla nazwy, która nie ma jeszcze zapisanej
+rozmowy. Codex na razie zawsze pokazuje swoją listę.
 
 Przy wyborze repo:
 

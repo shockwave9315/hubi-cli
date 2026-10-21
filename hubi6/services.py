@@ -1,5 +1,6 @@
 import os
 import hashlib
+import json
 import re
 from pathlib import Path
 import shutil
@@ -11,7 +12,7 @@ from .adapters.git import Git, health, pin_workspace
 from .adapters.process import Runner
 from .adapters.systemd import Systemd
 from .adapters.tmux import Tmux
-from .core.model import HubiError, Record, RepoHealth, State, Unavailable, actions, key_id, phase_transition
+from .core.model import UUID, HubiError, Record, RepoHealth, State, Unavailable, actions, key_id, phase_transition
 from .inventory import build
 from .storage import Store, atomic_json
 
@@ -284,6 +285,38 @@ class App:
         base = Path(os.environ.get("CLAUDE_CONFIG_DIR") or self.c.home/".claude")/"projects"
         return any(base.glob("*/"+conversation+".jsonl"))
 
+    def capture_conversations(self, workloads=None):
+        """Re-bind running Claude sessions to the conversation each one shows now.
+
+        /clear, or a choice from Claude's own list, moves a session to another
+        conversation ID. Claude names it in ~/.claude/sessions/<pid>.json, an
+        undocumented file: anything missing, odd or not yet written leaves the
+        saved binding as it is. Never raises; it must not block attach or stop.
+        """
+        try:
+            base = Path(os.environ.get("CLAUDE_CONFIG_DIR") or self.c.home/".claude")
+            for w in self.runtime_snapshot().workloads if workloads is None else workloads:
+                s = w.session
+                if w.record.kind != "claude" or w.state not in (State.RUNNING, State.ATTACHED) or not s or s.pid <= 0:
+                    continue
+                try:
+                    data = json.loads((base/"sessions"/f"{s.pid}.json").read_text())
+                except (OSError, ValueError):
+                    continue
+                conversation = data.get("sessionId") if isinstance(data, dict) else None
+                if (data.get("pid") != s.pid or data.get("cwd") != w.record.repo.path or
+                        not isinstance(conversation, str) or not UUID.fullmatch(conversation)):
+                    continue
+                try:
+                    if self.store.conversation(w.record.key) == conversation:
+                        continue
+                except HubiError:
+                    pass                               # a damaged binding is replaced by a valid one
+                if self.transcript_exists(conversation):
+                    self.store.bind_conversation(w.record, conversation)
+        except (HubiError, OSError, ValueError):
+            pass
+
     def resumable(self, kind, path):
         """Session names in one repository that have a saved conversation, newest first."""
         return [b["instance"] for b in self.store.bindings() if b["kind"] == kind and b["repo"] == path]
@@ -380,6 +413,7 @@ class App:
                     receipt.invocation, receipt.phase = unit.invocation, "running"
                 self.store.save(receipt)
                 return  # explicit pane repair preserves the verified primary workload
+            self.capture_conversations([current])       # the conversation it shows now, before it ends
             self._stop(current.record, expected=expected or r.generation, repair=repair, initial=snapshot)
 
     def reap_clean_exit(self, identity):
@@ -429,4 +463,7 @@ class App:
                 raise HubiError("Workload already has clients; select --mode view/shared/takeover")
         # Never hold a lifecycle lock for the lifetime of a tmux client. Exact
         # generation names make concurrent stop/start safe; tmux -N fails closed.
-        return self.tmux.attach(w.record, mode)
+        code = self.tmux.attach(w.record, mode)
+        # Back from the session (Ctrl-b ) may have visited others): note any /clear.
+        self.capture_conversations()
+        return code
