@@ -59,6 +59,12 @@ def parser():
         if name != "terminal":
             c.add_argument("--resume", action="store_true", help="wznów rozmowę")
         c.add_argument("--mode", choices=("normal", "view", "shared", "takeover"), default="normal", help="tryb wejścia")
+    c = sub.add_parser("pane", help="panel tmux działającej sesji (np. %%14), do wysyłania do niej z innych narzędzi")
+    c.add_argument("type", choices=("codex", "claude", "terminal"), help="rodzaj sesji")
+    c.add_argument("repo", help="nazwa albo ścieżka repozytorium; ~ = katalog domowy (bez repo)")
+    c.add_argument("instance", nargs="?", default="primary", metavar="NAZWA",
+                   help=f"nazwa sesji (domyślnie: {DEFAULT_NAME})")
+    c.add_argument("--json", action="store_true", help=as_json+", z gniazdem tmux")
     for name, text in (("stop", "zatrzymaj sesję"), ("inspect", "szczegóły sesji (JSON)"), ("attach", "wejdź do sesji"),
                        ("reconcile", "napraw niespójną sesję")):
         c = sub.add_parser(name, help=text)
@@ -107,7 +113,7 @@ def execute(args):
         logger.setLevel(logging.DEBUG)
         logger.addHandler(handler)
     # Read-only commands never create state, config, logs, locks or runtime dirs.
-    if args.command not in ("list", "doctor", "inspect"):
+    if args.command not in ("list", "doctor", "inspect", "pane"):
         app.c.prepare()
         handler = RotatingFileHandler(app.c.state_base/"hubi6.log", maxBytes=1048576, backupCount=3)
         logging.getLogger("hubi6").addHandler(handler)
@@ -141,6 +147,11 @@ def execute(args):
         app.stop(args.id, args.generation, repair=args.command == "reconcile")
     elif args.command == "inspect":
         print(json.dumps(app.find(args.id).data(), ensure_ascii=True, indent=2))
+    elif args.command == "pane":
+        w = app.pane(args.type, args.repo, instance_of(args.instance))
+        print(json.dumps({"pane": w.session.pane, "socket": str(app.c.socket), "id": w.record.id,
+                          "tmux_session": w.record.session, "state": w.state.value}, ensure_ascii=True)
+              if args.json else w.session.pane)
     elif args.command == "attach":
         return app.attach(args.id, args.mode)
     elif args.command == "github":

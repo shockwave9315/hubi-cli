@@ -258,7 +258,9 @@ class Workload:
         r = self.record
         return {"id": r.id, "type": r.kind, "repo": r.repo.path, "workspace": "home" if r.repo.plain else "repo",
                 "repo_health": self.repo_health.value,
-                "instance": r.instance, "tmux_session": r.session, "scope": r.scope,
+                "instance": r.instance, "key": r.key, "tmux_session": r.session, "scope": r.scope,
+                # The live pane of this generation; it changes with every new generation.
+                "pane": self.session.pane if self.session else "",
                 "generation": r.generation, "invocation": r.invocation,
                 "state": self.state.value, "attached_clients": self.session.attached if self.session else 0,
                 "exit_status": self.session.exit_status if self.session else None,

@@ -153,6 +153,7 @@ hubi claude ~ [NAZWA]         # agent w katalogu domowym
 hubi list                     # sesje i ich ID
 hubi stop ID                  # zatrzymaj sesję
 hubi inspect ID               # szczegóły (JSON)
+hubi pane TYP REPO [NAZWA]    # panel tmux działającej sesji, np. %14
 hubi github list              # repozytoria na GitHubie
 hubi doctor                   # diagnostyka
 hubi --classic                # starsze menu liniowe, awaryjne
@@ -163,6 +164,42 @@ Brak `REPO` oznacza katalog domowy tylko w `hubi terminal`: agent (`claude`,
 `codex`) działa tam na całym katalogu domowym, więc wymaga jawnego `~`, a puste
 `$REPO` w skrypcie kończy się błędem. Opcje każdego polecenia
 pokazuje `hubi POLECENIE --help`.
+
+### Wysyłanie do sesji z innych narzędzi
+
+Numer panelu (`%14`) należy do jednej generacji sesji. `hubi stop` i ponowny
+start tworzą nową sesję tmux, a tmux nigdy nie używa numerów paneli ponownie.
+Skrypt albo inny agent nie powinien więc zapamiętywać `%N`, tylko ustalać go
+tuż przed wysłaniem:
+
+```console
+pane=$(hubi pane claude praca) || exit 1
+tmux -N -S /run/user/$(id -u)/hubi6/tmux.sock send-keys -t "$pane" -l 'tekst'
+```
+
+`hubi pane` niczego nie zmienia. Kończy się błędem, gdy sesja nie działa
+(np. jest zakończona albo osierocona), zamiast wskazać martwy panel.
+`hubi pane ... --json` podaje też gniazdo tmux, a `hubi list --json` pola
+`key` (stałe dla rodzaju, repo i nazwy) i `pane`.
+
+### Procesy pomocnicze
+
+Każda sesja ma własny cgroup systemd. `hubi stop` zabija go w całości, razem
+ze wszystkim, co agent uruchomił, także przez `setsid`, `nohup` albo `disown`.
+To zamierzone: zatrzymana sesja nie zostawia procesów. Taki pomocnik trzyma też
+sesję przy życiu po wyjściu agenta (np. `/exit`), więc zamiast zniknąć jest
+ona osierocona (ORPHANED) do czasu `hubi stop`.
+
+Proces, który ma przeżyć agenta, uruchom jako osobną jednostkę użytkownika:
+
+```console
+systemd-run --user --same-dir --collect --unit=praca-straznik -- ./watchdog.sh
+systemctl --user status praca-straznik    # stan
+systemctl --user stop praca-straznik      # zatrzymanie
+```
+
+Taka jednostka dostaje środowisko menedżera systemd, a nie agenta: zmienne
+(np. `PATH`) przekaż jawnie przez `--setenv=`.
 
 ## Konfiguracja
 

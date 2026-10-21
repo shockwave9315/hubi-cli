@@ -159,6 +159,10 @@ EXACT = {
     "Repository was replaced during startup": "Repozytorium zostało podmienione w trakcie startu",
     "Launcher umask unavailable": "Nie można odczytać umask procesu uruchamiającego",
     "Invalid session umask": "Nieprawidłowy umask sesji",
+    # pane resolver
+    "Runtime state UNKNOWN; cannot resolve the pane": "Stan runtime nieznany; nie można ustalić panelu",
+    "Several running generations; use hubi list": "Działa kilka generacji tej sesji; zobacz `hubi list`",
+    "No such session; use hubi list": "Nie ma takiej sesji; zobacz `hubi list`",
 }
 
 # English template -> Polish template. Named fields are copied verbatim.
@@ -190,6 +194,7 @@ TEMPLATES = (
     ("Moved workspace already has a workload: {ident}; stop it before starting here", "Przeniesiony workspace ma już sesję: {ident}; zatrzymaj ją przed startem tutaj"),
     ("Workload EXITED: {ident}; stop/reconcile it before creating a new generation", "Sesja zakończona: {ident}; usuń ją przed uruchomieniem nowej"),
     ("Workload startup failed; inspect {ident}", "Start sesji nie powiódł się; obejrzyj {ident}"),
+    ("Workload is {state}, not running: {ident}", "Sesja nie działa (stan {state}): {ident}"),
     ("Workload failed or EXITED during startup; inspect/stop {ident}", "Sesja zakończyła się w trakcie startu; obejrzyj lub usuń {ident}"),
     ("{name}: {error}; reconcile using a surviving runtime receipt, otherwise inspect/move this file manually",
      "{name}: {error}; napraw sesję na podstawie zachowanego potwierdzenia albo obejrzyj/przenieś ten plik ręcznie"),

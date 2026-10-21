@@ -104,6 +104,28 @@ class App:
             w.repo_health = health(w.record.repo)
         return w
 
+    def pane(self, kind, repo, instance="primary"):
+        """The running workload of (type, repository, name), for tools that send to its pane.
+
+        A pane ID such as %14 belongs to one generation: stop and start create a
+        new tmux session, and tmux never reuses pane IDs. Tools resolve the pane
+        when they send instead of remembering it. Read-only: nothing is created,
+        written or signalled.
+        """
+        key = key_id(kind, self.git.resolve(repo).path, instance)
+        s = self.runtime_snapshot()
+        if not s.tmux_known or not s.systemd_known:
+            raise HubiError("Runtime state UNKNOWN; cannot resolve the pane")
+        same = [w for w in s.workloads if w.record.key == key]
+        live = [w for w in same if w.state in (State.RUNNING, State.ATTACHED)]
+        if len(live) > 1:
+            raise HubiError("Several running generations; use hubi list")
+        if live:
+            return live[0]
+        if same:
+            raise HubiError(f"Workload is {same[0].state.value}, not running: {same[0].record.id}")
+        raise HubiError("No such session; use hubi list")
+
     def start(self, kind, repo, instance="primary", resume=False):
         if repo is None and kind != "terminal":
             # Only a plain shell may default to the home workspace; an agent there
