@@ -9,14 +9,14 @@ każdej chwili zamknąć.
  HUBI v6  ● runtime OK                                      00:24
 
  AGENCI I TERMINALE  3
- 1  ✳  claude/główna     hubi-cli        pracuje ◐         18 min
+ 1  ✳  claude/1          hubi-cli        pracuje ◐         18 min
        Poprawka menu
  2  >_ codex/cp5         praca           czeka             2 h 05
- 3  $  terminal/główna   praca           działa             6 min
+ 3  $  terminal/1        praca           działa             6 min
 
  REPOZYTORIA  7
- ·  hubi-cli              main             ✳ główna
- ·  praca                 cp5-timer-trip   >_ cp5  $ główna
+ ·  hubi-cli              main             ✳ 1
+ ·  praca                 cp5-timer-trip   >_ cp5  $ 1
  ───────────────────────────────────────────────────────────────
  1-9 wejdź  l Claude  c Codex  t terminal  d zatrzymaj
  i szczegóły  r repo  g GitHub  ? pomoc  q shell  x rozłącz
@@ -123,14 +123,21 @@ Ominięcie menu: `ssh -t HOST 'HUBI_NOAUTO=1 bash -il'`.
 | `0`, Esc | wróć |
 
 `l`, `c` i `t` zawsze startują nową sesję. Do działającej wchodzisz cyfrą.
-Pierwsza sesja danego typu w repo nazywa się `główna`, kolejne dostają numer:
-`codex/główna`, `codex/2`, `codex/3`.
+Sesje danego typu w repo dostają numery: `codex/1`, `codex/2`, `codex/3`.
+Numer nie oznacza ważności. Sesji z rolą daj nazwę (`n`), np. `claude/rev`.
+
+Każda nazwa sesji Claude ma swoją rozmowę. Nowa rozmowa dostaje stały
+identyfikator, a „wznów” wraca dokładnie do niej, nie do innej. Co pracowało w
+`claude/rev`, po restarcie wraca do `claude/rev`. Gdy w repo jest kilka
+zatrzymanych sesji z rozmowami, menu pyta, którą wznowić. Lista rozmów Claude
+pojawia się tylko dla nazwy, która nie ma jeszcze zapisanej rozmowy. Codex na
+razie zawsze pokazuje swoją listę.
 
 Przy wyborze repo:
 
 | Klawisz | Działanie |
 |---|---|
-| `r` | przełącza między nową rozmową a wznowieniem (lista wcześniejszych rozmów) |
+| `r` | przełącza między nową rozmową a wznowieniem rozmowy tej sesji |
 | `n` | własna nazwa sesji zamiast automatycznej, np. `codex/cp5` |
 
 W sesji:
@@ -185,8 +192,9 @@ ma albo nie działa (można ponowić później), a 2 to każdy inny błąd.
 
 Każda sesja zna swoją nazwę ze zmiennych `HUBI6_TYPE`, `HUBI6_REPO` i
 `HUBI6_NAME`, więc agent może napisać innym, jak mu odpowiedzieć:
-`hubi send $HUBI6_TYPE $HUBI6_REPO $HUBI6_NAME`. Domyślna sesja „główna” ma tam
-(i w JSON) nazwę `primary`; w poleceniach działają obie.
+`hubi send $HUBI6_TYPE $HUBI6_REPO $HUBI6_NAME`. Agent widzi tę samą nazwę co
+menu: domyślna sesja to `1` (w JSON pole `name`; pole `instance` ma stałe
+`primary`).
 
 Nazwij sesję tak, jak jej rola, np. `hubi claude praca rev` dla review. Inne
 sesje zobaczą ją w `hubi list` jako `claude/rev` i napiszą do niej

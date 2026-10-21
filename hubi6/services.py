@@ -174,7 +174,8 @@ class App:
         if resume:
             if kind == "terminal":
                 raise HubiError("A terminal has no conversation to resume")
-            argv += ["resume"] if kind == "codex" else ["--resume"]
+            if kind == "codex":
+                argv += ["resume"]                     # Claude's flags are chosen under the lock below
         executable = shutil.which(argv[0])
         if not executable:
             raise HubiError(f"Agent executable unavailable: {argv[0]}")
@@ -218,6 +219,19 @@ class App:
                     self.store.remove(w.record)
                 else:
                     raise HubiError("Inconsistent workload; use reconcile by ID")
+            # Each session name owns one Claude conversation: a new one gets a
+            # fixed ID, and resume returns to exactly that one, never a list
+            # choice that could land in another name's session.
+            conversation = None
+            if kind == "claude":
+                bound = self.store.conversation(key) if resume else None
+                if resume and bound and self.transcript_exists(bound):
+                    argv += ["--resume", bound]
+                elif resume and bound is None:
+                    argv += ["--resume"]               # nothing saved for this name yet: Claude's own list
+                else:                                  # new, or saved but never written to
+                    conversation = str(uuid.uuid4())
+                    argv += ["--session-id", conversation]
             self.git.validate(ref)  # immediately before creation, under the identity lock
             # Garbage-collect only journals with proven absence of both objects,
             # under this exact lifecycle lock. Reads merely hide such journals.
@@ -256,12 +270,23 @@ class App:
                         if time.monotonic() >= settle:
                             break
                         time.sleep(.01)
+                    if conversation:
+                        self.store.bind_conversation(r, conversation)
                     return r
                 sessions, known, *_ = self.tmux.inventory()
                 if known and sessions.get(r.session) and sessions[r.session].dead:
                     raise HubiError(f"Workload startup failed; inspect {r.id}")
                 time.sleep(0.025)
             raise HubiError(f"Start acknowledgement timed out; workload remains inspectable: {r.id}")
+
+    def transcript_exists(self, conversation):
+        """Whether Claude has written this conversation (it does so on the first message)."""
+        base = Path(os.environ.get("CLAUDE_CONFIG_DIR") or self.c.home/".claude")/"projects"
+        return any(base.glob("*/"+conversation+".jsonl"))
+
+    def resumable(self, kind, path):
+        """Session names in one repository that have a saved conversation, newest first."""
+        return [b["instance"] for b in self.store.bindings() if b["kind"] == kind and b["repo"] == path]
 
     def _stop(self, r, *, expected, repair=False, initial=None):
         if expected != r.generation:

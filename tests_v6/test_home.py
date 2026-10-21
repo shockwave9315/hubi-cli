@@ -309,10 +309,10 @@ class HomeMenuTests(unittest.TestCase):
         self.assertIn("h ~ bez repo", [line for line in idle.splitlines() if "Nic nie działa" in line][0])
         pick = "\n".join(menu.render(frames["pick"](64, 25), menu.Theme(False), 64))
         self.assertIn(" h  ~", pick)
-        self.assertIn("$ główna", pick)
+        self.assertIn("$ 1", pick)
 
     def test_status_bar_label_says_tilde(self):
-        self.assertIn("terminal/główna · ~", label(home_workload().record))
+        self.assertIn("terminal/1 · ~", label(home_workload().record))
 
 
 @unittest.skipUnless(LAB, "home workspace lifecycle only under the disposable UID")
@@ -410,7 +410,7 @@ class HomeRuntimeTests(unittest.TestCase):
         client.read_until("AGENCI I TERMINALE".encode())
         self.clients(w.record.id, 0)
         screen = plain(client.output)
-        self.assertIn("terminal/główna", screen)
+        self.assertIn("terminal/1", screen)
         self.assertIn("~", screen)
         time.sleep(.12)
         client.send(b"1")                              # remembered: one key brings it back

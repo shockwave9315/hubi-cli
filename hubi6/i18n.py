@@ -9,7 +9,7 @@ import os
 import pwd
 import re
 
-from .core.model import RepoHealth, State
+from .core.model import DEFAULT_INSTANCE, DEFAULT_NAME, LEGACY_DEFAULT_NAME, RepoHealth, State, display_name
 
 
 STATE_PL = {
@@ -23,10 +23,6 @@ HEALTH_PL = {
 }
 RUNTIME_PL = {"OK": "OK", "DOWN": "nie działa", "DEGRADED": "niepełny", "UNKNOWN": "nieznany"}
 KIND_PL = {"claude": "Claude", "codex": "Codex", "terminal": "terminal"}
-# The instance is part of a workload's identity and keeps its stable ASCII name.
-# People see it as the session name ("nazwa sesji"), the default one in Polish.
-DEFAULT_INSTANCE = "primary"
-DEFAULT_NAME = "główna"
 
 EXACT = {
     # Git adapter
@@ -171,6 +167,8 @@ EXACT = {
     "Session is scrolled back (copy mode); retry shortly": "Sesja jest przewijana (tryb kopiowania); nic nie wysłano, ponów za chwilę",
     "Message pasted but not submitted: the session was scrolled back": "Wiadomość wklejona, ale niewysłana: sesję właśnie przewinięto",
     "Cannot read the pane mode": "Nie można odczytać trybu panelu tmux",
+    "Saved conversation of this session is unreadable; start a new conversation":
+        "Zapisana rozmowa tej sesji jest nieczytelna; uruchom nową rozmowę",
 }
 
 # English template -> Polish template. Named fields are copied verbatim.
@@ -254,13 +252,13 @@ def place(ref):
 
 def name_pl(instance):
     """What a person sees for an instance name."""
-    return DEFAULT_NAME if instance == DEFAULT_INSTANCE else instance
+    return display_name(instance)
 
 
 def instance_of(name):
-    """The instance a typed session name means; empty and the Polish default map to the default."""
+    """The instance a typed session name means; empty, "1" and the old "główna" map to the default."""
     text = str(name).strip()
-    return DEFAULT_INSTANCE if not text or text.casefold() == DEFAULT_NAME else text
+    return DEFAULT_INSTANCE if not text or text.casefold() in (DEFAULT_NAME, LEGACY_DEFAULT_NAME) else text
 
 
 def age(seconds):

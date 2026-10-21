@@ -59,8 +59,8 @@ def parser():
         if name != "terminal":
             c.add_argument("--resume", action="store_true", help="wznów rozmowę")
         c.add_argument("--mode", choices=("normal", "view", "shared", "takeover"), default="normal", help="tryb wejścia")
-    names = (f"Sesja „{DEFAULT_NAME}” to nazwa domyślna: można ją pominąć, a w zmiennej HUBI6_NAME i w JSON "
-             f"występuje jako {DEFAULT_INSTANCE}. Inne sesje znajdziesz w `hubi list`.")
+    names = (f"Sesja „{DEFAULT_NAME}” to nazwa domyślna i można ją pominąć (w JSON: name „{DEFAULT_NAME}”, "
+             f"instance „{DEFAULT_INSTANCE}”). Inne sesje znajdziesz w `hubi list`.")
     c = sub.add_parser("pane", help="panel tmux działającej sesji (np. %%14), do wysyłania do niej z innych narzędzi",
                        epilog="Kody wyjścia: 0 = wypisano panel; 4 = tej sesji teraz nie ma albo nie działa (ponów później); "
                               "2 = każdy inny błąd, np. nieznane repozytorium. "+names)

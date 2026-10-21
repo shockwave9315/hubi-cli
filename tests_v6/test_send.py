@@ -175,7 +175,7 @@ class SendCommandLineTests(unittest.TestCase):
             text = " ".join(out.getvalue().split())
             self.assertIn("4 = tej sesji teraz nie ma", text)
             self.assertIn("2 = każdy inny błąd", text)
-            self.assertIn("HUBI6_NAME i w JSON występuje jako primary", text)
+            self.assertIn("Sesja „1” to nazwa domyślna i można ją pominąć", text)
 
     def test_unavailable_session_has_its_own_exit_status(self):
         code, _, err = self.run_cli("send", "claude", "praca", "-m", "x", error=Unavailable("No such session; use hubi list"))
@@ -229,7 +229,7 @@ class SendRuntimeTests(unittest.TestCase):
         self.app.tmux.paste(a.pane, command)
         self.app.tmux.command("send-keys", "-t", a.pane, "Enter")
         marker = target/"from-a.txt"
-        self.assertEqual(wait_for(lambda: marker.exists() and marker.read_text(), 10).strip(), "from-primary")
+        self.assertEqual(wait_for(lambda: marker.exists() and marker.read_text(), 10).strip(), "from-1")
 
     def test_session_knows_its_own_name(self):
         path = self.repo()

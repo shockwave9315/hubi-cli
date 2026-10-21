@@ -133,10 +133,16 @@ class Config:
     def records(self):
         return self.state_base/"workloads"/self.runtime_id
 
+    @property
+    def conversations(self):
+        """Which agent conversation belongs to which session name. Survives stop."""
+        return self.state_base/"conversations"/self.runtime_id
+
     def prepare(self):
         private_dir(self.runtime_base)
         for p in (self.runtime_base/"hubi6", self.runtime, self.runtime/"locks",
-                  self.state_base, self.state_base/"workloads", self.records):
+                  self.state_base, self.state_base/"workloads", self.records,
+                  self.state_base/"conversations", self.conversations):
             private_dir(p, create=True)
 
     @property

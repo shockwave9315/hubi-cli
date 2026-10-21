@@ -38,6 +38,17 @@ class RepoHealth(str, Enum):
 
 
 KINDS = ("codex", "claude", "terminal")
+# The instance is part of a workload's identity and keeps its stable ASCII name.
+# People and agents see the default as "1": no session name implies a role.
+DEFAULT_INSTANCE = "primary"
+DEFAULT_NAME = "1"
+LEGACY_DEFAULT_NAME = "główna"   # still understood when typed
+UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z", re.ASCII)
+
+
+def display_name(instance: str) -> str:
+    """The session name a person and an agent see."""
+    return DEFAULT_NAME if instance == DEFAULT_INSTANCE else instance
 HEX20 = re.compile(r"[a-f0-9]{20}\Z", re.ASCII)
 HEX16 = re.compile(r"[a-f0-9]{16}\Z", re.ASCII)
 INSTANCE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}\Z", re.ASCII)
@@ -265,7 +276,8 @@ class Workload:
         r = self.record
         return {"id": r.id, "type": r.kind, "repo": r.repo.path, "workspace": "home" if r.repo.plain else "repo",
                 "repo_health": self.repo_health.value,
-                "instance": r.instance, "key": r.key, "tmux_session": r.session, "scope": r.scope,
+                "instance": r.instance, "name": display_name(r.instance), "key": r.key,
+                "tmux_session": r.session, "scope": r.scope,
                 # The pane of a running generation only: it changes with every new
                 # generation, and a dead pane must never look like an address.
                 "pane": self.session.pane if self.session and self.state in (State.RUNNING, State.ATTACHED) else "",
