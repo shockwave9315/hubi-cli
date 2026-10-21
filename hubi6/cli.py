@@ -119,8 +119,8 @@ def execute(args):
         logger = logging.getLogger("hubi6")
         logger.setLevel(logging.DEBUG)
         logger.addHandler(handler)
-    # Read-only commands, and send (it only talks to tmux), never create state,
-    # config, logs, locks or runtime dirs.
+    # Read-only commands never create state, config, logs, locks or runtime dirs.
+    # send writes nothing but its per-session lock and needs no log.
     if args.command not in ("list", "doctor", "inspect", "pane", "send"):
         app.c.prepare()
         handler = RotatingFileHandler(app.c.state_base/"hubi6.log", maxBytes=1048576, backupCount=3)

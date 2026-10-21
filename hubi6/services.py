@@ -145,11 +145,22 @@ class App:
         if any((ord(c) < 32 and c not in "\n\t") or 127 <= ord(c) < 160 for c in text):
             raise HubiError("Message contains control characters")
         w = self.pane(kind, repo, instance)
-        self.tmux.paste(w.session.pane, text)
-        if enter:
-            # Let the agent take the paste in before the key that submits it.
-            time.sleep(self.c.send_enter_delay)
-            self.tmux.command("send-keys", "-t", w.session.pane, "Enter")
+        # One sender per session from paste to Enter: two messages sent at the
+        # same moment would otherwise merge into one. Not the lifecycle lock.
+        with self.store.lock(hashlib.sha256(("send:"+w.record.key).encode()).hexdigest()[:20]):
+            w = self.pane(kind, repo, instance)
+            pane = w.session.pane
+            # A scrolled-back pane (copy mode) takes the paste without paste
+            # markers, so each newline acts as Enter, and it swallows the Enter.
+            if self.tmux.in_mode(pane):
+                raise Unavailable("Session is scrolled back (copy mode); retry shortly")
+            self.tmux.paste(pane, text)
+            if enter:
+                # Let the agent take the paste in before the key that submits it.
+                time.sleep(self.c.send_enter_delay)
+                if self.tmux.in_mode(pane):
+                    raise HubiError("Message pasted but not submitted: the session was scrolled back")
+                self.tmux.command("send-keys", "-t", pane, "Enter")
         return w
 
     def start(self, kind, repo, instance="primary", resume=False):

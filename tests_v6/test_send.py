@@ -22,43 +22,77 @@ from tests_v6.test_runtime import wait_for
 
 
 class Recorder:
-    """A Runner that records tmux calls and can fail one subcommand."""
+    """A Runner that records tmux calls, answers pane_in_mode, and can fail one subcommand."""
     calls = 0
 
-    def __init__(self, fail=None):
-        self.log, self.fail = [], fail
+    def __init__(self, fail=None, modes=()):
+        self.log, self.fail, self.modes = [], fail, list(modes)
 
     def run(self, argv, *, input=None, check=True, **kw):
         self.log.append((argv[4], list(argv[4:]), input))
         if argv[4] == self.fail and check:
             raise HubiError("tmux failed (exit 1)")
-        return subprocess.CompletedProcess(argv, 0, "", "")
+        out = (self.modes.pop(0) if self.modes else "0")+"\n" if argv[4] == "display-message" else ""
+        return subprocess.CompletedProcess(argv, 0, out, "")
 
 
 class SendTests(unittest.TestCase):
-    def app(self, state=State.RUNNING):
-        app = App(replace(Config.load(), send_enter_delay=0), Recorder())
+    def app(self, state=State.RUNNING, modes=()):
+        app = App(replace(Config.load(), send_enter_delay=0), Recorder(modes=modes))
         app.git = FakeGit()
         w = workload("claude", "primary", "praca", state, created=time.time())
         w.session.pane = w.record.pane = "%14"
+        self.key = w.record.key
         s = snapshot([w])
         app.runtime_snapshot = lambda: s
+        app.locks = []
+
+        @contextlib.contextmanager
+        def lock(key):           # records the lock around the tmux calls; touches no real lock file
+            app.r.log.append(("lock", key, None))
+            yield
+            app.r.log.append(("unlock", key, None))
+        app.store.lock = lock
         return app
 
     def commands(self, app):
-        return [c[0] for c in app.r.log]
+        return [c[0] for c in app.r.log if c[0] not in ("lock", "unlock", "display-message")]
 
     def test_paste_then_enter_into_the_resolved_pane(self):
         app = self.app()
         app.send("claude", "praca", "primary", "CP17 wznów\nlinia 2")
         self.assertEqual(self.commands(app), ["load-buffer", "paste-buffer", "send-keys"])
-        load, paste, enter = app.r.log
+        load, paste, enter = [c for c in app.r.log if c[0] in ("load-buffer", "paste-buffer", "send-keys")]
         self.assertEqual(load[2], "CP17 wznów\nlinia 2")              # stdin, never argv
         self.assertNotIn("CP17 wznów\nlinia 2", load[1])
         buffer = load[1][2]
         self.assertTrue(buffer.startswith("hubi6-send-"))
         self.assertEqual(paste[1], ["paste-buffer", "-p", "-d", "-b", buffer, "-t", "%14"])
         self.assertEqual(enter[1], ["send-keys", "-t", "%14", "Enter"])
+
+    def test_one_sender_at_a_time_holds_its_own_lock_from_paste_to_enter(self):
+        app = self.app()
+        app.send("claude", "praca", "primary", "a")
+        names = [c[0] for c in app.r.log]
+        self.assertEqual(names[0], "lock")
+        self.assertEqual(names[-1], "unlock")
+        self.assertEqual(names.count("lock"), 1)
+        key = app.r.log[0][1]
+        self.assertNotEqual(key, self.key)                         # never the lifecycle lock
+        self.assertRegex(key, r"^[0-9a-f]{20}$")
+
+    def test_scrolled_back_session_gets_nothing_and_may_retry(self):
+        app = self.app(modes=["1"])
+        with self.assertRaisesRegex(Unavailable, "copy mode"):
+            app.send("claude", "praca", "primary", "hello")
+        self.assertEqual(self.commands(app), [])
+
+    def test_scrolled_back_before_enter_is_reported_not_submitted(self):
+        app = self.app(modes=["0", "1"])
+        with self.assertRaises(HubiError) as error:
+            app.send("claude", "praca", "primary", "hello")
+        self.assertNotIsInstance(error.exception, Unavailable)    # the text did arrive; a retry would duplicate it
+        self.assertEqual(self.commands(app), ["load-buffer", "paste-buffer"])
 
     def test_no_enter_only_pastes(self):
         app = self.app()
@@ -68,7 +102,7 @@ class SendTests(unittest.TestCase):
     def test_carriage_returns_become_newlines(self):
         app = self.app()
         app.send("claude", "praca", "primary", "a\r\nb\rc", enter=False)
-        self.assertEqual(app.r.log[0][2], "a\nb\nc")
+        self.assertEqual([c[2] for c in app.r.log if c[0] == "load-buffer"], ["a\nb\nc"])
 
     def test_unsafe_or_empty_text_is_refused_before_tmux(self):
         for text, why in (("", "empty"), ("  \n\t", "empty"), ("a\x1b[201~b", "control"), ("a\x00", "control"),
@@ -193,6 +227,31 @@ class SendRuntimeTests(unittest.TestCase):
         marker = wait_for(lambda: next(path.glob(".agent-*"), None))
         env = json.loads(marker.read_text())["env"]
         self.assertEqual((env["HUBI6_TYPE"], env["HUBI6_REPO"], env["HUBI6_NAME"]), ("claude", str(path), "rev"))
+
+    def test_scrolled_back_session_is_retried_not_garbled(self):
+        path = self.repo()
+        r = self.app.start("terminal", str(path))
+        self.app.tmux.command("copy-mode", "-t", r.pane)
+        p = self.cli("send", "terminal", path.name, "-m", "echo early > early.txt")
+        self.assertEqual(p.returncode, 4, p.stderr)
+        self.assertIn("przewijana", p.stderr)
+        self.app.tmux.command("send-keys", "-t", r.pane, "-X", "cancel")
+        time.sleep(.5)
+        self.assertFalse((path/"early.txt").exists())
+        p = self.cli("send", "terminal", path.name, "-m", "echo later > later.txt")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(wait_for(lambda: (path/"later.txt").exists() and (path/"later.txt").read_text()).strip(), "later")
+        self.assertFalse((path/"early.txt").exists())
+
+    def test_simultaneous_messages_stay_separate(self):
+        path = self.repo()
+        self.app.start("terminal", str(path))
+        senders = [subprocess.Popen([sys.executable, "-m", "hubi6", "send", "terminal", path.name, "-m", f"echo {n} > {n}.txt"])
+                   for n in ("first", "second", "third")]
+        self.assertEqual([s.wait(20) for s in senders], [0, 0, 0])
+        for n in ("first", "second", "third"):
+            self.assertEqual(wait_for(lambda: (path/f"{n}.txt").exists() and (path/f"{n}.txt").read_text()).strip(), n)
+        self.assertEqual(sorted(p.name for p in path.glob("*.txt")), ["first.txt", "second.txt", "third.txt"])
 
     def test_absent_session_exits_4_and_sends_nothing(self):
         path = self.repo()

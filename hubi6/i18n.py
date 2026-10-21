@@ -168,6 +168,9 @@ EXACT = {
     "Message is longer than 64 KiB": "Wiadomość jest dłuższa niż 64 KiB",
     "Message contains control characters": "Wiadomość zawiera znaki sterujące (dozwolone są tylko nowa linia i tabulator)",
     "Message missing: use -m TEXT or standard input": "Brak wiadomości: podaj -m TEKST albo przekaż ją na standardowe wejście",
+    "Session is scrolled back (copy mode); retry shortly": "Sesja jest przewijana (tryb kopiowania); nic nie wysłano, ponów za chwilę",
+    "Message pasted but not submitted: the session was scrolled back": "Wiadomość wklejona, ale niewysłana: sesję właśnie przewinięto",
+    "Cannot read the pane mode": "Nie można odczytać trybu panelu tmux",
 }
 
 # English template -> Polish template. Named fields are copied verbatim.

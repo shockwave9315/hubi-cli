@@ -170,6 +170,15 @@ class Tmux:
                      "set-hook", "-p", "-t", record.pane, "pane-died",
                      "if -F '#{session_attached}' 'detach-client -s ="+record.session+"'")
 
+    def in_mode(self, pane):
+        """True while the pane shows copy mode or another mode instead of its program."""
+        if not re.fullmatch(r"%[0-9]+", pane):
+            raise HubiError("tmux returned an invalid pane identity")
+        value = self.command("display-message", "-p", "-t", pane, "#{pane_in_mode}").stdout.strip()
+        if value not in ("0", "1"):
+            raise HubiError("Cannot read the pane mode")
+        return value == "1"
+
     def paste(self, pane, text):
         """Paste text into one exact pane as a single bracketed paste.
 
