@@ -167,6 +167,16 @@ class SendCommandLineTests(unittest.TestCase):
         self.assertEqual((code, calls), (2, []))
         self.assertIn("Brak wiadomości", err)
 
+    def test_help_explains_exit_codes_and_the_default_name(self):
+        from hubi6.cli import parser
+        for command in ("send", "pane"):
+            with self.subTest(command=command), patch("sys.stdout", io.StringIO()) as out, self.assertRaises(SystemExit):
+                parser().parse_args([command, "--help"])
+            text = " ".join(out.getvalue().split())
+            self.assertIn("4 = tej sesji teraz nie ma", text)
+            self.assertIn("2 = każdy inny błąd", text)
+            self.assertIn("HUBI6_NAME i w JSON występuje jako primary", text)
+
     def test_unavailable_session_has_its_own_exit_status(self):
         code, _, err = self.run_cli("send", "claude", "praca", "-m", "x", error=Unavailable("No such session; use hubi list"))
         self.assertEqual(code, 4)

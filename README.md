@@ -185,7 +185,13 @@ ma albo nie działa (można ponowić później), a 2 to każdy inny błąd.
 
 Każda sesja zna swoją nazwę ze zmiennych `HUBI6_TYPE`, `HUBI6_REPO` i
 `HUBI6_NAME`, więc agent może napisać innym, jak mu odpowiedzieć:
-`hubi send $HUBI6_TYPE $HUBI6_REPO $HUBI6_NAME`.
+`hubi send $HUBI6_TYPE $HUBI6_REPO $HUBI6_NAME`. Domyślna sesja „główna” ma tam
+(i w JSON) nazwę `primary`; w poleceniach działają obie.
+
+Nazwij sesję tak, jak jej rola, np. `hubi claude praca rev` dla review. Inne
+sesje zobaczą ją w `hubi list` jako `claude/rev` i napiszą do niej
+`hubi send claude praca rev -m '…'`. Co ma robić, mówisz jej w pierwszej
+wiadomości.
 
 Skrypt, który musi zrobić z panelem coś więcej (np. odczytać ekran), pyta o
 niego tuż przed użyciem, nigdy go nie zapamiętuje:

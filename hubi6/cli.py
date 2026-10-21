@@ -10,7 +10,7 @@ import traceback
 from . import __version__
 from .config import Config
 from .core.model import HubiError, State, Unavailable, display
-from .i18n import DEFAULT_NAME, HEALTH_PL, RUNTIME_PL, STATE_PL, instance_of, name_pl, pl
+from .i18n import DEFAULT_INSTANCE, DEFAULT_NAME, HEALTH_PL, RUNTIME_PL, STATE_PL, instance_of, name_pl, pl
 
 
 class PolishHelp(argparse.HelpFormatter):
@@ -59,13 +59,20 @@ def parser():
         if name != "terminal":
             c.add_argument("--resume", action="store_true", help="wznów rozmowę")
         c.add_argument("--mode", choices=("normal", "view", "shared", "takeover"), default="normal", help="tryb wejścia")
-    c = sub.add_parser("pane", help="panel tmux działającej sesji (np. %%14), do wysyłania do niej z innych narzędzi")
+    names = (f"Sesja „{DEFAULT_NAME}” to nazwa domyślna: można ją pominąć, a w zmiennej HUBI6_NAME i w JSON "
+             f"występuje jako {DEFAULT_INSTANCE}. Inne sesje znajdziesz w `hubi list`.")
+    c = sub.add_parser("pane", help="panel tmux działającej sesji (np. %%14), do wysyłania do niej z innych narzędzi",
+                       epilog="Kody wyjścia: 0 = wypisano panel; 4 = tej sesji teraz nie ma albo nie działa (ponów później); "
+                              "2 = każdy inny błąd, np. nieznane repozytorium. "+names)
     c.add_argument("type", choices=("codex", "claude", "terminal"), help="rodzaj sesji")
     c.add_argument("repo", help="nazwa albo ścieżka repozytorium; ~ = katalog domowy (bez repo)")
     c.add_argument("instance", nargs="?", default="primary", metavar="NAZWA",
                    help=f"nazwa sesji (domyślnie: {DEFAULT_NAME})")
     c.add_argument("--json", action="store_true", help=as_json+", z gniazdem tmux")
-    c = sub.add_parser("send", help="wyślij tekst do działającej sesji po nazwie (wklejenie + Enter)")
+    c = sub.add_parser("send", help="wyślij tekst do działającej sesji po nazwie (wklejenie + Enter)",
+                       epilog="Kody wyjścia: 0 = wysłano; 4 = tej sesji teraz nie ma, nie działa albo ktoś przewija jej panel, "
+                              "nic nie wysłano (ponów później); 2 = każdy inny błąd, np. nieznane repozytorium albo znaki "
+                              "sterujące w treści. "+names)
     c.add_argument("type", choices=("codex", "claude", "terminal"), help="rodzaj sesji")
     c.add_argument("repo", help="nazwa albo ścieżka repozytorium; ~ = katalog domowy (bez repo)")
     c.add_argument("instance", nargs="?", default="primary", metavar="NAZWA",
