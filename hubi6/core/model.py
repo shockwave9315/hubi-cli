@@ -11,6 +11,13 @@ class HubiError(Exception):
     """Expected, actionable error. Never contains environment values."""
 
 
+class Unavailable(HubiError):
+    """The addressed session does not exist or is not running right now.
+
+    A tool can retry later; the CLI gives it a distinct exit status (4).
+    """
+
+
 class State(str, Enum):
     STOPPED = "STOPPED"
     STARTING = "STARTING"
@@ -259,8 +266,9 @@ class Workload:
         return {"id": r.id, "type": r.kind, "repo": r.repo.path, "workspace": "home" if r.repo.plain else "repo",
                 "repo_health": self.repo_health.value,
                 "instance": r.instance, "key": r.key, "tmux_session": r.session, "scope": r.scope,
-                # The live pane of this generation; it changes with every new generation.
-                "pane": self.session.pane if self.session else "",
+                # The pane of a running generation only: it changes with every new
+                # generation, and a dead pane must never look like an address.
+                "pane": self.session.pane if self.session and self.state in (State.RUNNING, State.ATTACHED) else "",
                 "generation": r.generation, "invocation": r.invocation,
                 "state": self.state.value, "attached_clients": self.session.attached if self.session else 0,
                 "exit_status": self.session.exit_status if self.session else None,

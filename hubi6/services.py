@@ -11,7 +11,7 @@ from .adapters.git import Git, health, pin_workspace
 from .adapters.process import Runner
 from .adapters.systemd import Systemd
 from .adapters.tmux import Tmux
-from .core.model import HubiError, Record, RepoHealth, State, actions, key_id, phase_transition
+from .core.model import HubiError, Record, RepoHealth, State, Unavailable, actions, key_id, phase_transition
 from .inventory import build
 from .storage import Store, atomic_json
 
@@ -108,12 +108,15 @@ class App:
         """The running workload of (type, repository, name), for tools that send to its pane.
 
         A pane ID such as %14 belongs to one generation: stop and start create a
-        new tmux session, and tmux never reuses pane IDs. Tools resolve the pane
-        when they send instead of remembering it. Read-only: nothing is created,
-        written or signalled.
+        new tmux session, and after a restart of the tmux server the numbering
+        starts again, so a remembered ID can even name another session. Tools
+        address sessions by name and resolve the pane when they send.
+        Read-only: nothing is created, written or signalled.
         """
         key = key_id(kind, self.git.resolve(repo).path, instance)
         s = self.runtime_snapshot()
+        if s.runtime_health == "DOWN":
+            raise HubiError("Runtime is not running; run hubi doctor")
         if not s.tmux_known or not s.systemd_known:
             raise HubiError("Runtime state UNKNOWN; cannot resolve the pane")
         same = [w for w in s.workloads if w.record.key == key]
@@ -123,8 +126,31 @@ class App:
         if live:
             return live[0]
         if same:
-            raise HubiError(f"Workload is {same[0].state.value}, not running: {same[0].record.id}")
-        raise HubiError("No such session; use hubi list")
+            raise Unavailable(f"Workload is {same[0].state.value}, not running: {same[0].record.id}")
+        raise Unavailable("No such session; use hubi list")
+
+    def send(self, kind, repo, instance, text, *, enter=True):
+        """Deliver text to a running session by name, as if pasted, then press Enter.
+
+        The pane is resolved at this moment, so restarts never strand a sender.
+        The text arrives as one bracketed paste: an agent sees one message, never
+        keystrokes. Control characters other than newline and tab are refused,
+        because they could end the paste early and act as keys.
+        """
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        if not text.strip():
+            raise HubiError("Message is empty")
+        if len(text.encode()) > 65536:
+            raise HubiError("Message is longer than 64 KiB")
+        if any((ord(c) < 32 and c not in "\n\t") or 127 <= ord(c) < 160 for c in text):
+            raise HubiError("Message contains control characters")
+        w = self.pane(kind, repo, instance)
+        self.tmux.paste(w.session.pane, text)
+        if enter:
+            # Let the agent take the paste in before the key that submits it.
+            time.sleep(self.c.send_enter_delay)
+            self.tmux.command("send-keys", "-t", w.session.pane, "Enter")
+        return w
 
     def start(self, kind, repo, instance="primary", resume=False):
         if repo is None and kind != "terminal":

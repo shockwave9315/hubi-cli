@@ -46,6 +46,8 @@ class Config:
     ui_refresh: float = 2
     ui_color: bool = True
     ui_icons: bool = True
+    # `hubi send`: pause between the paste and the Enter that submits it.
+    send_enter_delay: float = 1
     # Work outside any repository (a persistent shell or an agent in ~).
     # None disables it. Always a plain directory, never a Git working tree.
     home_workspace: Path | None = None

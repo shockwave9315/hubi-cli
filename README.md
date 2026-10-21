@@ -153,6 +153,7 @@ hubi claude ~ [NAZWA]         # agent w katalogu domowym
 hubi list                     # sesje i ich ID
 hubi stop ID                  # zatrzymaj sesję
 hubi inspect ID               # szczegóły (JSON)
+hubi send TYP REPO [NAZWA] -m TEKST  # wyślij wiadomość do sesji po nazwie
 hubi pane TYP REPO [NAZWA]    # panel tmux działającej sesji, np. %14
 hubi github list              # repozytoria na GitHubie
 hubi doctor                   # diagnostyka
@@ -165,22 +166,39 @@ Brak `REPO` oznacza katalog domowy tylko w `hubi terminal`: agent (`claude`,
 `$REPO` w skrypcie kończy się błędem. Opcje każdego polecenia
 pokazuje `hubi POLECENIE --help`.
 
-### Wysyłanie do sesji z innych narzędzi
+### Sesje rozmawiają ze sobą po nazwie
 
-Numer panelu (`%14`) należy do jednej generacji sesji. `hubi stop` i ponowny
-start tworzą nową sesję tmux, a tmux nigdy nie używa numerów paneli ponownie.
-Skrypt albo inny agent nie powinien więc zapamiętywać `%N`, tylko ustalać go
-tuż przed wysłaniem:
+Sesję wskazuje się nazwą: rodzaj, repozytorium i nazwa sesji, np. `claude praca`
+albo `claude hubi-cli 2`. Numer panelu tmux (`%14`) nie jest adresem: zmienia
+się przy każdym zatrzymaniu i starcie, a po restarcie serwera tmux numeracja
+zaczyna się od nowa, więc stary numer może wskazać już inną sesję.
 
 ```console
-pane=$(hubi pane claude praca) || exit 1
-tmux -N -S /run/user/$(id -u)/hubi6/tmux.sock send-keys -t "$pane" -l 'tekst'
+hubi send claude praca -m 'CP17 pauza: co zrobione, co dalej'
+echo "$raport" | hubi send codex praca      # treść ze standardowego wejścia
 ```
 
-`hubi pane` niczego nie zmienia. Kończy się błędem, gdy sesja nie działa
-(np. jest zakończona albo osierocona), zamiast wskazać martwy panel.
-`hubi pane ... --json` podaje też gniazdo tmux, a `hubi list --json` pola
-`key` (stałe dla rodzaju, repo i nazwy) i `pane`.
+`hubi send` za każdym razem sam ustala, gdzie sesja jest teraz, wkleja tekst
+jako jedną wiadomość i naciska Enter (`--no-enter` tylko wkleja). Restart
+odbiorcy niczego więc nie psuje. Kod wyjścia 4 znaczy, że tej sesji teraz nie
+ma albo nie działa (można ponowić później), a 2 to każdy inny błąd.
+
+Każda sesja zna swoją nazwę ze zmiennych `HUBI6_TYPE`, `HUBI6_REPO` i
+`HUBI6_NAME`, więc agent może napisać innym, jak mu odpowiedzieć:
+`hubi send $HUBI6_TYPE $HUBI6_REPO $HUBI6_NAME`.
+
+Skrypt, który musi zrobić z panelem coś więcej (np. odczytać ekran), pyta o
+niego tuż przed użyciem, nigdy go nie zapamiętuje:
+
+```console
+pane=$(hubi pane codex praca) || exit 1
+tmux -N -S /run/user/$(id -u)/hubi6/tmux.sock capture-pane -p -t "$pane"
+```
+
+`hubi pane` niczego nie zmienia i odmawia, gdy sesja nie działa (np. jest
+zakończona albo osierocona). `hubi pane ... --json` podaje też gniazdo tmux, a
+`hubi list --json` pole `key` (stałe dla rodzaju, repo i nazwy) oraz `pane`,
+które jest puste, gdy sesja nie działa.
 
 ### Procesy pomocnicze
 
@@ -193,13 +211,14 @@ ona osierocona (ORPHANED) do czasu `hubi stop`.
 Proces, który ma przeżyć agenta, uruchom jako osobną jednostkę użytkownika:
 
 ```console
-systemd-run --user --same-dir --collect --unit=praca-straznik -- ./watchdog.sh
+systemd-run --user --same-dir --collect --setenv=PATH="$PATH" --unit=praca-straznik -- ./watchdog.sh
 systemctl --user status praca-straznik    # stan
 systemctl --user stop praca-straznik      # zatrzymanie
 ```
 
-Taka jednostka dostaje środowisko menedżera systemd, a nie agenta: zmienne
-(np. `PATH`) przekaż jawnie przez `--setenv=`.
+Taka jednostka dostaje środowisko menedżera systemd, a nie agenta. Bez
+`--setenv=PATH="$PATH"` nie znajdzie `hubi` w `~/.local/bin`; inne potrzebne
+zmienne też przekaż przez `--setenv=`.
 
 ## Konfiguracja
 

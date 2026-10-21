@@ -16,8 +16,8 @@ import unittest
 from unittest.mock import patch
 
 from hubi6.config import Config
-from hubi6.core.model import HubiError, State
-from hubi6.i18n import pl
+from hubi6.core.model import HubiError, State, Unavailable
+from hubi6.i18n import STATE_PL, pl
 from hubi6.services import App
 from tests_v6.support import LAB, bootstrap, repo
 from tests_v6.test_menu import FakeGit, snapshot, workload
@@ -59,13 +59,13 @@ class PaneSelectionTests(unittest.TestCase):
         for state in (State.EXITED, State.ORPHANED, State.STARTING, State.UNKNOWN, State.STALE):
             with self.subTest(state=state):
                 w = self.item(state)
-                with self.assertRaises(HubiError) as error:
+                with self.assertRaises(Unavailable) as error:
                     self.app([w]).pane("claude", "praca")
                 self.assertEqual(str(error.exception), f"Workload is {state.value}, not running: {w.record.id}")
-                self.assertEqual(pl(error.exception), f"Sesja nie działa (stan {state.value}): {w.record.id}")
+                self.assertEqual(pl(error.exception), f"Sesja nie działa ({STATE_PL[state]}): {w.record.id}")
 
     def test_missing_session(self):
-        with self.assertRaisesRegex(HubiError, "No such session"):
+        with self.assertRaisesRegex(Unavailable, "No such session"):
             self.app([self.item(State.RUNNING, kind="codex")]).pane("claude", "praca")
 
     def test_two_running_generations_are_refused(self):
@@ -73,6 +73,12 @@ class PaneSelectionTests(unittest.TestCase):
         second.record.generation = "e"*16
         with self.assertRaisesRegex(HubiError, "Several running generations"):
             self.app([first, second]).pane("claude", "praca")
+
+    def test_stopped_runtime_is_named_as_stopped(self):
+        with self.assertRaises(HubiError) as error:
+            self.app([], runtime_health="DOWN", tmux_known=False).pane("claude", "praca")
+        self.assertNotIsInstance(error.exception, Unavailable)
+        self.assertEqual(pl(error.exception), "Runtime Hubi nie działa; uruchom `hubi doctor`")
 
     def test_unknown_runtime_refuses_instead_of_guessing(self):
         for field in ("tmux_known", "systemd_known"):
@@ -83,6 +89,9 @@ class PaneSelectionTests(unittest.TestCase):
         w = self.item(State.RUNNING)
         data = w.data()
         self.assertEqual((data["key"], data["pane"]), (w.record.key, "%14"))
+        for state in (State.EXITED, State.ORPHANED, State.STARTING, State.UNKNOWN, State.STALE):
+            with self.subTest(state=state):
+                self.assertEqual(self.item(state).data()["pane"], "")   # a dead pane is never an address
         w.session = None
         self.assertEqual(w.data()["pane"], "")
 
@@ -155,11 +164,11 @@ class PaneRuntimeTests(unittest.TestCase):
         self.assertEqual((p.returncode, p.stdout.strip()), (0, self.live_pane(first)), p.stderr)
         data = json.loads(self.cli("pane", "claude", str(self.path), "--json").stdout)
         self.assertEqual((data["id"], data["state"], data["socket"]), (first.id, "RUNNING", str(self.app.c.socket)))
-        self.assertEqual(self.cli("pane", "codex", name).returncode, 2)       # same repo, other type
-        self.assertEqual(self.cli("pane", "claude", name, "rev").returncode, 2)  # same repo, other name
+        self.assertEqual(self.cli("pane", "codex", name).returncode, 4)       # same repo, other type
+        self.assertEqual(self.cli("pane", "claude", name, "rev").returncode, 4)  # same repo, other name
         self.app.stop(first.id)
         p = self.cli("pane", "claude", name)
-        self.assertEqual(p.returncode, 2)
+        self.assertEqual(p.returncode, 4)
         self.assertIn("Nie ma takiej sesji", p.stderr)
         second = self.app.start("claude", str(self.path))
         p = self.cli("pane", "claude", name)
@@ -173,8 +182,8 @@ class PaneRuntimeTests(unittest.TestCase):
         self.app.tmux.command("send-keys", "-t", r.pane, "exit 3", "Enter")
         wait_for(lambda: self.app.find(r.id, health_check=False).state == State.EXITED)
         p = self.cli("pane", "terminal", self.path.name)
-        self.assertEqual((p.returncode, p.stdout), (2, ""))
-        self.assertIn(f"stan EXITED): {r.id}", p.stderr)
+        self.assertEqual((p.returncode, p.stdout), (4, ""))
+        self.assertIn(f"(zakończony): {r.id}", p.stderr)
 
     def test_resolver_writes_nothing(self):
         r = self.app.start("codex", str(self.path))

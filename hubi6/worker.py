@@ -71,6 +71,9 @@ def main():
     # Markers describe the workload, not an inherited launcher. RC files can
     # use HUBI_NOAUTO to suppress v5 autologin; Hubi refuses self-nesting.
     env["HUBI6_ACTIVE"] = "1"
+    # The session's own name, so it can tell others how to reach it:
+    # `hubi send $HUBI6_TYPE $HUBI6_REPO $HUBI6_NAME`.
+    env["HUBI6_TYPE"], env["HUBI6_REPO"], env["HUBI6_NAME"] = r.kind, r.repo.path, r.instance
     if r.kind == "terminal":
         env["HUBI_NOAUTO"] = "1"
     env.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")

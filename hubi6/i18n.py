@@ -163,6 +163,11 @@ EXACT = {
     "Runtime state UNKNOWN; cannot resolve the pane": "Stan runtime nieznany; nie można ustalić panelu",
     "Several running generations; use hubi list": "Działa kilka generacji tej sesji; zobacz `hubi list`",
     "No such session; use hubi list": "Nie ma takiej sesji; zobacz `hubi list`",
+    "Runtime is not running; run hubi doctor": "Runtime Hubi nie działa; uruchom `hubi doctor`",
+    "Message is empty": "Pusta wiadomość",
+    "Message is longer than 64 KiB": "Wiadomość jest dłuższa niż 64 KiB",
+    "Message contains control characters": "Wiadomość zawiera znaki sterujące (dozwolone są tylko nowa linia i tabulator)",
+    "Message missing: use -m TEXT or standard input": "Brak wiadomości: podaj -m TEKST albo przekaż ją na standardowe wejście",
 }
 
 # English template -> Polish template. Named fields are copied verbatim.
@@ -194,7 +199,7 @@ TEMPLATES = (
     ("Moved workspace already has a workload: {ident}; stop it before starting here", "Przeniesiony workspace ma już sesję: {ident}; zatrzymaj ją przed startem tutaj"),
     ("Workload EXITED: {ident}; stop/reconcile it before creating a new generation", "Sesja zakończona: {ident}; usuń ją przed uruchomieniem nowej"),
     ("Workload startup failed; inspect {ident}", "Start sesji nie powiódł się; obejrzyj {ident}"),
-    ("Workload is {state}, not running: {ident}", "Sesja nie działa (stan {state}): {ident}"),
+    ("Workload is {state}, not running: {ident}", "Sesja nie działa ({state}): {ident}"),
     ("Workload failed or EXITED during startup; inspect/stop {ident}", "Sesja zakończyła się w trakcie startu; obejrzyj lub usuń {ident}"),
     ("{name}: {error}; reconcile using a surviving runtime receipt, otherwise inspect/move this file manually",
      "{name}: {error}; napraw sesję na podstawie zachowanego potwierdzenia albo obejrzyj/przenieś ten plik ręcznie"),
@@ -226,7 +231,10 @@ def pl(message):
     for pattern, target in _COMPILED:
         match = pattern.fullmatch(text)
         if match:
-            return target.format(**match.groupdict())
+            fields = match.groupdict()
+            if "state" in fields and fields["state"] in State.__members__:
+                fields["state"] = STATE_PL[State[fields["state"]]]   # the word `hubi list` shows
+            return target.format(**fields)
     return text
 
 

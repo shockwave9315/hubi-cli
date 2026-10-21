@@ -327,7 +327,7 @@ class TextTests(unittest.TestCase):
                 if not isinstance(node, ast.Call) or not node.args:
                     continue
                 first = node.args[0]
-                is_error = getattr(node.func, "id", "") == "HubiError"
+                is_error = getattr(node.func, "id", "") in ("HubiError", "Unavailable")
                 is_issue = getattr(node.func, "attr", "") == "append" and path.name in ("inventory.py", "git.py", "storage.py") \
                     or (getattr(node.func, "attr", "") == "append" and path.name == "tmux.py" and isinstance(first, ast.Constant)
                         and isinstance(first.value, str) and " " in first.value)

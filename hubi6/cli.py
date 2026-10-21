@@ -9,7 +9,7 @@ import traceback
 
 from . import __version__
 from .config import Config
-from .core.model import HubiError, State, display
+from .core.model import HubiError, State, Unavailable, display
 from .i18n import DEFAULT_NAME, HEALTH_PL, RUNTIME_PL, STATE_PL, instance_of, name_pl, pl
 
 
@@ -65,6 +65,13 @@ def parser():
     c.add_argument("instance", nargs="?", default="primary", metavar="NAZWA",
                    help=f"nazwa sesji (domyślnie: {DEFAULT_NAME})")
     c.add_argument("--json", action="store_true", help=as_json+", z gniazdem tmux")
+    c = sub.add_parser("send", help="wyślij tekst do działającej sesji po nazwie (wklejenie + Enter)")
+    c.add_argument("type", choices=("codex", "claude", "terminal"), help="rodzaj sesji")
+    c.add_argument("repo", help="nazwa albo ścieżka repozytorium; ~ = katalog domowy (bez repo)")
+    c.add_argument("instance", nargs="?", default="primary", metavar="NAZWA",
+                   help=f"nazwa sesji (domyślnie: {DEFAULT_NAME})")
+    c.add_argument("-m", "--message", metavar="TEKST", help="treść; bez tej opcji czytana ze standardowego wejścia")
+    c.add_argument("--no-enter", action="store_true", help="tylko wklej, bez naciskania Enter")
     for name, text in (("stop", "zatrzymaj sesję"), ("inspect", "szczegóły sesji (JSON)"), ("attach", "wejdź do sesji"),
                        ("reconcile", "napraw niespójną sesję")):
         c = sub.add_parser(name, help=text)
@@ -112,8 +119,9 @@ def execute(args):
         logger = logging.getLogger("hubi6")
         logger.setLevel(logging.DEBUG)
         logger.addHandler(handler)
-    # Read-only commands never create state, config, logs, locks or runtime dirs.
-    if args.command not in ("list", "doctor", "inspect", "pane"):
+    # Read-only commands, and send (it only talks to tmux), never create state,
+    # config, logs, locks or runtime dirs.
+    if args.command not in ("list", "doctor", "inspect", "pane", "send"):
         app.c.prepare()
         handler = RotatingFileHandler(app.c.state_base/"hubi6.log", maxBytes=1048576, backupCount=3)
         logging.getLogger("hubi6").addHandler(handler)
@@ -152,6 +160,14 @@ def execute(args):
         print(json.dumps({"pane": w.session.pane, "socket": str(app.c.socket), "id": w.record.id,
                           "tmux_session": w.record.session, "state": w.state.value}, ensure_ascii=True)
               if args.json else w.session.pane)
+    elif args.command == "send":
+        if args.message is None:
+            if sys.stdin is None or sys.stdin.isatty():
+                raise HubiError("Message missing: use -m TEXT or standard input")
+            text = sys.stdin.read()
+        else:
+            text = args.message
+        app.send(args.type, args.repo, instance_of(args.instance), text, enter=not args.no_enter)
     elif args.command == "attach":
         return app.attach(args.id, args.mode)
     elif args.command == "github":
@@ -192,6 +208,10 @@ def main(argv=None):
         return e.code
     except KeyboardInterrupt:
         return 130
+    except Unavailable as e:
+        # The session is absent or not running now: a tool may retry later.
+        print("Hubi: "+pl(display(e)), file=sys.stderr)
+        return 4
     except HubiError as e:
         if args.debug:
             traceback.print_exc()
