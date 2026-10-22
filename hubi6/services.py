@@ -68,7 +68,9 @@ def newest_codex_conversation(paths, base, cwd):
             written = os.stat(path).st_mtime_ns
         except (OSError, ValueError):
             continue
-        p = meta.get("payload") if isinstance(meta, dict) else None
+        if not isinstance(meta, dict):
+            continue
+        p = meta.get("payload")
         if (meta.get("type") != "session_meta" or not isinstance(p, dict) or
                 p.get("id") != m.group(1) or p.get("cwd") != cwd):
             continue
@@ -272,6 +274,11 @@ class App:
                 # saved, or the saved file gone, Codex shows its own list.
                 bound = self.store.conversation(key)
                 argv += ["resume", bound] if bound and self.codex_transcript_exists(bound) else ["resume"]
+            elif kind == "codex":
+                # A new conversation replaces the saved one at once, as for
+                # Claude. Its ID comes later; if Codex ends before Hubi notes it
+                # (/exit, a crash), resume shows the list, never an older one.
+                self.store.unbind_conversation(key)
             self.git.validate(ref)  # immediately before creation, under the identity lock
             # Garbage-collect only journals with proven absence of both objects,
             # under this exact lifecycle lock. Reads merely hide such journals.
@@ -343,7 +350,9 @@ class App:
             data = json.loads((base/"sessions"/f"{s.pid}.json").read_text())
         except (OSError, ValueError):
             return None
-        conversation = data.get("sessionId") if isinstance(data, dict) else None
+        if not isinstance(data, dict):
+            return None
+        conversation = data.get("sessionId")
         if (data.get("pid") != s.pid or data.get("cwd") != w.record.repo.path or
                 not isinstance(conversation, str) or not UUID.fullmatch(conversation)):
             return None
@@ -387,7 +396,7 @@ class App:
             # would run two agents on it.
             owners = {b["conversation"]: key_id(b["kind"], b["repo"], b["instance"]) for b in self.store.bindings()}
             workloads = self.runtime_snapshot().workloads if workloads is None else workloads
-        except (HubiError, OSError, ValueError):
+        except (HubiError, OSError, ValueError, TypeError, AttributeError):
             return
         for w in workloads:
             try:
@@ -410,8 +419,8 @@ class App:
                     continue                           # already another name's conversation
                 self.store.bind_conversation(w.record, conversation)
                 owners[conversation] = w.record.key
-            except (HubiError, OSError, ValueError):
-                continue
+            except (HubiError, OSError, ValueError, TypeError, AttributeError):
+                continue                               # an odd agent file never blocks stop or send
 
     def resumable(self, kind, path):
         """Session names in one repository that have a saved conversation, newest first."""

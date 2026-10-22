@@ -6,7 +6,9 @@ from pathlib import Path
 import shutil
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 from hubi6.config import Config
 from hubi6.core.model import HubiError, Record, display_name, key_id
@@ -66,10 +68,12 @@ class CodexFileTests(unittest.TestCase):
         mismatch.write_text(json.dumps({"type": "session_meta", "payload": {"id": U2, "cwd": "/r"}})+"\n")
         broken = self.day/f"rollout-2026-10-22T05-20-05-{U3}.jsonl"
         broken.write_text("{oops\n")
+        listed = self.day/f"rollout-2026-10-22T05-20-07-{U2}.jsonl"
+        listed.write_text("[1]\n")                     # JSON, but not an object
         outside = codex_file(Path(self.base).parent/"elsewhere", U2, "/r", written=2000)
         plain = Path(self.base)/"history.jsonl"
         plain.write_text("{}\n")
-        for other in [*others, mismatch, broken, outside, plain, self.day/"missing.jsonl", "socket:[1]"]:
+        for other in [*others, mismatch, broken, listed, outside, plain, self.day/"missing.jsonl", "socket:[1]"]:
             with self.subTest(other=str(other)[-40:]):
                 self.assertEqual(self.pick(main, other), U1)
                 self.assertIsNone(self.pick(other))
@@ -129,6 +133,25 @@ class BindingStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(HubiError, "start a new conversation"):
             self.store.conversation(other.key)             # never another name's conversation
         self.assertEqual([b["instance"] for b in self.store.bindings()], ["primary"])
+
+    def test_a_new_conversation_forgets_the_saved_one(self):
+        main = self.record()
+        self.store.bind_conversation(main, U1)
+        self.store.unbind_conversation(main.key)
+        self.assertIsNone(self.store.conversation(main.key))
+        self.store.unbind_conversation(main.key)      # nothing saved: no error
+
+    def test_odd_claude_session_file_means_unknown(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        (tmp/"sessions").mkdir()
+        w = SimpleNamespace(session=SimpleNamespace(pid=os.getpid()), record=SimpleNamespace(repo=SimpleNamespace(path="/r")))
+        app = App(self.store.c)
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(tmp)}):
+            for content in ("[1]", '"x"', "{oops"):
+                with self.subTest(content=content):
+                    (tmp/"sessions"/f"{os.getpid()}.json").write_text(content)
+                    self.assertIsNone(app.claude_conversation(w))
 
     def test_default_name_is_one_everywhere(self):
         self.assertEqual((display_name("primary"), display_name("rev")), ("1", "rev"))
@@ -287,6 +310,18 @@ class ConversationRuntimeTests(unittest.TestCase):
         self.assertEqual(args[-2:], ["resume", U3])
         args, _ = self.run_agent("codex", resume=True)        # again: still the same conversation
         self.assertEqual(args[-2:], ["resume", U3])
+
+    def test_new_codex_conversation_replaces_the_saved_one(self):
+        # Review of #14: after a new conversation ended by /exit, resume silently opened the older one.
+        path, = self.codex_files(U3)
+        self.app.stop(self.codex_running(path).id)
+        self.assertEqual(self.saved(kind="codex"), U3)
+        (self.path/".open").unlink()
+        self.run_agent("codex")                              # a new conversation Hubi never got to note
+        self.assertIsNone(self.saved(kind="codex"))
+        args, _ = self.run_agent("codex", resume=True)
+        self.assertEqual(args[-1], "resume")                 # Codex's list, never the older U3
+        self.assertNotIn(U3, args)
 
     def test_codex_follows_the_conversation_it_writes_now(self):
         old, new = self.codex_files(U1, U2)

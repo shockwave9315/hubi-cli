@@ -79,9 +79,11 @@ records and JSON `instance`; people, the menu, JSON `name` and an agent's
 former `główna` selects it. Each Claude and Codex session name owns one
 conversation, and the binding (`~/.local/state/hubi6/conversations/`) survives
 stop. Claude: a new conversation starts with `--session-id`, resume uses
-`--resume <id>`. Codex picks its own ID at the first input; resume uses
+`--resume <id>`. Codex picks its own ID at the first input; a new Codex
+conversation drops the saved binding at start, and resume uses
 `codex resume <id>`. Hubi re-reads the current conversation when the user leaves
-a session, at stop and before `hubi send` pastes: Claude names it in
+a session for the menu (`Ctrl-b d`), at stop and before `hubi send` pastes (an
+agent ended by `/exit` is not read): Claude names it in
 `~/.claude/sessions/<pid>.json`; for Codex it is the newest written
 `~/.codex/sessions/**/rollout-*-<id>.jsonl` held open by a process of the
 session's own scope whose `session_meta` matches the file name and the repository

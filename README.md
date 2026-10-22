@@ -136,10 +136,12 @@ zapisanej rozmowy.
 Starszą rozmowę wybierasz w samym agencie (`/resume` w Claude albo w Codexie) albo
 pod nową nazwą (`hubi claude REPO stara --resume` pokaże listę). Po `/clear`,
 `/new` czy wyborze z listy Hubi przepina nazwę na bieżącą rozmowę, gdy wychodzisz
-z sesji, gdy ją zatrzymujesz i gdy narzędzie wysyła do niej przez `hubi send`.
-Jedna rozmowa należy do jednej nazwy. Claude dostaje identyfikator rozmowy od
-razu, Codex dopiero przy pierwszej wiadomości; do tego czasu nazwa zostaje przy
-poprzedniej rozmowie.
+z sesji do menu (`Ctrl-b d`), gdy ją zatrzymujesz i gdy narzędzie wysyła do niej
+przez `hubi send`. Po zakończeniu agenta przez `/exit` Hubi tej zmiany nie zdąży
+odczytać. Jedna rozmowa należy do jednej nazwy. Nowa rozmowa od razu zastępuje
+zapisaną. Claude dostaje jej identyfikator przy starcie, Codex dopiero przy
+pierwszej wiadomości; jeśli Codex skończy się, zanim Hubi go odczyta, „wznów”
+pokaże listę, nigdy starszej rozmowy.
 
 Przy wyborze repo:
 
