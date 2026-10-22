@@ -57,8 +57,10 @@ class CodexFileTests(unittest.TestCase):
         main = codex_file(self.day, U1, "/r", n=1, written=1000)
         others = [
             codex_file(self.day, U2, "/elsewhere", n=2, written=2000),            # another repository
-            codex_file(self.day, U3, "/r", n=3, written=2000, thread_source="subagent",
-                       source={"subagent": {"thread_spawn": {"parent_thread_id": U1}}}),   # a helper agent
+            # A helper agent's thread: Codex 0.163 marks it both ways; either one is enough.
+            codex_file(self.day, U3, "/r", n=3, written=2000, thread_source="subagent"),
+            codex_file(self.day, U2, "/r", n=6, written=2000,
+                       source={"subagent": {"thread_spawn": {"parent_thread_id": U1}}}),
         ]
         mismatch = self.day/f"rollout-2026-10-22T05-20-04-{U3}.jsonl"
         mismatch.write_text(json.dumps({"type": "session_meta", "payload": {"id": U2, "cwd": "/r"}})+"\n")
