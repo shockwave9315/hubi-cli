@@ -10,7 +10,7 @@ import unittest
 
 from hubi6.config import Config
 from hubi6.core.model import HubiError, Record, display_name, key_id
-from hubi6.services import App
+from hubi6.services import App, newest_codex_conversation
 from hubi6.storage import Store
 from tests_v6.support import LAB, bootstrap, repo
 from tests_v6.test_menu import ref
@@ -18,6 +18,59 @@ from tests_v6.test_runtime import wait_for
 
 U1 = "0b0e6f5c-1d2a-4c3b-8e9f-0a1b2c3d4e5f"
 U2 = "9f8e7d6c-5b4a-4321-8fed-cba987654321"
+U3 = "01a1620d-93e6-7022-a280-f0e7b9712c4d"
+
+
+def codex_file(day, conversation, cwd, *, n=0, written=None, **meta):
+    """A Codex conversation file as Codex 0.163 writes it: session_meta first."""
+    day.mkdir(parents=True, exist_ok=True)
+    path = day/f"rollout-2026-10-22T05-20-{n:02d}-{conversation}.jsonl"
+    payload = {"id": conversation, "cwd": cwd, "source": "cli", "thread_source": "user", **meta}
+    path.write_text(json.dumps({"type": "session_meta", "payload": payload})+"\n"+'{"type":"event_msg"}\n')
+    if written is not None:
+        os.utime(path, (written, written))
+    return path
+
+
+class CodexFileTests(unittest.TestCase):
+    """Which open file is the session's Codex conversation."""
+
+    def setUp(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        self.base = os.path.realpath(tmp)+"/sessions"
+        self.day = Path(self.base)/"2026/10/22"
+
+    def pick(self, *paths, cwd="/r"):
+        return newest_codex_conversation([str(p) for p in paths], self.base, cwd)
+
+    def test_the_conversation_written_last_counts(self):
+        # After /new Codex keeps the old file open too; the one it writes now wins.
+        old = codex_file(self.day, U1, "/r", n=1, written=1000)
+        new = codex_file(self.day, U2, "/r", n=2, written=2000)
+        self.assertEqual(self.pick(old, new), U2)
+        os.utime(old, (3000, 3000))                    # back to the old one (/resume in Codex)
+        self.assertEqual(self.pick(old, new), U1)
+        self.assertIsNone(self.pick())
+
+    def test_files_that_are_not_this_sessions_conversation_never_count(self):
+        main = codex_file(self.day, U1, "/r", n=1, written=1000)
+        others = [
+            codex_file(self.day, U2, "/elsewhere", n=2, written=2000),            # another repository
+            codex_file(self.day, U3, "/r", n=3, written=2000, thread_source="subagent",
+                       source={"subagent": {"thread_spawn": {"parent_thread_id": U1}}}),   # a helper agent
+        ]
+        mismatch = self.day/f"rollout-2026-10-22T05-20-04-{U3}.jsonl"
+        mismatch.write_text(json.dumps({"type": "session_meta", "payload": {"id": U2, "cwd": "/r"}})+"\n")
+        broken = self.day/f"rollout-2026-10-22T05-20-05-{U3}.jsonl"
+        broken.write_text("{oops\n")
+        outside = codex_file(Path(self.base).parent/"elsewhere", U2, "/r", written=2000)
+        plain = Path(self.base)/"history.jsonl"
+        plain.write_text("{}\n")
+        for other in [*others, mismatch, broken, outside, plain, self.day/"missing.jsonl", "socket:[1]"]:
+            with self.subTest(other=str(other)[-40:]):
+                self.assertEqual(self.pick(main, other), U1)
+                self.assertIsNone(self.pick(other))
 
 
 class BindingStoreTests(unittest.TestCase):
@@ -99,6 +152,7 @@ class ConversationRuntimeTests(unittest.TestCase):
             self.app.stop(w.record.id, repair=True)
         shutil.rmtree(Path.home()/".claude/projects", ignore_errors=True)
         shutil.rmtree(Path.home()/".claude/sessions", ignore_errors=True)
+        shutil.rmtree(Path.home()/".codex", ignore_errors=True)
 
     def run_agent(self, kind="claude", instance="primary", resume=False):
         """Start, read the agent's argv and env from its marker, stop. Returns (argv tail, env)."""
@@ -109,8 +163,8 @@ class ConversationRuntimeTests(unittest.TestCase):
         self.app.stop(r.id)
         return data["argv"][1:], data["env"]
 
-    def saved(self, instance="primary"):
-        return self.app.store.conversation(key_id("claude", str(self.path), instance))
+    def saved(self, instance="primary", kind="claude"):
+        return self.app.store.conversation(key_id(kind, str(self.path), instance))
 
     def test_new_conversation_gets_a_fixed_id_and_resume_returns_to_it(self):
         args, env = self.run_agent()
@@ -200,11 +254,63 @@ class ConversationRuntimeTests(unittest.TestCase):
         self.app.stop(r.id)
         self.assertEqual((self.saved(), self.saved("rev")), (first, rev))   # still one name per conversation
 
-    def test_codex_is_unchanged(self):
+    def test_codex_without_a_saved_conversation_shows_its_list(self):
         args, env = self.run_agent("codex", resume=True)
         self.assertEqual(args[-1], "resume")
         self.assertEqual(env["HUBI6_NAME"], "1")
         self.assertEqual(self.app.resumable("codex", str(self.path)), [])
+
+    def codex_files(self, *conversations, **meta):
+        day, cwd = Path.home()/".codex/sessions/2026/10/22", meta.pop("cwd", str(self.path))
+        return [codex_file(day, c, cwd, n=n, **meta) for n, c in enumerate(conversations)]
+
+    def codex_running(self, *files, instance="primary"):
+        """A running Codex session that keeps these conversation files open, as Codex does."""
+        before = set(self.path.glob(".agent-*"))
+        (self.path/".open").write_text("\n".join(map(str, files)))
+        r = self.app.start("codex", str(self.path), instance)
+        marker = wait_for(lambda: next(iter(set(self.path.glob(".agent-*"))-before), None))
+        opened = self.path/(".opened-"+marker.name.split("-")[1])
+        wait_for(lambda: opened.exists() and opened.read_text() == str(len(files)))
+        return r
+
+    def test_codex_resume_returns_to_the_conversation_it_wrote(self):
+        r = self.codex_running(*self.codex_files(U3))
+        self.assertIsNone(self.saved(kind="codex"))
+        self.app.stop(r.id)                                   # noted before it ends
+        self.assertEqual(self.saved(kind="codex"), U3)
+        self.assertEqual(self.app.resumable("codex", str(self.path)), ["primary"])
+        (self.path/".open").unlink()
+        args, _ = self.run_agent("codex", resume=True)
+        self.assertEqual(args[-2:], ["resume", U3])
+        args, _ = self.run_agent("codex", resume=True)        # again: still the same conversation
+        self.assertEqual(args[-2:], ["resume", U3])
+
+    def test_codex_follows_the_conversation_it_writes_now(self):
+        old, new = self.codex_files(U1, U2)
+        os.utime(old, (1000, 1000))
+        r = self.codex_running(old, new)                     # /new in Codex: both files stay open
+        self.app.capture_conversations()                     # what App.attach does on return
+        self.assertEqual(self.saved(kind="codex"), U2)
+        os.utime(new, (500, 500))                            # back to the old one, which it writes again
+        self.app.send("codex", str(self.path), "primary", "dalej")   # a tool's message notes it too
+        self.assertEqual(self.saved(kind="codex"), U1)
+        self.app.stop(r.id)
+
+    def test_codex_never_takes_another_repositorys_or_a_helpers_conversation(self):
+        files = self.codex_files(U1, cwd="/elsewhere")+self.codex_files(U2, thread_source="subagent")
+        r = self.codex_running(*files)
+        self.app.stop(r.id)
+        self.assertIsNone(self.saved(kind="codex"))
+
+    def test_codex_saved_conversation_that_is_gone_shows_the_list(self):
+        path, = self.codex_files(U3)
+        self.app.stop(self.codex_running(path).id)
+        (self.path/".open").unlink()
+        path.unlink()
+        args, _ = self.run_agent("codex", resume=True)
+        self.assertEqual(args[-1], "resume")
+        self.assertNotIn(U3, args)
 
     def test_damaged_binding_refuses_resume_until_a_new_conversation(self):
         self.run_agent()

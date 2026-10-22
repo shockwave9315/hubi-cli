@@ -47,6 +47,38 @@ def launcher_umask():
         raise HubiError("Launcher umask unavailable") from e
 
 
+CODEX_FILE = re.compile(r"rollout-[^/]*-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl", re.ASCII)
+
+
+def newest_codex_conversation(paths, base, cwd):
+    """Of open file paths, the Codex conversation of this repository written last, or None.
+
+    A conversation file starts with its session_meta line: its id must match
+    the file name and its cwd the repository. A helper agent's own thread
+    (thread_source "subagent") is never the session's conversation.
+    """
+    best = None
+    for path in paths:
+        m = CODEX_FILE.fullmatch(os.path.basename(path))
+        if not m or not path.startswith(base+"/"):
+            continue
+        try:
+            with open(path, "rb") as f:
+                meta = json.loads(f.readline(1 << 20))
+            written = os.stat(path).st_mtime_ns
+        except (OSError, ValueError):
+            continue
+        p = meta.get("payload") if isinstance(meta, dict) else None
+        if (meta.get("type") != "session_meta" or not isinstance(p, dict) or
+                p.get("id") != m.group(1) or p.get("cwd") != cwd):
+            continue
+        if p.get("thread_source", "user") != "user" or not isinstance(p.get("source", ""), str):
+            continue
+        if best is None or (written, path) > best[:2]:
+            best = (written, path, m.group(1))
+    return best[2] if best else None
+
+
 class App:
     def __init__(self, config, runner=None):
         self.c = config
@@ -155,6 +187,9 @@ class App:
             # markers, so each newline acts as Enter, and it swallows the Enter.
             if self.tmux.in_mode(pane):
                 raise Unavailable("Session is scrolled back (copy mode); retry shortly")
+            # Sessions driven by tools are rarely left or stopped through Hubi:
+            # note the conversation here too, so a crash or reboot resumes it.
+            self.capture_conversations([w])
             self.tmux.paste(pane, text)
             if enter:
                 # Let the agent take the paste in before the key that submits it.
@@ -172,11 +207,8 @@ class App:
         ref = self.git.resolve(repo)
         key = key_id(kind, ref.path, instance)
         argv = list(self.c.agents[kind])
-        if resume:
-            if kind == "terminal":
-                raise HubiError("A terminal has no conversation to resume")
-            if kind == "codex":
-                argv += ["resume"]                     # Claude's flags are chosen under the lock below
+        if resume and kind == "terminal":
+            raise HubiError("A terminal has no conversation to resume")
         executable = shutil.which(argv[0])
         if not executable:
             raise HubiError(f"Agent executable unavailable: {argv[0]}")
@@ -220,11 +252,12 @@ class App:
                     self.store.remove(w.record)
                 else:
                     raise HubiError("Inconsistent workload; use reconcile by ID")
-            # Each session name owns one Claude conversation: a new one gets a
-            # fixed ID, and resume returns to exactly that one, never a list
-            # choice that could land in another name's session.
+            # Each session name owns one conversation, and resume returns to
+            # exactly that one, never a list choice that could land in another
+            # name's session.
             conversation = None
             if kind == "claude":
+                # A new Claude conversation gets a fixed ID up front.
                 bound = self.store.conversation(key) if resume else None
                 if resume and bound and self.transcript_exists(bound):
                     argv += ["--resume", bound]
@@ -233,6 +266,12 @@ class App:
                 else:                                  # new, or saved but never written to
                     conversation = str(uuid.uuid4())
                     argv += ["--session-id", conversation]
+            elif kind == "codex" and resume:
+                # Codex picks its own ID at the first input; Hubi learns it from
+                # the file Codex writes (capture_conversations). With nothing
+                # saved, or the saved file gone, Codex shows its own list.
+                bound = self.store.conversation(key)
+                argv += ["resume", bound] if bound and self.codex_transcript_exists(bound) else ["resume"]
             self.git.validate(ref)  # immediately before creation, under the identity lock
             # Garbage-collect only journals with proven absence of both objects,
             # under this exact lifecycle lock. Reads merely hide such journals.
@@ -285,30 +324,82 @@ class App:
         base = Path(os.environ.get("CLAUDE_CONFIG_DIR") or self.c.home/".claude")/"projects"
         return any(base.glob("*/"+conversation+".jsonl"))
 
-    def capture_conversations(self, workloads=None):
-        """Re-bind running Claude sessions to the conversation each one shows now.
+    def codex_transcript_exists(self, conversation):
+        """Whether Codex has this conversation on disk (it writes one from the first input on)."""
+        return any((self.c.home/".codex/sessions").glob(f"*/*/*/rollout-*-{conversation}.jsonl"))
 
-        /clear, or a choice from Claude's own list, moves a session to another
-        conversation ID. Claude names it in ~/.claude/sessions/<pid>.json, an
-        undocumented file: anything missing, odd or not yet written leaves the
-        saved binding as it is. Never raises; it must not block attach or stop.
+    def claude_conversation(self, w):
+        """The conversation a running Claude shows now, or None.
+
+        /clear, or a choice from Claude's /resume list, moves a session to
+        another conversation ID. Claude names it in ~/.claude/sessions/<pid>.json,
+        an undocumented file; anything missing or odd means "unknown".
+        """
+        s = w.session
+        if not s or s.pid <= 0:
+            return None
+        base = Path(os.environ.get("CLAUDE_CONFIG_DIR") or self.c.home/".claude")
+        try:
+            data = json.loads((base/"sessions"/f"{s.pid}.json").read_text())
+        except (OSError, ValueError):
+            return None
+        conversation = data.get("sessionId") if isinstance(data, dict) else None
+        if (data.get("pid") != s.pid or data.get("cwd") != w.record.repo.path or
+                not isinstance(conversation, str) or not UUID.fullmatch(conversation)):
+            return None
+        return conversation if self.transcript_exists(conversation) else None
+
+    def codex_conversation(self, w):
+        """The conversation a running Codex writes to now, or None.
+
+        Codex keeps every conversation file of its run open (after /new the
+        old one too), so the one written last counts. Only processes of this
+        session's own scope are read, never another session's Codex.
+        """
+        if not w.unit or not w.unit.cgroup.endswith("/"+w.record.scope):
+            return None
+        files = set()
+        for procs in (Path("/sys/fs/cgroup")/w.unit.cgroup.lstrip("/")).rglob("cgroup.procs"):
+            try:
+                pids = procs.read_text().split()
+            except OSError:
+                continue
+            for pid in pids:
+                try:
+                    fds = os.listdir(f"/proc/{pid}/fd")
+                except OSError:
+                    continue
+                for fd in fds:
+                    try:
+                        files.add(os.readlink(f"/proc/{pid}/fd/{fd}"))
+                    except OSError:
+                        pass
+        return newest_codex_conversation(files, os.path.realpath(self.c.home/".codex/sessions"), w.record.repo.path)
+
+    def capture_conversations(self, workloads=None):
+        """Re-bind running agent sessions to the conversation each one shows now.
+
+        Anything missing, odd or not yet written leaves the saved binding as it
+        is. Never raises; it must not block attach, send or stop.
         """
         try:
-            base = Path(os.environ.get("CLAUDE_CONFIG_DIR") or self.c.home/".claude")
-            # One conversation, one name: two names resuming one transcript
-            # would run two Claude processes on it.
+            # One conversation, one name: two names resuming one conversation
+            # would run two agents on it.
             owners = {b["conversation"]: key_id(b["kind"], b["repo"], b["instance"]) for b in self.store.bindings()}
-            for w in self.runtime_snapshot().workloads if workloads is None else workloads:
-                s = w.session
-                if w.record.kind != "claude" or w.state not in (State.RUNNING, State.ATTACHED) or not s or s.pid <= 0:
+            workloads = self.runtime_snapshot().workloads if workloads is None else workloads
+        except (HubiError, OSError, ValueError):
+            return
+        for w in workloads:
+            try:
+                if w.state not in (State.RUNNING, State.ATTACHED):
                     continue
-                try:
-                    data = json.loads((base/"sessions"/f"{s.pid}.json").read_text())
-                except (OSError, ValueError):
+                if w.record.kind == "claude":
+                    conversation = self.claude_conversation(w)
+                elif w.record.kind == "codex":
+                    conversation = self.codex_conversation(w)
+                else:
                     continue
-                conversation = data.get("sessionId") if isinstance(data, dict) else None
-                if (data.get("pid") != s.pid or data.get("cwd") != w.record.repo.path or
-                        not isinstance(conversation, str) or not UUID.fullmatch(conversation)):
+                if not conversation:
                     continue
                 try:
                     if self.store.conversation(w.record.key) == conversation:
@@ -317,11 +408,10 @@ class App:
                     pass                               # a damaged binding is replaced by a valid one
                 if owners.get(conversation, w.record.key) != w.record.key:
                     continue                           # already another name's conversation
-                if self.transcript_exists(conversation):
-                    self.store.bind_conversation(w.record, conversation)
-                    owners[conversation] = w.record.key
-        except (HubiError, OSError, ValueError):
-            pass
+                self.store.bind_conversation(w.record, conversation)
+                owners[conversation] = w.record.key
+            except (HubiError, OSError, ValueError):
+                continue
 
     def resumable(self, kind, path):
         """Session names in one repository that have a saved conversation, newest first."""

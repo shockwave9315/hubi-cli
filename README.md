@@ -126,14 +126,20 @@ Ominięcie menu: `ssh -t HOST 'HUBI_NOAUTO=1 bash -il'`.
 Sesje danego typu w repo dostają numery: `codex/1`, `codex/2`, `codex/3`.
 Numer nie oznacza ważności. Sesji z rolą daj nazwę (`n`), np. `claude/rev`.
 
-Każda nazwa sesji Claude ma swoją rozmowę. Nowa rozmowa dostaje stały
-identyfikator, a „wznów” wraca dokładnie do niej, nie do innej. Co pracowało w
-`claude/rev`, po restarcie wraca do `claude/rev`. Gdy w repo jest kilka
+Każda nazwa sesji Claude i Codexa ma swoją rozmowę, a „wznów” wraca dokładnie
+do niej, nie do innej. Co pracowało w `claude/rev`, po restarcie wraca do
+`claude/rev`, a `codex/1` do swojej rozmowy z `codex/1`. Gdy w repo jest kilka
 zatrzymanych sesji z rozmowami, menu pyta, którą wznowić (po nazwie, bez
-domyślnej). Po `/clear` w Claude albo wyborze innej rozmowy z jego listy Hubi
-przepina nazwę na bieżącą rozmowę, gdy wychodzisz z sesji i gdy ją zatrzymujesz.
-Lista rozmów Claude pojawia się tylko dla nazwy, która nie ma jeszcze zapisanej
-rozmowy. Codex na razie zawsze pokazuje swoją listę.
+domyślnej). Lista rozmów agenta pojawia się tylko dla nazwy, która nie ma jeszcze
+zapisanej rozmowy.
+
+Starszą rozmowę wybierasz w samym agencie (`/resume` w Claude albo w Codexie) albo
+pod nową nazwą (`hubi claude REPO stara --resume` pokaże listę). Po `/clear`,
+`/new` czy wyborze z listy Hubi przepina nazwę na bieżącą rozmowę, gdy wychodzisz
+z sesji, gdy ją zatrzymujesz i gdy narzędzie wysyła do niej przez `hubi send`.
+Jedna rozmowa należy do jednej nazwy. Claude dostaje identyfikator rozmowy od
+razu, Codex dopiero przy pierwszej wiadomości; do tego czasu nazwa zostaje przy
+poprzedniej rozmowie.
 
 Przy wyborze repo:
 
