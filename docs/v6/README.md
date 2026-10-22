@@ -74,8 +74,11 @@ the status line. `n` asks for a session name (`Nazwa sesji [automatyczna]:`);
 only a typed name can address an existing session (a running one is entered, a
 finished one is replaced after `q`). The session name is the workload's
 instance. Its stored, stable name stays ASCII and the default stays `primary` in
-records, JSON and the command line; people see the default as `główna`, and
-typing `główna` selects it. The command line keeps "start if needed, then
+records and JSON `instance`; people, the menu, JSON `name` and an agent's
+`HUBI6_NAME` show it as `1` (no name implies a role), and typing `1` or the
+former `główna` selects it. Each Claude session name owns one conversation: a
+new conversation starts with `--session-id`, resume uses `--resume <id>`, and
+the binding (`~/.local/state/hubi6/conversations/`) survives stop. The command line keeps "start if needed, then
 attach" for `hubi claude|codex|terminal REPO [NAZWA]`.
 
 `0`, Esc and Backspace go back; arrows or `j`/`k`
@@ -120,7 +123,7 @@ after status 0; a failed agent stays EXITED (contract 19) and opens its detail
 screen, where `v` shows the output and `d` removes it. A terminal is removed
 after `exit` with any status, since a shell's `exit` carries the status of its
 last command and is still the user's way out; the menu then says the code
-(`terminal/główna: koniec pracy (kod 1), posprzątane`). A terminal killed by a
+(`terminal/1: koniec pracy (kod 1), posprzątane`). A terminal killed by a
 signal stays EXITED as `przerwany`, and one that died during start (start
 reports the failure) stays inspectable as before.
 

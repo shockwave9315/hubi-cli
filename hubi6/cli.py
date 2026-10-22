@@ -9,8 +9,8 @@ import traceback
 
 from . import __version__
 from .config import Config
-from .core.model import HubiError, State, display
-from .i18n import DEFAULT_NAME, HEALTH_PL, RUNTIME_PL, STATE_PL, instance_of, name_pl, pl
+from .core.model import HubiError, State, Unavailable, display
+from .i18n import DEFAULT_INSTANCE, DEFAULT_NAME, HEALTH_PL, RUNTIME_PL, STATE_PL, instance_of, name_pl, pl
 
 
 class PolishHelp(argparse.HelpFormatter):
@@ -59,6 +59,26 @@ def parser():
         if name != "terminal":
             c.add_argument("--resume", action="store_true", help="wznów rozmowę")
         c.add_argument("--mode", choices=("normal", "view", "shared", "takeover"), default="normal", help="tryb wejścia")
+    names = (f"Sesja „{DEFAULT_NAME}” to nazwa domyślna i można ją pominąć (w JSON: name „{DEFAULT_NAME}”, "
+             f"instance „{DEFAULT_INSTANCE}”). Inne sesje znajdziesz w `hubi list`.")
+    c = sub.add_parser("pane", help="panel tmux działającej sesji (np. %%14), do wysyłania do niej z innych narzędzi",
+                       epilog="Kody wyjścia: 0 = wypisano panel; 4 = tej sesji teraz nie ma albo nie działa (ponów później); "
+                              "2 = każdy inny błąd, np. nieznane repozytorium. "+names)
+    c.add_argument("type", choices=("codex", "claude", "terminal"), help="rodzaj sesji")
+    c.add_argument("repo", help="nazwa albo ścieżka repozytorium; ~ = katalog domowy (bez repo)")
+    c.add_argument("instance", nargs="?", default="primary", metavar="NAZWA",
+                   help=f"nazwa sesji (domyślnie: {DEFAULT_NAME})")
+    c.add_argument("--json", action="store_true", help=as_json+", z gniazdem tmux")
+    c = sub.add_parser("send", help="wyślij tekst do działającej sesji po nazwie (wklejenie + Enter)",
+                       epilog="Kody wyjścia: 0 = wysłano; 4 = tej sesji teraz nie ma, nie działa albo ktoś przewija jej panel, "
+                              "nic nie wysłano (ponów później); 2 = każdy inny błąd, np. nieznane repozytorium albo znaki "
+                              "sterujące w treści. "+names)
+    c.add_argument("type", choices=("codex", "claude", "terminal"), help="rodzaj sesji")
+    c.add_argument("repo", help="nazwa albo ścieżka repozytorium; ~ = katalog domowy (bez repo)")
+    c.add_argument("instance", nargs="?", default="primary", metavar="NAZWA",
+                   help=f"nazwa sesji (domyślnie: {DEFAULT_NAME})")
+    c.add_argument("-m", "--message", metavar="TEKST", help="treść; bez tej opcji czytana ze standardowego wejścia")
+    c.add_argument("--no-enter", action="store_true", help="tylko wklej, bez naciskania Enter")
     for name, text in (("stop", "zatrzymaj sesję"), ("inspect", "szczegóły sesji (JSON)"), ("attach", "wejdź do sesji"),
                        ("reconcile", "napraw niespójną sesję")):
         c = sub.add_parser(name, help=text)
@@ -107,7 +127,8 @@ def execute(args):
         logger.setLevel(logging.DEBUG)
         logger.addHandler(handler)
     # Read-only commands never create state, config, logs, locks or runtime dirs.
-    if args.command not in ("list", "doctor", "inspect"):
+    # send writes nothing but its per-session lock and needs no log.
+    if args.command not in ("list", "doctor", "inspect", "pane", "send"):
         app.c.prepare()
         handler = RotatingFileHandler(app.c.state_base/"hubi6.log", maxBytes=1048576, backupCount=3)
         logging.getLogger("hubi6").addHandler(handler)
@@ -141,6 +162,19 @@ def execute(args):
         app.stop(args.id, args.generation, repair=args.command == "reconcile")
     elif args.command == "inspect":
         print(json.dumps(app.find(args.id).data(), ensure_ascii=True, indent=2))
+    elif args.command == "pane":
+        w = app.pane(args.type, args.repo, instance_of(args.instance))
+        print(json.dumps({"pane": w.session.pane, "socket": str(app.c.socket), "id": w.record.id,
+                          "tmux_session": w.record.session, "state": w.state.value}, ensure_ascii=True)
+              if args.json else w.session.pane)
+    elif args.command == "send":
+        if args.message is None:
+            if sys.stdin is None or sys.stdin.isatty():
+                raise HubiError("Message missing: use -m TEXT or standard input")
+            text = sys.stdin.read()
+        else:
+            text = args.message
+        app.send(args.type, args.repo, instance_of(args.instance), text, enter=not args.no_enter)
     elif args.command == "attach":
         return app.attach(args.id, args.mode)
     elif args.command == "github":
@@ -181,6 +215,10 @@ def main(argv=None):
         return e.code
     except KeyboardInterrupt:
         return 130
+    except Unavailable as e:
+        # The session is absent or not running now: a tool may retry later.
+        print("Hubi: "+pl(display(e)), file=sys.stderr)
+        return 4
     except HubiError as e:
         if args.debug:
             traceback.print_exc()

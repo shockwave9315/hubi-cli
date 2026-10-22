@@ -1,5 +1,6 @@
 import os
 import hashlib
+import json
 import re
 from pathlib import Path
 import shutil
@@ -11,7 +12,7 @@ from .adapters.git import Git, health, pin_workspace
 from .adapters.process import Runner
 from .adapters.systemd import Systemd
 from .adapters.tmux import Tmux
-from .core.model import HubiError, Record, RepoHealth, State, actions, key_id, phase_transition
+from .core.model import UUID, HubiError, Record, RepoHealth, State, Unavailable, actions, key_id, phase_transition
 from .inventory import build
 from .storage import Store, atomic_json
 
@@ -104,6 +105,65 @@ class App:
             w.repo_health = health(w.record.repo)
         return w
 
+    def pane(self, kind, repo, instance="primary"):
+        """The running workload of (type, repository, name), for tools that send to its pane.
+
+        A pane ID such as %14 belongs to one generation: stop and start create a
+        new tmux session, and after a restart of the tmux server the numbering
+        starts again, so a remembered ID can even name another session. Tools
+        address sessions by name and resolve the pane when they send.
+        Read-only: nothing is created, written or signalled.
+        """
+        key = key_id(kind, self.git.resolve(repo).path, instance)
+        s = self.runtime_snapshot()
+        if s.runtime_health == "DOWN":
+            raise HubiError("Runtime is not running; run hubi doctor")
+        if not s.tmux_known or not s.systemd_known:
+            raise HubiError("Runtime state UNKNOWN; cannot resolve the pane")
+        same = [w for w in s.workloads if w.record.key == key]
+        live = [w for w in same if w.state in (State.RUNNING, State.ATTACHED)]
+        if len(live) > 1:
+            raise HubiError("Several running generations; use hubi list")
+        if live:
+            return live[0]
+        if same:
+            raise Unavailable(f"Workload is {same[0].state.value}, not running: {same[0].record.id}")
+        raise Unavailable("No such session; use hubi list")
+
+    def send(self, kind, repo, instance, text, *, enter=True):
+        """Deliver text to a running session by name, as if pasted, then press Enter.
+
+        The pane is resolved at this moment, so restarts never strand a sender.
+        The text arrives as one bracketed paste: an agent sees one message, never
+        keystrokes. Control characters other than newline and tab are refused,
+        because they could end the paste early and act as keys.
+        """
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        if not text.strip():
+            raise HubiError("Message is empty")
+        if len(text.encode()) > 65536:
+            raise HubiError("Message is longer than 64 KiB")
+        if any((ord(c) < 32 and c not in "\n\t") or 127 <= ord(c) < 160 for c in text):
+            raise HubiError("Message contains control characters")
+        w = self.pane(kind, repo, instance)
+        # One sender per session from paste to Enter: two messages sent at the
+        # same moment would otherwise merge into one. Not the lifecycle lock.
+        with self.store.lock(hashlib.sha256(("send:"+w.record.key).encode()).hexdigest()[:20]):
+            w = self.pane(kind, repo, instance)
+            pane = w.session.pane
+            # A scrolled-back pane (copy mode) takes the paste without paste
+            # markers, so each newline acts as Enter, and it swallows the Enter.
+            if self.tmux.in_mode(pane):
+                raise Unavailable("Session is scrolled back (copy mode); retry shortly")
+            self.tmux.paste(pane, text)
+            if enter:
+                # Let the agent take the paste in before the key that submits it.
+                time.sleep(self.c.send_enter_delay)
+                if self.tmux.in_mode(pane):
+                    raise HubiError("Message pasted but not submitted: the session was scrolled back")
+                self.tmux.command("send-keys", "-t", pane, "Enter")
+        return w
+
     def start(self, kind, repo, instance="primary", resume=False):
         if repo is None and kind != "terminal":
             # Only a plain shell may default to the home workspace; an agent there
@@ -115,7 +175,8 @@ class App:
         if resume:
             if kind == "terminal":
                 raise HubiError("A terminal has no conversation to resume")
-            argv += ["resume"] if kind == "codex" else ["--resume"]
+            if kind == "codex":
+                argv += ["resume"]                     # Claude's flags are chosen under the lock below
         executable = shutil.which(argv[0])
         if not executable:
             raise HubiError(f"Agent executable unavailable: {argv[0]}")
@@ -159,6 +220,19 @@ class App:
                     self.store.remove(w.record)
                 else:
                     raise HubiError("Inconsistent workload; use reconcile by ID")
+            # Each session name owns one Claude conversation: a new one gets a
+            # fixed ID, and resume returns to exactly that one, never a list
+            # choice that could land in another name's session.
+            conversation = None
+            if kind == "claude":
+                bound = self.store.conversation(key) if resume else None
+                if resume and bound and self.transcript_exists(bound):
+                    argv += ["--resume", bound]
+                elif resume and bound is None:
+                    argv += ["--resume"]               # nothing saved for this name yet: Claude's own list
+                else:                                  # new, or saved but never written to
+                    conversation = str(uuid.uuid4())
+                    argv += ["--session-id", conversation]
             self.git.validate(ref)  # immediately before creation, under the identity lock
             # Garbage-collect only journals with proven absence of both objects,
             # under this exact lifecycle lock. Reads merely hide such journals.
@@ -197,12 +271,61 @@ class App:
                         if time.monotonic() >= settle:
                             break
                         time.sleep(.01)
+                    if conversation:
+                        self.store.bind_conversation(r, conversation)
                     return r
                 sessions, known, *_ = self.tmux.inventory()
                 if known and sessions.get(r.session) and sessions[r.session].dead:
                     raise HubiError(f"Workload startup failed; inspect {r.id}")
                 time.sleep(0.025)
             raise HubiError(f"Start acknowledgement timed out; workload remains inspectable: {r.id}")
+
+    def transcript_exists(self, conversation):
+        """Whether Claude has written this conversation (it does so on the first message)."""
+        base = Path(os.environ.get("CLAUDE_CONFIG_DIR") or self.c.home/".claude")/"projects"
+        return any(base.glob("*/"+conversation+".jsonl"))
+
+    def capture_conversations(self, workloads=None):
+        """Re-bind running Claude sessions to the conversation each one shows now.
+
+        /clear, or a choice from Claude's own list, moves a session to another
+        conversation ID. Claude names it in ~/.claude/sessions/<pid>.json, an
+        undocumented file: anything missing, odd or not yet written leaves the
+        saved binding as it is. Never raises; it must not block attach or stop.
+        """
+        try:
+            base = Path(os.environ.get("CLAUDE_CONFIG_DIR") or self.c.home/".claude")
+            # One conversation, one name: two names resuming one transcript
+            # would run two Claude processes on it.
+            owners = {b["conversation"]: key_id(b["kind"], b["repo"], b["instance"]) for b in self.store.bindings()}
+            for w in self.runtime_snapshot().workloads if workloads is None else workloads:
+                s = w.session
+                if w.record.kind != "claude" or w.state not in (State.RUNNING, State.ATTACHED) or not s or s.pid <= 0:
+                    continue
+                try:
+                    data = json.loads((base/"sessions"/f"{s.pid}.json").read_text())
+                except (OSError, ValueError):
+                    continue
+                conversation = data.get("sessionId") if isinstance(data, dict) else None
+                if (data.get("pid") != s.pid or data.get("cwd") != w.record.repo.path or
+                        not isinstance(conversation, str) or not UUID.fullmatch(conversation)):
+                    continue
+                try:
+                    if self.store.conversation(w.record.key) == conversation:
+                        continue
+                except HubiError:
+                    pass                               # a damaged binding is replaced by a valid one
+                if owners.get(conversation, w.record.key) != w.record.key:
+                    continue                           # already another name's conversation
+                if self.transcript_exists(conversation):
+                    self.store.bind_conversation(w.record, conversation)
+                    owners[conversation] = w.record.key
+        except (HubiError, OSError, ValueError):
+            pass
+
+    def resumable(self, kind, path):
+        """Session names in one repository that have a saved conversation, newest first."""
+        return [b["instance"] for b in self.store.bindings() if b["kind"] == kind and b["repo"] == path]
 
     def _stop(self, r, *, expected, repair=False, initial=None):
         if expected != r.generation:
@@ -296,6 +419,7 @@ class App:
                     receipt.invocation, receipt.phase = unit.invocation, "running"
                 self.store.save(receipt)
                 return  # explicit pane repair preserves the verified primary workload
+            self.capture_conversations([current])       # the conversation it shows now, before it ends
             self._stop(current.record, expected=expected or r.generation, repair=repair, initial=snapshot)
 
     def reap_clean_exit(self, identity):
@@ -345,4 +469,7 @@ class App:
                 raise HubiError("Workload already has clients; select --mode view/shared/takeover")
         # Never hold a lifecycle lock for the lifetime of a tmux client. Exact
         # generation names make concurrent stop/start safe; tmux -N fails closed.
-        return self.tmux.attach(w.record, mode)
+        code = self.tmux.attach(w.record, mode)
+        # Back from the session (Ctrl-b ) may have visited others): note any /clear.
+        self.capture_conversations()
+        return code

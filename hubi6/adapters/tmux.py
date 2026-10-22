@@ -170,6 +170,31 @@ class Tmux:
                      "set-hook", "-p", "-t", record.pane, "pane-died",
                      "if -F '#{session_attached}' 'detach-client -s ="+record.session+"'")
 
+    def in_mode(self, pane):
+        """True while the pane shows copy mode or another mode instead of its program."""
+        if not re.fullmatch(r"%[0-9]+", pane):
+            raise HubiError("tmux returned an invalid pane identity")
+        value = self.command("display-message", "-p", "-t", pane, "#{pane_in_mode}").stdout.strip()
+        if value not in ("0", "1"):
+            raise HubiError("Cannot read the pane mode")
+        return value == "1"
+
+    def paste(self, pane, text):
+        """Paste text into one exact pane as a single bracketed paste.
+
+        The text travels on stdin, never in argv. A uniquely named buffer is
+        deleted by the paste itself, or explicitly if the paste fails.
+        """
+        if not re.fullmatch(r"%[0-9]+", pane):
+            raise HubiError("tmux returned an invalid pane identity")
+        buffer = "hubi6-send-"+os.urandom(8).hex()
+        self.command("load-buffer", "-b", buffer, "-", input=text)
+        try:
+            self.command("paste-buffer", "-p", "-d", "-b", buffer, "-t", pane)
+        except HubiError:
+            self.command("delete-buffer", "-b", buffer, check=False)
+            raise
+
     def launch(self, record, argv):
         self.command("respawn-pane", "-k", "-t", record.pane, "-c", tmux_format(record.repo.path), "--", *argv)
 

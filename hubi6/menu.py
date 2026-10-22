@@ -333,13 +333,19 @@ def repo_row(label, row, width, glyphs, *, selected=False, kind=""):
     rest = width-4
     name = max(12, min(22, rest*36//100))
     branch = max(0, min(16, rest-name-1))
-    tail = max(0, rest-name-branch-2)
-    cells = lead+[(pad(row.name, name), "bold" if label else ""), " ", (pad(row.branch, branch), "muted"), " "]
     marks = [i for i in row.items if not kind or i.kind == kind]
+    room = rest-name-branch-2
+    if marks and room < len(f"+{len(marks)}"):         # never hide every session without a counter
+        give = min(branch, len(f"+{len(marks)}")-room)
+        branch, room = branch-give, room+give
+    tail = max(0, room)
+    cells = lead+[(pad(row.name, name), "bold" if label else ""), " ", (pad(row.branch, branch), "muted"), " "]
     used = shown = 0
-    for item in marks:
+    for index, item in enumerate(marks):
         piece = f"{glyphs.icons[item.kind]} {name_pl(item.instance)}  "
-        if used+width_of(piece) > tail:
+        left = len(marks)-index-1
+        # Keep room for the "+N" of the sessions after this one.
+        if used+width_of(piece)+(len(f"+{left}") if left else 0) > tail:
             break
         cells.append((piece, item.kind))
         used += width_of(piece)
@@ -442,7 +448,7 @@ def frame_pick(view, ui, width, height, glyphs):
     top = [head(view, what, width, glyphs)]
     if ui.kind:
         top += start_options(ui, talks=ui.kind != "terminal")
-    top.append([(" Wybierz repo, otworzy się lista rozmów:" if resume else " Wybierz repozytorium:", "section")])
+    top.append([(" Wybierz repo, wróci rozmowa sesji:" if resume else " Wybierz repozytorium:", "section")])
     pages = max(1, (len(view.repos)+PAGE-1)//PAGE)
     page = min(ui.page, pages-1)
     rows = [repo_row(str(n), row, width, glyphs, kind=ui.kind, selected=ui.cursor == n-1)
@@ -922,12 +928,18 @@ class Menu:
     def launch(self, kind, ref):
         """l/c/t always means a new session; a running one is entered with its number.
 
-        Without a typed name the session takes the first free automatic name, so
-        "resume" resumes even where that agent already runs. Only a name the user
-        typed can address an existing session.
+        Without a typed name a new conversation takes the first free automatic
+        name. "Resume" without a name returns a stopped session that has a saved
+        Claude conversation, under its own name: the only one directly, else the
+        one the user names. Only when no such session exists does it take a free
+        name and Claude's own list of conversations.
         """
         named, resume = self.ui.instance, self.ui.resume and kind != "terminal"
         self.refresh()                                # the name is chosen from the current inventory
+        if resume and not named and kind == "claude":
+            named = self.resume_choice(kind, ref.path)
+            if named is None:
+                return
         instance = named or free_name(self.view.items, kind, ref.path)
         label = f"{kind}/{name_pl(instance)}"
         for item in self.view.items if named else ():
@@ -955,6 +967,26 @@ class Menu:
             raise
         self.ui.instance, self.ui.resume = "", False
         self.attach(record.id)
+
+    def resume_choice(self, kind, path):
+        """The stopped session name to resume, "" for none saved, or None if cancelled."""
+        live = {item.instance for item in self.view.items
+                if (item.kind, item.path) == (kind, path) and item.state in (State.RUNNING, State.ATTACHED)}
+        choices = [name for name in self.app.resumable(kind, path) if name not in live]
+        if len(choices) < 2:
+            return choices[0] if choices else ""
+        answer = self.ask_line(f"Którą sesję wznowić? [{'/'.join(name_pl(c) for c in choices)}]: ")
+        if answer is None:
+            self.say("Anulowano", "muted")
+            return None
+        if not answer.strip():
+            self.say("Anulowano: wpisz nazwę sesji do wznowienia", "muted")
+            return None
+        name = instance_of(answer)
+        if name not in choices:
+            self.say(f"Nie ma zatrzymanej sesji {kind}/{name_pl(name)} z zapisaną rozmową", "bad")
+            return None
+        return name
 
     def open_repo(self, ref):
         self.ui.screen, self.ui.repo, self.ui.page, self.ui.cursor, self.ui.git = "repo", ref, 0, -1, ""
@@ -1001,7 +1033,7 @@ class Menu:
 
     def toggle_resume(self):
         self.ui.resume = not self.ui.resume
-        self.say("Wznów: po wyborze repo otworzy się lista rozmów" if self.ui.resume else "Nowa rozmowa", "ok")
+        self.say("Wznów: po wyborze repo wróci rozmowa tej sesji" if self.ui.resume else "Nowa rozmowa", "ok")
 
     # ---- key dispatch
 

@@ -8,7 +8,7 @@ import tempfile
 import time
 
 from .config import private_dir
-from .core.model import HubiError, Record, HEX20
+from .core.model import HubiError, Record, HEX20, KINDS, UUID, key_id
 
 
 def atomic_json(path: Path, data):
@@ -67,6 +67,55 @@ class Store:
         except HubiError as e:
             errors.append(str(e))
         return records, errors
+
+    def conversation(self, key):
+        """The agent conversation bound to one session name, or None."""
+        data = self._binding(key)
+        return data["conversation"] if data else None
+
+    def _binding(self, key):
+        if not HEX20.fullmatch(key):
+            raise HubiError("Invalid lock identity")
+        try:
+            data = private_json(self.c.conversations/(key+".json"))
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError, HubiError) as e:
+            raise HubiError("Saved conversation of this session is unreadable; start a new conversation") from e
+        if (not isinstance(data, dict) or not isinstance(data.get("conversation"), str) or
+                not UUID.fullmatch(data["conversation"]) or data.get("kind") not in KINDS or
+                not isinstance(data.get("repo"), str) or not isinstance(data.get("instance"), str)):
+            raise HubiError("Saved conversation of this session is unreadable; start a new conversation")
+        try:
+            owner = key_id(data["kind"], data["repo"], data["instance"])
+        except HubiError:
+            owner = None
+        if owner != key:                               # a file copied or moved under another name
+            raise HubiError("Saved conversation of this session is unreadable; start a new conversation")
+        return data
+
+    def bind_conversation(self, record, conversation):
+        """Remember that this session name holds this conversation; resume returns to it."""
+        if not UUID.fullmatch(conversation):
+            raise HubiError("Saved conversation of this session is unreadable; start a new conversation")
+        self.c.prepare()
+        atomic_json(self.c.conversations/(record.key+".json"),
+                    {"kind": record.kind, "repo": record.repo.path, "instance": record.instance,
+                     "conversation": conversation, "bound": time.time()})
+
+    def bindings(self):
+        """Every readable binding, newest first. Damaged files are skipped, never removed."""
+        found = []
+        if not self.c.conversations.is_dir():
+            return found
+        for path in self.c.conversations.glob("*.json"):
+            try:
+                data = self._binding(path.stem)
+            except HubiError:
+                continue
+            if data:
+                found.append(data)
+        return sorted(found, key=lambda d: d.get("bound", 0), reverse=True)
 
     def remove(self, record):
         self.path(record).unlink(missing_ok=True)

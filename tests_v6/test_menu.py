@@ -158,7 +158,7 @@ class RenderTests(unittest.TestCase):
 
     def test_phone_sized_main_screen_content(self):
         text = "\n".join(menu.render(self.frames(64, 25)["main"], menu.Theme(False), 64))
-        for expected in ("claude/rev", "codex/cp5", "terminal/główna", "Zaimplementuj CP5: timer i sloty",
+        for expected in ("claude/rev", "codex/cp5", "terminal/1", "Zaimplementuj CP5: timer i sloty",
                          "pracuje", "czeka", "błąd (kod 1)", "AGENCI I TERMINALE", "REPOZYTORIA", "x rozłącz"):
             self.assertIn(expected, text)
         for english in ("RUNNING", "ATTACHED", "EXITED", "Choice", "workloads", "back", "primary"):
@@ -193,8 +193,8 @@ class RenderTests(unittest.TestCase):
         self.assertIn("WZNÓW ✳ CLAUDE", old)
         self.assertIn("[ WZNÓW ROZMOWĘ ]", old)
         self.assertIn("nowa rozmowa", old)
-        self.assertIn("otworzy się lista rozmów", old)
-        self.assertNotIn("otworzy się lista rozmów", new)
+        self.assertIn("wróci rozmowa sesji", old)
+        self.assertNotIn("wróci rozmowa sesji", new)
         # The active side is drawn in its own style, not only in brackets.
         frame = menu.frame_pick(view, menu.Ui(screen="pick", kind="codex", resume=True), 64, 25, menu.UNICODE)
         self.assertIn(("[ WZNÓW ROZMOWĘ ]", "on"), frame[1])
@@ -212,10 +212,16 @@ class RenderTests(unittest.TestCase):
         with patch.object(menu, "branch_of", return_value="cp5-timer-trip"):
             row = next(r for r in menu.build_view(snapshot(items), {}).repos if r.name == "praca")
         draw = lambda width: "".join(menu.render([menu.repo_row("", row, width, menu.UNICODE)], menu.Theme(False), width))
-        self.assertTrue(draw(65).rstrip().endswith(">_ główna  ✳ rev  +2"), draw(65))
+        self.assertTrue(draw(65).rstrip().endswith(">_ 1  ✳ rev  $ 1  +1"), draw(65))
         self.assertTrue(draw(40).rstrip().endswith("+4"), draw(40))
         self.assertNotIn("+", draw(100))
         self.assertIn("$ t2", draw(100))
+        # At every width the shown sessions plus the counter account for all four.
+        for width in range(30, 101):
+            text = draw(width)
+            shown = sum(text.count(mark) for mark in (">_ 1", "✳ rev", "$ 1", "$ t2"))
+            hidden = int(text.rstrip().rsplit("+", 1)[1]) if text.rstrip().split()[-1].startswith("+") else 0
+            self.assertEqual(shown+hidden, 4, (width, text))
 
     def test_footer_survives_a_short_terminal(self):
         text = "\n".join(menu.render(self.frames(64, 8)["main"], menu.Theme(False), 64))
@@ -327,7 +333,7 @@ class TextTests(unittest.TestCase):
                 if not isinstance(node, ast.Call) or not node.args:
                     continue
                 first = node.args[0]
-                is_error = getattr(node.func, "id", "") == "HubiError"
+                is_error = getattr(node.func, "id", "") in ("HubiError", "Unavailable")
                 is_issue = getattr(node.func, "attr", "") == "append" and path.name in ("inventory.py", "git.py", "storage.py") \
                     or (getattr(node.func, "attr", "") == "append" and path.name == "tmux.py" and isinstance(first, ast.Constant)
                         and isinstance(first.value, str) and " " in first.value)
@@ -364,12 +370,12 @@ class TextTests(unittest.TestCase):
         self.assertIn("claude/rev", label(r))
         self.assertLessEqual(len(label(r)), 60)
         self.assertTrue(NEW_PANE_HINT)
-        self.assertIn("codex/główna · praca", label(workload("codex", "primary", "praca", State.RUNNING, created=1).record))
+        self.assertIn("codex/1 · praca", label(workload("codex", "primary", "praca", State.RUNNING, created=1).record))
 
     def test_default_label_maps_both_ways_and_never_changes_identity(self):
-        self.assertEqual([name_pl("primary"), name_pl("rev"), name_pl("Primary")], ["główna", "rev", "Primary"])
-        self.assertEqual([instance_of(x) for x in ("", "  ", "główna", "GŁÓWNA", " rev ", "primary", "glowna")],
-                         ["primary", "primary", "primary", "primary", "rev", "primary", "glowna"])
+        self.assertEqual([name_pl("primary"), name_pl("rev"), name_pl("Primary")], ["1", "rev", "Primary"])
+        self.assertEqual([instance_of(x) for x in ("", "  ", "1", " 1 ", "główna", "GŁÓWNA", " rev ", "primary", "glowna", "2")],
+                         ["primary", "primary", "primary", "primary", "primary", "primary", "rev", "primary", "glowna", "2"])
         # The stored record and its key keep the ASCII name; only what is drawn changes.
         r = workload("claude", "primary", "praca", State.RUNNING, created=1).record
         self.assertEqual((r.instance, r.key), ("primary", key_id("claude", ref("praca").path, "primary")))
@@ -427,9 +433,9 @@ class LifecycleUnitTests(unittest.TestCase):
         now = time.time()
         term = workload("terminal", "primary", "alpha", State.EXITED, created=now, status=1)
         clean = workload("terminal", "2", "alpha", State.EXITED, created=now, status=0)
-        self.assertEqual(menu.tidied([term]), "terminal/główna: koniec pracy (kod 1), posprzątane")
+        self.assertEqual(menu.tidied([term]), "terminal/1: koniec pracy (kod 1), posprzątane")
         self.assertEqual(menu.tidied([clean]), "terminal/2: koniec pracy, posprzątane")
-        self.assertEqual(menu.tidied([term, clean]), "terminal/główna (kod 1), terminal/2: koniec pracy, posprzątane")
+        self.assertEqual(menu.tidied([term, clean]), "terminal/1 (kod 1), terminal/2: koniec pracy, posprzątane")
 
     def test_menu_terminal_mode_cannot_be_suspended(self):
         master, slave = pty.openpty()
@@ -478,6 +484,10 @@ class FakeApp:
         self.workloads, self.calls, self.r = list(workloads), [], None
         self.tmux, self.git = FakeTmux(titles or {}), FakeGit()
         self.fail_start = None
+        self.saved = {}                               # (kind, path) -> names with a saved conversation, newest first
+
+    def resumable(self, kind, path):
+        return list(self.saved.get((kind, path), []))
 
     def snapshot(self):
         return snapshot(self.workloads)
@@ -684,7 +694,7 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(app.calls, [])
 
     def test_name_prompt_and_the_default_name(self):
-        for typed in ("\n", "główna\n", "Główna \n"):
+        for typed in ("\n", "1\n", "główna\n", "Główna \n"):
             m, app = self.make()
             os.write(self.wr, typed.encode())
             self.press(m, "t", "n", "1")
@@ -694,7 +704,7 @@ class ControllerTests(unittest.TestCase):
         m, app = self.make()
         self.press(m, "c", "r")
         self.assertTrue(m.ui.resume)
-        self.assertIn("otworzy się lista rozmów", m.ui.message)
+        self.assertIn("wróci rozmowa tej sesji", m.ui.message)
         self.press(m, "r")
         self.assertFalse(m.ui.resume)
         self.assertEqual(m.ui.message, "Nowa rozmowa")
@@ -732,6 +742,39 @@ class ControllerTests(unittest.TestCase):
         m.open_repo(ref("praca"))
         self.press(m, "r", "c")
         self.assertEqual(app.calls[0], ("start", "codex", ref("praca").path, "2", True))
+
+    def test_claude_resume_returns_the_stopped_session_with_a_saved_conversation(self):
+        # Reported by the owner: resumed conversations landed under other names (the reviewer in "główna").
+        m, app = self.make()
+        app.saved[("claude", ref("alpha").path)] = ["rev"]
+        self.press(m, "l", "r", "1")
+        self.assertEqual(app.calls[0], ("start", "claude", ref("alpha").path, "rev", True))
+        self.assertEqual((m.ui.instance, m.ui.resume), ("", False))
+
+    def test_claude_resume_asks_which_name_when_several_are_saved(self):
+        for typed, expected in ((b"1\n", "primary"), (b"rev\n", "rev"), (b"glowna\n", None), (b"\n", None)):
+            m, app = self.make()
+            app.saved[("claude", ref("alpha").path)] = ["rev", "primary"]
+            os.write(self.wr, typed)
+            self.press(m, "l", "r", "1")
+            if expected:
+                self.assertEqual(app.calls[0], ("start", "claude", ref("alpha").path, expected, True), typed)
+            else:                                     # no silent default: Enter alone resumes nobody
+                self.assertEqual(app.calls, [], typed)
+
+    def test_claude_resume_refuses_an_unknown_name_and_skips_running_ones(self):
+        m, app = self.make()
+        app.saved[("claude", ref("alpha").path)] = ["rev", "primary"]
+        os.write(self.wr, b"inna\n")
+        self.press(m, "l", "r", "1")
+        self.assertEqual(app.calls, [])
+        self.assertIn("Nie ma zatrzymanej sesji claude/inna", m.ui.message)
+        # The saved session that already runs is not offered again; nothing saved → free name and Claude's list.
+        running = workload("claude", "primary", "alpha", State.RUNNING, created=1)
+        m, app = self.make([running])
+        app.saved[("claude", ref("alpha").path)] = ["primary"]
+        self.press(m, "l", "r", "1")
+        self.assertEqual(app.calls[0], ("start", "claude", ref("alpha").path, "2", True))
 
     def test_automatic_name_never_reuses_or_replaces_another_session(self):
         dead = workload("claude", "primary", "alpha", State.EXITED, created=1, status=1)
@@ -931,11 +974,11 @@ class DashboardRuntimeTests(unittest.TestCase):
         self.assertEqual(sorted(w.record.instance for w in self.app.runtime_snapshot().workloads), ["2", "drugi", "primary"])
         # The default name is display only: identity, record and JSON keep "primary".
         default = next(w.record for w in self.app.runtime_snapshot().workloads if w.record.instance == "primary")
-        self.assertEqual(show("show-options", "-v", "-t", default.pane, "@hubi6-label").strip(), "$ terminal/główna · only")
+        self.assertEqual(show("show-options", "-v", "-t", default.pane, "@hubi6-label").strip(), "$ terminal/1 · only")
         out = io.StringIO()
         with redirect_stdout(out):
             main(["--config", str(self.config), "list"])
-        for expected in ("terminal/główna", "terminal/drugi", "terminal/2"):
+        for expected in ("terminal/1", "terminal/drugi", "terminal/2"):
             self.assertIn(expected, out.getvalue())
         self.assertNotIn("terminal/primary", out.getvalue())
         # The command line keeps "start if needed": the Polish default name addresses the running session.
@@ -1039,7 +1082,7 @@ class DashboardRuntimeTests(unittest.TestCase):
         client.send(b"1")
         self.attached(w.id)
         client.send(b"false; exit 3\n")
-        client.read_until("terminal/główna: koniec pracy (kod 3), posprzątane".encode(), 10)
+        client.read_until("terminal/1: koniec pracy (kod 3), posprzątane".encode(), 10)
         self.assertFalse(self.app.runtime_snapshot().workloads)
 
     def test_signalled_terminal_and_failed_agent_stay(self):

@@ -9,7 +9,7 @@ import os
 import pwd
 import re
 
-from .core.model import RepoHealth, State
+from .core.model import DEFAULT_INSTANCE, DEFAULT_NAME, LEGACY_DEFAULT_NAME, RepoHealth, State, display_name
 
 
 STATE_PL = {
@@ -23,10 +23,6 @@ HEALTH_PL = {
 }
 RUNTIME_PL = {"OK": "OK", "DOWN": "nie działa", "DEGRADED": "niepełny", "UNKNOWN": "nieznany"}
 KIND_PL = {"claude": "Claude", "codex": "Codex", "terminal": "terminal"}
-# The instance is part of a workload's identity and keeps its stable ASCII name.
-# People see it as the session name ("nazwa sesji"), the default one in Polish.
-DEFAULT_INSTANCE = "primary"
-DEFAULT_NAME = "główna"
 
 EXACT = {
     # Git adapter
@@ -159,6 +155,20 @@ EXACT = {
     "Repository was replaced during startup": "Repozytorium zostało podmienione w trakcie startu",
     "Launcher umask unavailable": "Nie można odczytać umask procesu uruchamiającego",
     "Invalid session umask": "Nieprawidłowy umask sesji",
+    # pane resolver
+    "Runtime state UNKNOWN; cannot resolve the pane": "Stan runtime nieznany; nie można ustalić panelu",
+    "Several running generations; use hubi list": "Działa kilka generacji tej sesji; zobacz `hubi list`",
+    "No such session; use hubi list": "Nie ma takiej sesji; zobacz `hubi list`",
+    "Runtime is not running; run hubi doctor": "Runtime Hubi nie działa; uruchom `hubi doctor`",
+    "Message is empty": "Pusta wiadomość",
+    "Message is longer than 64 KiB": "Wiadomość jest dłuższa niż 64 KiB",
+    "Message contains control characters": "Wiadomość zawiera znaki sterujące (dozwolone są tylko nowa linia i tabulator)",
+    "Message missing: use -m TEXT or standard input": "Brak wiadomości: podaj -m TEKST albo przekaż ją na standardowe wejście",
+    "Session is scrolled back (copy mode); retry shortly": "Sesja jest przewijana (tryb kopiowania); nic nie wysłano, ponów za chwilę",
+    "Message pasted but not submitted: the session was scrolled back": "Wiadomość wklejona, ale niewysłana: sesję właśnie przewinięto",
+    "Cannot read the pane mode": "Nie można odczytać trybu panelu tmux",
+    "Saved conversation of this session is unreadable; start a new conversation":
+        "Zapisana rozmowa tej sesji jest nieczytelna; uruchom nową rozmowę",
 }
 
 # English template -> Polish template. Named fields are copied verbatim.
@@ -190,6 +200,7 @@ TEMPLATES = (
     ("Moved workspace already has a workload: {ident}; stop it before starting here", "Przeniesiony workspace ma już sesję: {ident}; zatrzymaj ją przed startem tutaj"),
     ("Workload EXITED: {ident}; stop/reconcile it before creating a new generation", "Sesja zakończona: {ident}; usuń ją przed uruchomieniem nowej"),
     ("Workload startup failed; inspect {ident}", "Start sesji nie powiódł się; obejrzyj {ident}"),
+    ("Workload is {state}, not running: {ident}", "Sesja nie działa ({state}): {ident}"),
     ("Workload failed or EXITED during startup; inspect/stop {ident}", "Sesja zakończyła się w trakcie startu; obejrzyj lub usuń {ident}"),
     ("{name}: {error}; reconcile using a surviving runtime receipt, otherwise inspect/move this file manually",
      "{name}: {error}; napraw sesję na podstawie zachowanego potwierdzenia albo obejrzyj/przenieś ten plik ręcznie"),
@@ -221,7 +232,10 @@ def pl(message):
     for pattern, target in _COMPILED:
         match = pattern.fullmatch(text)
         if match:
-            return target.format(**match.groupdict())
+            fields = match.groupdict()
+            if "state" in fields and fields["state"] in State.__members__:
+                fields["state"] = STATE_PL[State[fields["state"]]]   # the word `hubi list` shows
+            return target.format(**fields)
     return text
 
 
@@ -238,13 +252,13 @@ def place(ref):
 
 def name_pl(instance):
     """What a person sees for an instance name."""
-    return DEFAULT_NAME if instance == DEFAULT_INSTANCE else instance
+    return display_name(instance)
 
 
 def instance_of(name):
-    """The instance a typed session name means; empty and the Polish default map to the default."""
+    """The instance a typed session name means; empty, "1" and the old "główna" map to the default."""
     text = str(name).strip()
-    return DEFAULT_INSTANCE if not text or text.casefold() == DEFAULT_NAME else text
+    return DEFAULT_INSTANCE if not text or text.casefold() in (DEFAULT_NAME, LEGACY_DEFAULT_NAME) else text
 
 
 def age(seconds):
