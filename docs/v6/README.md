@@ -76,9 +76,21 @@ finished one is replaced after `q`). The session name is the workload's
 instance. Its stored, stable name stays ASCII and the default stays `primary` in
 records and JSON `instance`; people, the menu, JSON `name` and an agent's
 `HUBI6_NAME` show it as `1` (no name implies a role), and typing `1` or the
-former `główna` selects it. Each Claude session name owns one conversation: a
-new conversation starts with `--session-id`, resume uses `--resume <id>`, and
-the binding (`~/.local/state/hubi6/conversations/`) survives stop. The command line keeps "start if needed, then
+former `główna` selects it. Each Claude and Codex session name owns one
+conversation, and the binding (`~/.local/state/hubi6/conversations/`) survives
+stop. Claude: a new conversation starts with `--session-id`, resume uses
+`--resume <id>`. Codex picks its own ID at the first input; a new Codex
+conversation drops the saved binding at start, and resume uses
+`codex resume <id>`. Hubi re-reads the current conversation when the user leaves
+a session for the menu (`Ctrl-b d`), at stop and before `hubi send` pastes (an
+agent ended by `/exit` is not read): Claude names it in
+`~/.claude/sessions/<pid>.json`; for Codex it is the newest written
+`~/.codex/sessions/**/rollout-*-<id>.jsonl` held open by a process of the
+session's own scope whose `session_meta` matches the file name and the repository
+(never a helper agent's `thread_source: "subagent"`). Codex keeps the files of
+earlier conversations of its run open after `/new`, hence "newest written". A
+name without a saved conversation, or whose file is gone, gets the agent's own
+list. One conversation belongs to one name. The command line keeps "start if needed, then
 attach" for `hubi claude|codex|terminal REPO [NAZWA]`.
 
 `0`, Esc and Backspace go back; arrows or `j`/`k`
