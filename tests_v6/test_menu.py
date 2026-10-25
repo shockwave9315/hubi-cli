@@ -610,6 +610,11 @@ class FakeGuard:
         self.act("version", label)
         return True
 
+    def change_thresholds(self, values):
+        self.act("thresholds", values)
+        old = self.current.setup
+        return old, old.with_thresholds(values), self.current.running
+
     def versions(self):
         return [("v4.8", Path("watchdog.v48.sh")), ("v4.9", Path("watchdog.v49.sh"))]
 
@@ -706,7 +711,9 @@ class GuardMenuTests(unittest.TestCase):
     def test_every_restart_is_confirmed_and_says_what_it_risks(self):
         m = self.menu(guard_status(), keys=["x", "x", "x", "x"], lines=["CP21", "codex/praca claude/praca", "v4.8"])
         m.handle("s")
-        for key in "pwvz":
+        m.reader.lines.insert(2, "5 1")
+        m.reader.keys.append("x")
+        for key in "pwgvz":
             m.handle(key)
             self.assertEqual(m.ui.message, "Anulowano", key)
         self.assertEqual(m.guard.calls, [])
@@ -719,6 +726,24 @@ class GuardMenuTests(unittest.TestCase):
         m.handle("s")
         m.handle("w")
         self.assertIn("Podaj Codexa i kontakt", m.ui.message)
+
+    def test_g_changes_the_thresholds_after_a_question(self):
+        m = self.menu(guard_status(state="PAUSED_5H"), keys=["q", "x"], lines=["5 2", "5 2", "7% 1", "5"])
+        m.handle("s")
+        m.handle("g")
+        self.assertIn("teraz 7 1 60 24", m.reader.asked[-1])          # what runs now
+        self.assertEqual(m.guard.calls[-1], ("thresholds", {"WD_LOW": "5", "WD_WEEK_LOW": "2"}))
+        self.assertIn("Strażnik działa z progami: pauza 5 h przy <= 5%", m.ui.message)
+        m.handle("g")                                                  # x: no
+        self.assertEqual(m.ui.message, "Anulowano")
+        m.handle("g")
+        self.assertIn("bez %", m.ui.message)                           # refused before the question
+        m.handle("g")
+        self.assertIn("np. 7 1", m.ui.message)
+        self.assertEqual(len(m.guard.calls), 1)
+        screen = "\n".join(menu.render(menu.frame_guard(m.view, m.ui, 100, 30, m.glyphs), menu.Theme(False), 100))
+        self.assertIn("g progi", screen)
+        self.assertIn("progi: pauza 5 h przy <= 7%", screen)
 
     def test_empty_answers_cancel(self):
         m = self.menu(guard_status(state="RUNNING"), lines=["", ""])

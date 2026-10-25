@@ -65,6 +65,16 @@ def main():
          '',
          'tests_v6.test_guard.GuardTests.test_a_version_that_rejects_the_setup_brings_the_old_version_back',
          'AssertionError'),
+        ('guard-threshold-check', 'hubi6/guard.py',
+         '    if re.fullmatch(r"[0-9]{1,5}", text) and low <= int(text) <= high:',
+         '    if text.isdigit():',
+         'tests_v6.test_guard.GuardTests.test_bad_thresholds_are_refused_before_the_guard_stops',
+         'AssertionError'),
+        ('guard-thresholds-keep-settings', 'hubi6/guard.py',
+         '        return replace(self, env=tuple(sorted({**dict(self.env), **values}.items())))',
+         '        return replace(self, env=tuple(sorted({**dict(DEFAULT_ENV), **values}.items())))',
+         'tests_v6.test_guard.GuardTests.test_new_thresholds_restart_the_same_guard_and_keep_everything_else',
+         'AssertionError'),
     ]
     for label, filename, before, after, test, expected in cases:
         with tempfile.TemporaryDirectory(prefix='hubi6-mutation-', dir=Path.home()) as tmp:

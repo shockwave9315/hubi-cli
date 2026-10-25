@@ -206,8 +206,13 @@ restart options. A change of CP or guarded Codex is refused while that Codex's
 state is a pause (`PAUSE_REQUESTED`, `PAUSED_5H`, `RESUME_REQUESTED`): the guard
 keeps a pause only under its CP name. Without a remembered setup every paused `state.codex-*` file counts
 (pane-numbered v3.2 files never do). A weekly lock refuses the start with the
-manual steps. A running guard is never left stopped: when a new CP, Codex,
-contact or version dies at start, Hubi restores the previous script and setup
+manual steps. `hubi guard limits LOW WEEK_LOW [--idle MIN] [--max-hours H]`
+(menu `g`) sets `WD_LOW`, `WD_WEEK_LOW`, `WD_IDLE_MIN` and `WD_MAX_HOURS` by
+restarting the same CP and Codex, in any state but the weekly lock, keeping every
+other setting; Hubi checks the numbers before it stops anything, and a stopped
+guard only gets them saved for its next start. Status shows the thresholds in
+force (the script's defaults where the unit sets none). A running guard is never
+left stopped: when a new CP, Codex, contact, threshold or version dies at start, Hubi restores the previous script and setup
 and says why. Version switches replace `watchdog.sh` by rename, never in place
 under a running bash. Hubi never creates `reset.armed`, never runs
 `reset_credit.py` and never writes to Codex. Its own memo of the last setup is
