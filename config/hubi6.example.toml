@@ -9,7 +9,7 @@ home_workspace = "~"
 # commands run there too. Stopping or closing that first session then breaks the
 # others, and it never leaves the list by itself. Use ["codex"] only for a Codex
 # too old to know the flag.
-codex = ["codex", "--no-daemon"]
+codex = ["codex", "--no-daemon", "-c", "check_for_update_on_startup=false"]
 claude = ["claude", "--permission-mode", "bypassPermissions"]
 # terminal defaults to valid $SHELL / passwd shell with normal rc files
 # terminal = ["/bin/bash", "-i"]

@@ -586,6 +586,26 @@ class CliTests(Fixture):
         code, out = self.cli("status", "--json")
         self.assertIn('"cp": "CP21"', out)
 
+    def test_hubi_guard_runs_through_main(self):
+        # execute() once had a local named guard that shadowed the command: UnboundLocalError live.
+        import contextlib
+        import io
+        from hubi6 import cli
+        import logging
+        logger = logging.getLogger("hubi6")
+        handlers = list(logger.handlers)
+        self.addCleanup(lambda: setattr(logger, "handlers", handlers))   # main() adds a file handler
+        self.sd.launch()
+        out, err = io.StringIO(), io.StringIO()
+        with patch("hubi6.guard.Guard", lambda app: self.g), patch("hubi6.services.App", lambda config: App(self.g.c, self.sd)), \
+                patch("hubi6.cli.Config.load", lambda path=None: self.g.c), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            self.g.c.state_base.mkdir(mode=0o700, exist_ok=True)
+            (self.g.c.state_base/"hubi6.log").touch()
+            code = cli.main(["guard", "status"])
+        self.assertEqual(code, 0, err.getvalue())
+        self.assertIn("Strażnik: działa", out.getvalue())
+
     def test_parser_rejects_unknown_guard_commands(self):
         from hubi6 import cli
         with self.assertRaises(SystemExit), patch("sys.stderr"):

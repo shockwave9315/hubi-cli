@@ -165,21 +165,21 @@ def execute(args):
         from .guard import Guard, summary
         s = app.snapshot()
         try:
-            guard = Guard(app).status(log_lines=0)
+            watch = Guard(app).status(log_lines=0)
         except HubiError:
-            guard = None
+            watch = None
         if args.json:
             data = s.data()
-            if guard is not None:
-                data["guard"] = guard.data()
+            if watch is not None:
+                data["guard"] = watch.data()
             print(json.dumps(data, ensure_ascii=True, indent=2))
         else:
             print("Runtime: "+RUNTIME_PL.get(s.runtime_health, s.runtime_health))
             for w in s.workloads:
                 print(f"{w.record.id}  {w.record.kind}/{name_pl(w.record.instance)}  {STATE_PL[w.state]}  repo:{HEALTH_PL[w.repo_health]}  "
                       f"klienci:{w.session.attached if w.session else 0}  {display(w.record.repo.path)}")
-            if guard is not None and guard.configured:
-                print("Strażnik: "+summary(guard))
+            if watch is not None and watch.configured:
+                print("Strażnik: "+summary(watch))
             for issue in s.issues:
                 print(pl(display(issue)), file=sys.stderr)
         return 0 if s.runtime_health == "OK" and all(w.state != State.UNKNOWN for w in s.workloads) else 1

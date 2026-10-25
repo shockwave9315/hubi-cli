@@ -425,7 +425,7 @@ class TextTests(unittest.TestCase):
             c = Config.load(str(path))
             self.assertEqual((c.ui_refresh, c.ui_color, c.ui_icons), (5, False, False))
             # Each Codex session must own its processes: no shared background server.
-            self.assertEqual(c.agents["codex"], ["codex", "--no-daemon"])
+            self.assertEqual(c.agents["codex"], ["codex", "--no-daemon", "-c", "check_for_update_on_startup=false"])
             path.write_text('[agents]\ncodex = ["codex"]\n')
             self.assertEqual(Config.load(str(path)).agents["codex"], ["codex"])
             for bad in ("[ui]\nrefresh = 0\n", "[ui]\ncolor = 1\n", "[ui]\nfancy = true\n"):
