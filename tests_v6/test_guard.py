@@ -468,6 +468,23 @@ class GuardTests(Fixture):
         self.assertTrue(self.g.switch_version("4"))
         self.assertEqual(self.g.current_versions(), ["v4"])
 
+    def test_a_failed_copy_keeps_the_guard_running(self):
+        self.sd.launch()
+        v49 = (self.dir/"watchdog.sh").read_text()
+        with patch("hubi6.guard.shutil.copy2", side_effect=OSError(28, "No space left on device")):
+            with self.assertRaises(HubiError) as e:
+                self.g.switch_version("v4.8")
+        self.assertIn("Nie udało się podmienić watchdog.sh (OSError); strażnik działa jak wcześniej", pl(e.exception))
+        self.assertTrue(self.sd.active)
+        self.assertEqual(self.sd.starts, 1)
+        self.assertEqual((self.dir/"watchdog.sh").read_text(), v49)
+        self.sd.active = False
+        with patch("hubi6.guard.shutil.copy2", side_effect=OSError(28, "No space left on device")):
+            with self.assertRaises(HubiError) as e:
+                self.g.switch_version("v4.8")
+        self.assertEqual(pl(e.exception), "Nie udało się podmienić watchdog.sh (OSError)")
+        self.assertEqual(self.sd.starts, 1)                  # it was not running: nothing starts
+
     def test_version_switch_while_stopped_only_copies(self):
         self.assertTrue(self.g.switch_version("v4.8"))
         self.assertEqual(self.sd.starts, 0)

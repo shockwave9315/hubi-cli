@@ -531,7 +531,7 @@ class Guard:
             if script is not None:
                 self.install(script)
             self._start(old, failed=True)
-        except HubiError as again:
+        except (HubiError, OSError) as again:
             raise HubiError(f"Guard stopped; the new start failed: {error}; going back failed too: {again}. "
                             f"Previous setup: hubi guard start {old.words()}") from again
 
@@ -580,7 +580,15 @@ class Guard:
                 self.check_weekly(setup.codex)
                 self.remember(setup)
                 self._stop()
-            self.install(source)
+            try:
+                self.install(source)
+            except OSError as e:
+                # The rename never happened: watchdog.sh is still the script that ran.
+                reason = HubiError(f"Could not replace watchdog.sh ({type(e).__name__})")
+                if running:
+                    self.go_back(setup, reason)
+                    raise HubiError(f"Could not replace watchdog.sh ({type(e).__name__}); the guard runs as before") from e
+                raise reason from e
             if running:
                 try:
                     self._start(setup)
