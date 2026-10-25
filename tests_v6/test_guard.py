@@ -190,7 +190,9 @@ class GuardTests(Fixture):
         for word in ("działa", "CP20", "RUNNING", "v4.9", "codex/praca → codex/praca/temp-rev"):
             self.assertIn(word, line)
         text = "\n".join(G.report(s))
-        self.assertIn("WD_MAX_HOURS=48", text)
+        self.assertIn("progi: pauza 5 h przy <= 7%, stop tygodniowy przy <= 1%; koniec po 720 min bezczynności "
+                      "albo po 48 h pracy", text)
+        self.assertNotIn("WD_MAX_HOURS", text)        # the thresholds line says it in words
         self.assertNotIn("PATH=", text)
         self.assertIn("restart on-failure po 30s", text)
 
@@ -450,6 +452,109 @@ class GuardTests(Fixture):
         self.g.start(G.Setup("CP20", "codex/praca", "claude/praca"))   # the paused Codex itself, its own CP
         self.assertTrue(self.sd.active)
 
+    # ---- thresholds (hubi guard limits)
+
+    def test_new_thresholds_restart_the_same_guard_and_keep_everything_else(self):
+        self.sd.launch()
+        old, new, restarted = self.g.change_thresholds({"WD_LOW": "5", "WD_WEEK_LOW": "02"})
+        self.assertTrue(restarted)
+        self.assertEqual(self.sd.argv, ["bash", "./watchdog.sh", "CP20", "codex/praca", "codex/praca/temp-rev"])
+        expected = dict((("PATH", self.path),)+LIVE_ENV)
+        expected.update(WD_LOW="5", WD_WEEK_LOW="2")
+        self.assertEqual(self.sd.env, expected)
+        self.assertEqual(self.sd.props, {"Restart": "on-failure", "RestartSec": "30s", "RestartPreventExitStatus": "1 2 3"})
+        self.assertEqual((old.thresholds()["WD_LOW"], new.thresholds()["WD_LOW"]), ("7", "5"))
+        self.assertEqual(self.g.saved().thresholds(), {"WD_LOW": "5", "WD_WEEK_LOW": "2", "WD_IDLE_MIN": "720",
+                                                       "WD_MAX_HOURS": "48"})
+        self.g.change_thresholds({"WD_IDLE_MIN": "900", "WD_MAX_HOURS": "72"})
+        self.assertEqual((self.sd.env["WD_LOW"], self.sd.env["WD_IDLE_MIN"], self.sd.env["WD_MAX_HOURS"]), ("5", "900", "72"))
+        text = "\n".join(G.report(self.g.status()))
+        self.assertIn("progi: pauza 5 h przy <= 5%, stop tygodniowy przy <= 2%; koniec po 900 min bezczynności "
+                      "albo po 72 h pracy", text)
+
+    def test_the_same_thresholds_do_not_restart(self):
+        self.sd.launch()
+        old, new, restarted = self.g.change_thresholds({"WD_LOW": "7", "WD_WEEK_LOW": "1"})
+        self.assertFalse(restarted)
+        self.assertEqual(old, new)
+        self.assertFalse(self.sd.commands("systemctl --user stop"))
+        self.assertFalse(self.sd.commands("systemd-run"))
+
+    def test_thresholds_restart_in_a_pause_but_never_in_the_weekly_lock(self):
+        self.sd.launch()
+        for paused in ("PAUSE_REQUESTED", "PAUSED_5H", "RESUME_REQUESTED"):
+            state(self.dir, "codex-praca", CP="CP20", STATE=paused, PAUSE_WINDOW="1792856773")
+            self.g.change_thresholds({"WD_LOW": str(3+len(paused) % 4), "WD_WEEK_LOW": "1"})
+            self.assertTrue(self.sd.active, paused)
+            self.assertEqual(self.sd.argv[2:4], ["CP20", "codex/praca"])   # the pause stays under its CP
+        starts = self.sd.starts
+        state(self.dir, "codex-praca", CP="CP20", STATE="WEEKLY_STOP")
+        with self.assertRaises(HubiError) as e:
+            self.g.change_thresholds({"WD_LOW": "9", "WD_WEEK_LOW": "1"})
+        self.assertIn("blokada tygodniowa", pl(e.exception).lower())
+        self.assertTrue(self.sd.active)                    # refused before anything stopped
+        self.assertEqual(self.sd.starts, starts)
+
+    def test_bad_thresholds_are_refused_before_the_guard_stops(self):
+        self.sd.launch()
+        for key, bad in (("WD_LOW", "7%"), ("WD_LOW", "101"), ("WD_LOW", "-1"), ("WD_LOW", "7.5"), ("WD_LOW", ""),
+                         ("WD_WEEK_LOW", "1 %"), ("WD_WEEK_LOW", "x"), ("WD_IDLE_MIN", "0"), ("WD_IDLE_MIN", "20000"),
+                         ("WD_MAX_HOURS", "0"), ("WD_MAX_HOURS", "721"), ("WD_LOW", "\x1b[2J")):
+            with self.assertRaises(HubiError, msg=(key, bad)) as e:
+                self.g.change_thresholds({key: bad})
+            self.assertNotEqual(pl(e.exception), str(e.exception), (key, bad))   # said in Polish
+            self.assertNotIn("\x1b", str(e.exception))
+        with self.assertRaises(HubiError) as e:
+            self.g.change_thresholds({"WD_LOW": "7%", "WD_WEEK_LOW": "1"})
+        self.assertIn("bez %", pl(e.exception))
+        with self.assertRaises(HubiError):
+            self.g.change_thresholds({})
+        self.assertFalse(self.sd.commands("systemctl --user stop"))
+        self.assertTrue(self.sd.active)
+        self.assertEqual(G.threshold("WD_LOW", "100"), "100")
+        self.assertEqual(G.threshold("WD_WEEK_LOW", "0"), "0")
+
+    def test_thresholds_the_guard_refuses_bring_the_old_ones_back(self):
+        # The guard itself exits with 2 on a threshold it does not take: never leave Codex without it.
+        self.sd.launch()
+        self.sd.refuse_when = lambda d, argv: "zły próg WD_LOW=55 (liczba 0–100)" if self.sd.env.get("WD_LOW") == "55" else ""
+        with self.assertRaises(HubiError) as e:
+            self.g.change_thresholds({"WD_LOW": "55", "WD_WEEK_LOW": "1"})
+        self.assertIn("zły próg WD_LOW=55", pl(e.exception))
+        self.assertIn("strażnik działa znowu z CP20", pl(e.exception))
+        self.assertTrue(self.sd.active)
+        self.assertEqual(self.sd.env, dict((("PATH", self.path),)+LIVE_ENV))
+        self.assertEqual(self.g.saved().thresholds()["WD_LOW"], "7")
+
+    def test_thresholds_of_a_stopped_guard_wait_for_its_next_start(self):
+        with self.assertRaises(HubiError) as e:
+            self.g.change_thresholds({"WD_LOW": "5", "WD_WEEK_LOW": "1"})
+        self.assertIn("podaj CP", pl(e.exception))
+        self.sd.launch()
+        self.g.stop()
+        runs = len(self.sd.commands("systemd-run"))
+        old, new, restarted = self.g.change_thresholds({"WD_LOW": "5", "WD_WEEK_LOW": "1"})
+        self.assertFalse(restarted)
+        self.assertFalse(self.sd.active)
+        self.assertEqual(len(self.sd.commands("systemd-run")), runs)      # nothing started
+        self.g.start()
+        self.assertEqual((self.sd.env["WD_LOW"], self.sd.env["WD_MAX_HOURS"]), ("5", "48"))
+
+    def test_thresholds_show_the_scripts_defaults_and_warn_when_unusual(self):
+        setup = G.Setup("CP20", "codex/praca", "claude/praca", (("WD_LOW", "7"),))
+        self.assertEqual(setup.thresholds(), {"WD_LOW": "7", "WD_WEEK_LOW": "1", "WD_IDLE_MIN": "60", "WD_MAX_HOURS": "24"})
+        self.assertEqual(G.thresholds_note(setup), "")
+        odd = setup.with_thresholds({"WD_WEEK_LOW": "10"})
+        self.assertIn("stop tygodniowy (10%) jest wyżej niż pauza 5 h (7%)", G.thresholds_note(odd))
+        self.assertEqual(dict(odd.env), {"WD_LOW": "7", "WD_WEEK_LOW": "10"})
+        # Review: a pause at or above the resume threshold (20%) pauses Codex again right after "wznów".
+        self.assertIn("pauza 5 h (20%) nie jest niżej niż próg wznowienia (20%)",
+                      G.thresholds_note(setup.with_thresholds({"WD_LOW": "20"})))
+        self.assertEqual(G.thresholds_note(setup.with_thresholds({"WD_LOW": "19"})), "")
+        own = setup.with_thresholds({"WD_LOW": "25"})
+        own = G.replace(own, env=tuple(sorted({**dict(own.env), "WD_RESUME_MIN": "30"}.items())))
+        self.assertEqual(G.thresholds_note(own), "")      # the unit's own resume threshold counts
+
     def test_stop_when_nothing_runs(self):
         self.assertFalse(self.g.stop())
         self.assertFalse(self.sd.commands("systemctl --user stop"))
@@ -548,6 +653,8 @@ class GuardTests(Fixture):
         self.assertNotIn("PATH", data["setup"]["env"])
         self.assertEqual(data["setup"]["cp"], "CP20")
         self.assertEqual(data["versions"], ["v4.9"])
+        self.assertEqual(data["setup"]["thresholds"], {"WD_LOW": "7", "WD_WEEK_LOW": "1", "WD_IDLE_MIN": "720",
+                                                       "WD_MAX_HOURS": "48"})
 
 
 class CliTests(Fixture):
@@ -585,6 +692,33 @@ class CliTests(Fixture):
         self.assertIn("Strażnik działa: CP21 codex/praca claude/praca", out)
         code, out = self.cli("status", "--json")
         self.assertIn('"cp": "CP21"', out)
+
+    def test_limits_shows_and_changes_the_thresholds(self):
+        self.sd.launch()
+        code, out = self.cli("limits")
+        self.assertEqual(code, 0)
+        self.assertIn("Progi: pauza 5 h przy <= 7%, stop tygodniowy przy <= 1%", out)
+        code, out = self.cli("limits", "5", "2")
+        self.assertIn("Strażnik działa (CP20 codex/praca codex/praca/temp-rev) z progami: pauza 5 h przy <= 5%", out)
+        self.assertEqual((self.sd.env["WD_LOW"], self.sd.env["WD_WEEK_LOW"]), ("5", "2"))
+        code, out = self.cli("limits", "5", "2")
+        self.assertIn("Progi bez zmian", out)
+        code, out = self.cli("limits", "--idle", "900", "--max-hours", "36")
+        self.assertEqual((self.sd.env["WD_IDLE_MIN"], self.sd.env["WD_MAX_HOURS"]), ("900", "36"))
+        code, out = self.cli("limits", "1", "3")
+        self.assertIn("Uwaga: stop tygodniowy (3%) jest wyżej niż pauza 5 h (1%)", out)
+        with self.assertRaises(HubiError) as e:
+            self.cli("limits", "5")
+        self.assertIn("np. 7 1", pl(e.exception))
+        with self.assertRaises(HubiError) as e:
+            self.cli("limits", "7%", "1")
+        self.assertIn("bez %", pl(e.exception))
+        self.cli("stop")
+        code, out = self.cli("limits", "6", "1")
+        self.assertIn("Zapisano progi na następny start", out)
+        self.assertIn("hubi guard start", out)
+        code, out = self.cli("limits")
+        self.assertIn("Progi (ostatnie ustawienie): pauza 5 h przy <= 6%", out)
 
     def test_hubi_guard_runs_through_main(self):
         # execute() once had a local named guard that shadowed the command: UnboundLocalError live.
@@ -641,7 +775,8 @@ key=${CODEX//\//-}
 grep -q '^STATE=WEEKLY_STOP' "state.$key" 2>/dev/null && { echo "blokada tygodniowa w state.$key" >&2; exit 3; }
 exec 9>"lock.$key"; flock -n 9 || { echo "strażnik dla $CODEX już działa" >&2; exit 1; }
 echo "$(date -u +%FT%TZ) $CP $CODEX RUNNING: start" >> log
-echo "$CP $CODEX $CONTACT low=${WD_LOW:-} max=${WD_MAX_HOURS:-} codex=$(command -v codex)" > seen
+[[ ${WD_LOW:-} == 99 ]] && { echo "atrapa: zły próg WD_LOW=99" >&2; exit 2; }
+echo "$CP $CODEX $CONTACT low=${WD_LOW:-} max=${WD_MAX_HOURS:-} codex=$(command -v codex) week=${WD_WEEK_LOW:-}" > seen
 trap 'echo "$(date -u +%FT%TZ) $CP $CODEX RUNNING: koniec: sygnał" >> log; exit 0' TERM INT
 while :; do sleep 1 & wait $!; done
 '''
@@ -686,7 +821,8 @@ class GuardLabTests(unittest.TestCase):
             self.assertEqual(dict(s.setup.env), {"PATH": path, "WD_LOW": "7", "WD_MAX_HOURS": "48"})
             self.assertEqual(dict(s.setup.restart)["RestartPreventExitStatus"], "1 2 3")
             self.assertEqual(s.versions, ["v4.9"])
-            self.assertEqual(seen(), ["CP20", "codex/praca", "claude/praca", "low=7", "max=48", f"codex={bin_dir}/codex"])
+            self.assertEqual(seen(), ["CP20", "codex/praca", "claude/praca", "low=7", "max=48", f"codex={bin_dir}/codex",
+                                      "week="])
 
             g.change_cp("CP21")
             self.assertEqual(seen()[:3], ["CP21", "codex/praca", "claude/praca"])
@@ -700,6 +836,16 @@ class GuardLabTests(unittest.TestCase):
             self.assertEqual(g.unit_info()["MainPID"], pid)        # untouched
             g.change_who("codex/praca", "claude/praca/inny")        # same CP and Codex: allowed in a pause
             self.assertEqual(seen()[:3], ["CP21", "codex/praca", "claude/praca/inny"])
+            # New thresholds in a pause: the same CP and Codex, every other setting kept.
+            g.change_thresholds({"WD_LOW": "5", "WD_WEEK_LOW": "2"})
+            self.assertEqual(seen()[:5]+seen()[6:], ["CP21", "codex/praca", "claude/praca/inny", "low=5", "max=48", "week=2"])
+            # The guard refuses a threshold (exit 2): the old ones come back and it runs.
+            with self.assertRaises(HubiError) as e:
+                g.change_thresholds({"WD_LOW": "99"})
+            self.assertIn("zły próg WD_LOW=99", str(e.exception))
+            self.assertTrue(g.status().running)
+            self.assertEqual(seen()[3], "low=5")
+            self.assertEqual(g.saved().thresholds()["WD_LOW"], "5")
 
             # The review's probe: v4.8 refuses a Codex contact. The guard must keep running on v4.9.
             g.change_who("codex/praca", "codex/praca/temp-rev")

@@ -19,7 +19,8 @@ import unicodedata
 
 from .core.model import HubiError, RepoHealth, State, actions, display
 from .github import GitHub
-from .guard import PAUSED, WEEKLY, Guard, Setup, canonical, report, summary
+from .guard import (PAUSED, THRESHOLDS, WEEKLY, Guard, Setup, canonical, report, summary, threshold, thresholds_note,
+                    thresholds_text)
 from .i18n import DEFAULT_INSTANCE, HEALTH_PL, KIND_PL, RUNTIME_PL, STATE_PL, age, instance_of, name_pl, place, pl, plural
 from .tui import Input, terminal
 
@@ -467,7 +468,7 @@ def frame_guard(view, ui, width, height, glyphs):
         hints = []
         if status.configured:
             hints = [("z", "zatrzymaj")] if status.running else [("u", "uruchom")]
-            hints += [("p", "zmień CP"), ("w", "Codex i kontakt"), ("v", "wersja"), ("l", "limity")]
+            hints += [("p", "zmień CP"), ("w", "Codex i kontakt"), ("g", "progi"), ("v", "wersja"), ("l", "limity")]
     hints.append(("0", "wróć"))
     bottom = [rule(width, glyphs)]+flow(hints, width)+message_lines(ui, width)
     return top[:max(0, height-len(bottom))]+bottom
@@ -615,7 +616,7 @@ HELP = (
     ("i", "szczegóły: podgląd, dołączenie, przejęcie, naprawa"),
     ("r", "widok repozytorium i status Gita"),
     ("g", "repozytoria na GitHubie, klonowanie"),
-    (GUARD_KEY, "strażnik limitu Codexa: stan, log, CP, Codex i kontakt, wersja"),
+    (GUARD_KEY, "strażnik limitu Codexa: stan, log, CP, Codex i kontakt, progi, wersja"),
     ("0", "wróć (także Esc i Backspace)"),
     ("strzałki", "kursor, Enter = wejdź"),
     ("q x", "q = shell, x = rozłącz SSH"),
@@ -1258,6 +1259,28 @@ class Menu:
             with self.busy("Uruchamiam strażnika z nowym celem"):
                 old, new = guard.change_who(words[0], words[1])
             return self.say(f"Strażnik działa: {new.words()}", "ok")
+        if key == "g":
+            if not status.setup:
+                raise HubiError("No earlier guard setup known; give CP, Codex and contact")
+            now = " ".join(status.setup.thresholds().values())
+            words = (self.ask_line("Progi: pauza 5 h i stop tygodniowy w % (bez %), opcjonalnie minuty bezczynności "
+                                   f"i godziny pracy (teraz {now}): ") or "").split()
+            if not words:
+                return self.say("Anulowano", "muted")
+            if not 2 <= len(words) <= 4:
+                raise HubiError("Give the 5-hour pause and the weekly stop, e.g. 7 1")
+            # A bad number is refused before the question, never after the guard stopped.
+            values = {key: threshold(key, word) for (key, _), word in zip(THRESHOLDS, words)}
+            question = "Uruchomić strażnika ponownie z progami" if status.running else "Zapisać progi na następny start"
+            note = thresholds_note(status.setup.with_thresholds(values))
+            if not self.confirm(f"{question}: {' '.join(values.values())}?"+(f" ({note})" if note else "")):
+                return self.say("Anulowano", "muted")
+            with self.busy("Zmieniam progi strażnika"):
+                old, new, restarted = guard.change_thresholds(values)
+            if old == new:
+                return self.say("Progi bez zmian", "muted")
+            done = "Strażnik działa z progami: " if restarted else "Progi zapisane na następny start: "
+            return self.say(done+thresholds_text(new), "warn" if thresholds_note(new) else "ok")
         if key == "v":
             labels = [label for label, _ in guard.versions()]
             answer = (self.ask_line(f"Wersja ({', '.join(labels[-4:])}): ") or "").strip()

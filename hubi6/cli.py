@@ -105,6 +105,14 @@ def parser():
     g.add_parser("stop", help="zatrzymaj strażnika")
     s = g.add_parser("start", help="uruchom strażnika (bez argumentów: z ostatnim ustawieniem)")
     s.add_argument("words", nargs="*", metavar="CP CODEX KONTAKT", help="np. CP21 codex/praca claude/praca")
+    s = g.add_parser("limits", help="progi strażnika; z liczbami: uruchom ponownie z nowymi progami (ten sam CP i cel)",
+                     epilog="Progi to liczby całkowite 0–100, bez %%. Zwykle stop tygodniowy jest niższy niż pauza 5 h. "
+                            "Działający strażnik startuje ponownie z tym samym CP i celem (stan pauzy wraca z pliku); "
+                            "w blokadzie tygodniowej odmawia. Gdy strażnik nie działa, progi czekają na następny start.")
+    s.add_argument("percents", nargs="*", metavar="PAUZA_5H STOP_TYDZIEŃ", help="np. 7 1: pauza 5 h przy <= 7%%, "
+                   "stop tygodniowy przy <= 1%%")
+    s.add_argument("--idle", metavar="MINUTY", help="koniec po tylu minutach bezczynności Codexa (WD_IDLE_MIN)")
+    s.add_argument("--max-hours", metavar="GODZINY", help="najdłuższy czas pracy strażnika (WD_MAX_HOURS)")
     s = g.add_parser("version", help="wersje strażnika; z argumentem: przełącz na tę wersję i uruchom ponownie")
     s.add_argument("version", nargs="?", metavar="WERSJA", help="np. v4.8")
     c = sub.add_parser("github", help="repozytoria na GitHubie")
@@ -229,7 +237,7 @@ def execute(args):
 
 
 def guard(app, args):
-    from .guard import Guard, Setup, canonical, log_line, report
+    from .guard import Guard, Setup, canonical, log_line, report, thresholds_note, thresholds_text
     g = Guard(app)
     command = args.guard_command
     if command == "status":
@@ -260,6 +268,35 @@ def guard(app, args):
     elif command == "who":
         old, new = g.change_who(args.codex, args.contact)
         print(f"Strażnik działa: {new.words()} (było {old.codex} → {old.contact})")
+    elif command == "limits":
+        values = {}
+        if args.percents:
+            if len(args.percents) != 2:
+                raise HubiError("Give the 5-hour pause and the weekly stop, e.g. 7 1")
+            values["WD_LOW"], values["WD_WEEK_LOW"] = args.percents
+        if args.idle is not None:
+            values["WD_IDLE_MIN"] = args.idle
+        if args.max_hours is not None:
+            values["WD_MAX_HOURS"] = args.max_hours
+        if not values:
+            s = g.status(log_lines=0)
+            if not s.setup:
+                raise HubiError("No earlier guard setup known; give CP, Codex and contact")
+            print(("Progi: " if s.source == "unit" else "Progi (ostatnie ustawienie): ")+thresholds_text(s.setup))
+            note = thresholds_note(s.setup)
+            if note:
+                print(note[0].upper()+note[1:])
+            return 0
+        old, new, restarted = g.change_thresholds(values)
+        if old == new:
+            print("Progi bez zmian: "+thresholds_text(new))
+        elif restarted:
+            print(f"Strażnik działa ({new.words()}) z progami: "+thresholds_text(new))
+        else:
+            print("Zapisano progi na następny start: "+thresholds_text(new)+". Strażnik nie działa: hubi guard start")
+        note = thresholds_note(new)
+        if note:
+            print(note[0].upper()+note[1:])
     elif command == "version":
         if not args.version:
             current = g.current_versions()

@@ -46,6 +46,11 @@ DEFAULT_RESTART = (("Restart", "on-failure"), ("RestartSec", "30s"), ("RestartPr
 RESTART_VALUES = {"no", "always", "on-success", "on-failure", "on-abnormal", "on-abort", "on-watchdog"}
 LIMIT_KEYS = ("status", "five_left", "five_reset", "week_left", "week_reset", "allowed", "reason")
 LIMITS_EVERY = 120                                  # README: limits.py at most every 2 minutes
+# What `hubi guard limits` sets, with the defaults of watchdog.sh itself (not the README start).
+THRESHOLDS = (("WD_LOW", "7"), ("WD_WEEK_LOW", "1"), ("WD_IDLE_MIN", "60"), ("WD_MAX_HOURS", "24"))
+THRESHOLD_RANGES = {"WD_LOW": (0, 100), "WD_WEEK_LOW": (0, 100),
+                    "WD_IDLE_MIN": (1, 10080),                 # at most a week
+                    "WD_MAX_HOURS": (1, 720)}                  # at most 30 days
 RUNNING_STATES = ("active", "activating", "deactivating", "reloading", "refreshing")
 STATE_PL = {
     "RUNNING": "Codex pracuje, strażnik pilnuje limitu",
@@ -84,6 +89,22 @@ def canonical(name, *, kind=None):
 
 def key_of(codex):
     return codex.replace("/", "-")
+
+
+def threshold(key, value):
+    """One threshold as watchdog.sh takes it: a plain whole number, never "7%"."""
+    low, high = THRESHOLD_RANGES[key]
+    text = str(value).strip()
+    if re.fullmatch(r"[0-9]{1,5}", text) and low <= int(text) <= high:
+        return str(int(text))                             # 007 -> 7: the log and the menu show plain numbers
+    shown = display(text) or "\"\""
+    if key == "WD_LOW":
+        raise HubiError(f"The 5-hour pause threshold must be a whole number 0-100, without %: {shown}")
+    if key == "WD_WEEK_LOW":
+        raise HubiError(f"The weekly stop threshold must be a whole number 0-100, without %: {shown}")
+    if key == "WD_IDLE_MIN":
+        raise HubiError(f"Idle minutes must be a whole number 1-10080: {shown}")
+    raise HubiError(f"Max hours must be a whole number 1-720: {shown}")
 
 
 def version_label(path):
@@ -145,6 +166,14 @@ class Setup:
     def words(self):
         return f"{self.cp} {self.codex} {self.contact}"
 
+    def thresholds(self):
+        """The thresholds this guard runs with: its WD_* setting, else the script's default."""
+        env = dict(self.env)
+        return {key: env.get(key, default) for key, default in THRESHOLDS}
+
+    def with_thresholds(self, values):
+        return replace(self, env=tuple(sorted({**dict(self.env), **values}.items())))
+
 
 @dataclass
 class Status:
@@ -173,6 +202,7 @@ class Status:
         setup = self.setup.data() if self.setup else None
         if setup:
             setup["env"] = {k: v for k, v in setup["env"].items() if k != "PATH"}
+            setup["thresholds"] = self.setup.thresholds()
         return {"configured": True, "unit": self.unit, "running": self.running, "since": self.since,
                 "setup": setup, "setup_source": self.source, "problem": self.problem, "state": dict(self.state),
                 "versions": list(self.versions), "changed_after_start": self.changed, "resume_at": self.resume_at,
@@ -500,30 +530,33 @@ class Guard:
     def restart_with(self, change):
         """Stop the running guard and start it again with change(setup)."""
         with self.lock():
-            self.require()
-            info = self.unit_info()
-            if info["state"] == "unknown":
-                raise HubiError("Systemd state UNKNOWN; operation refused")
-            running = info["state"] in RUNNING_STATES
-            old = self.setup_of(info) if running else self.saved()
-            if old is None:
-                raise HubiError("No earlier guard setup known; give CP, Codex and contact")
-            new = change(old)
-            self.check_change(old, new)
-            self.check_session(new.codex)
-            self.check_session(new.contact)
-            self.check_weekly(new.codex)
-            if running:
-                self.remember(old)
-                self._stop()
-            try:
-                self._start(new, failed=info["state"] == "failed")
-            except HubiError as e:
-                if not running:
-                    raise
-                self.go_back(old, e)
-                raise HubiError(f"The new guard setup did not start: {e}; the guard runs again with {old.words()}") from e
-            return old, new
+            return self._restart_with(change)
+
+    def _restart_with(self, change):
+        self.require()
+        info = self.unit_info()
+        if info["state"] == "unknown":
+            raise HubiError("Systemd state UNKNOWN; operation refused")
+        running = info["state"] in RUNNING_STATES
+        old = self.setup_of(info) if running else self.saved()
+        if old is None:
+            raise HubiError("No earlier guard setup known; give CP, Codex and contact")
+        new = change(old)
+        self.check_change(old, new)
+        self.check_session(new.codex)
+        self.check_session(new.contact)
+        self.check_weekly(new.codex)
+        if running:
+            self.remember(old)
+            self._stop()
+        try:
+            self._start(new, failed=info["state"] == "failed")
+        except HubiError as e:
+            if not running:
+                raise
+            self.go_back(old, e)
+            raise HubiError(f"The new guard setup did not start: {e}; the guard runs again with {old.words()}") from e
+        return old, new
 
     def go_back(self, old, error, script=None):
         """The guard was running a moment ago: never leave Codex without it."""
@@ -554,6 +587,35 @@ class Guard:
     def change_who(self, codex, contact):
         codex, contact = canonical(codex, kind="codex"), canonical(contact)
         return self.restart_with(lambda old: replace(old, codex=codex, contact=contact))
+
+    def change_thresholds(self, values):
+        """New WD_LOW, WD_WEEK_LOW (and idle or max hours) for the same CP and Codex.
+
+        A running guard restarts with them: the same CP and Codex keep any pause,
+        because the guard reads its state back from the file. Only the weekly lock
+        refuses, as for every start. A guard that is not running only gets them
+        saved for its next start. Returns (old, new, restarted).
+        """
+        values = {key: threshold(key, value) for key, value in values.items()}
+        if not values:
+            raise HubiError("Give the thresholds to change")
+        with self.lock():
+            self.require()
+            info = self.unit_info()
+            if info["state"] == "unknown":
+                raise HubiError("Systemd state UNKNOWN; operation refused")
+            if info["state"] not in RUNNING_STATES:
+                old = self.saved()
+                if old is None:
+                    raise HubiError("No earlier guard setup known; give CP, Codex and contact")
+                new = old.with_thresholds(values)
+                self.remember(new)
+                return old, new, False
+            old = self.setup_of(info)
+            if old.with_thresholds(values) == old:
+                return old, old, False
+            old, new = self._restart_with(lambda setup: setup.with_thresholds(values))
+            return old, new, True
 
     def switch_version(self, label):
         """Make watchdog.sh a copy of one kept version; restart the guard if it runs."""
@@ -613,6 +675,28 @@ def log_line(line, codex=""):
     stamp = moment.astimezone(POLISH or datetime.timezone.utc).strftime("%d.%m %H:%M:%S")
     who = "" if match[3] == codex else " "+match[3]
     return display(f"{stamp} {match[2]}{who} {match[4]}: {match[5]}")
+
+
+def thresholds_text(setup):
+    t = setup.thresholds()
+    return (f"pauza 5 h przy <= {t['WD_LOW']}%, stop tygodniowy przy <= {t['WD_WEEK_LOW']}%; "
+            f"koniec po {t['WD_IDLE_MIN']} min bezczynności albo po {t['WD_MAX_HOURS']} h pracy")
+
+
+def thresholds_note(setup):
+    """Warnings for thresholds the guard takes but that rarely make sense."""
+    t = setup.thresholds()
+    notes = []
+    # The guard resumes only when the 5-hour limit is back to WD_RESUME_MIN (20%):
+    # a pause threshold at or above it pauses Codex again right after "wznów".
+    resume = dict(setup.env).get("WD_RESUME_MIN", "20")
+    if resume.isdigit() and int(t["WD_LOW"]) >= int(resume):
+        notes.append(f"uwaga: pauza 5 h ({t['WD_LOW']}%) nie jest niżej niż próg wznowienia ({int(resume)}%); "
+                     "Codex dostanie pauzę zaraz po wznowieniu")
+    if int(t["WD_WEEK_LOW"]) > int(t["WD_LOW"]):
+        notes.append(f"uwaga: stop tygodniowy ({t['WD_WEEK_LOW']}%) jest wyżej niż pauza 5 h ({t['WD_LOW']}%); "
+                     "zwykle jest niżej")
+    return "; ".join(notes)
 
 
 def version_text(s):
@@ -676,9 +760,11 @@ def report(s, now=None):
     if s.setup:
         prefix = "  " if s.source == "unit" else "  ostatnio: "
         lines.append(f"{prefix}CP {s.setup.cp}, cel {s.setup.codex}, kontakt {s.setup.contact}")
-        env = " ".join(f"{k}={v}" for k, v in s.setup.env if k != "PATH")
+        lines.append("  progi: "+thresholds_text(s.setup))
+        own = {key for key, _ in THRESHOLDS} | {"PATH"}
+        env = " ".join(f"{k}={v}" for k, v in s.setup.env if k not in own)
         options = dict(s.setup.restart)
-        lines.append(f"  ustawienia: {env or 'domyślne'}; restart {options['Restart']} po {options['RestartSec']}")
+        lines.append(f"  ustawienia: {env+'; ' if env else ''}restart {options['Restart']} po {options['RestartSec']}")
         state = s.state.get("STATE", "")
         if state:
             other = s.state.get("CP", "")

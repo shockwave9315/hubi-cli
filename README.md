@@ -42,7 +42,8 @@ zostawiona na wypadek wycofania zmian ([opis v5](docs/v5/README.md)).
 - Terminal albo agent poza repozytorium, w katalogu domowym (`h`): trwała
   powłoka do zwykłej pracy na devboksie, do której wracasz jak do każdej sesji.
 - Strażnik limitu Codexa widoczny i sterowany bez agenta (`s`, `hubi guard`):
-  stan, CP, cel, wersja, log; zmiana CP, celu i wersji jednym poleceniem.
+  stan, CP, cel, progi, wersja, log; zmiana CP, celu, progów i wersji jednym
+  poleceniem.
 
 Restart maszyny kończy sesje. Rozmowę z agentem wznowisz potem klawiszem `r`
 przy starcie.
@@ -259,8 +260,8 @@ README.
 Na ekranie głównym jest wiersz `STRAŻNIK`: czy działa, CP, stan (`RUNNING`,
 `PAUSED_5H`…), godzina wznowienia w pauzie, wersja, cel i kontakt. Klawisz `s`
 otwiera szczegóły z ostatnimi wpisami logu i klawiszami: `u` uruchom, `z`
-zatrzymaj, `p` nowy CP, `w` Codex i kontakt, `v` wersja, `l` limity. Godziny są
-w czasie polskim.
+zatrzymaj, `p` nowy CP, `w` Codex i kontakt, `g` progi, `v` wersja, `l` limity.
+Godziny są w czasie polskim.
 
 ```console
 hubi guard status [--limits]          # stan; --limits czyta też limity (5–20 s, najwyżej co 2 min)
@@ -269,8 +270,17 @@ hubi guard cp CP21                    # ten sam Codex i kontakt, nowy CP
 hubi guard who codex/praca claude/praca   # inny Codex i kontakt
 hubi guard stop
 hubi guard start [CP CODEX KONTAKT]   # bez argumentów: ostatnie ustawienie
+hubi guard limits [7 1] [--idle 720] [--max-hours 48]   # progi; z liczbami: zmień i uruchom ponownie
 hubi guard version [v4.8]             # lista wersji; z argumentem: przełącz i uruchom ponownie
 ```
+
+Progi: pierwsza liczba to pauza 5 h (LIMIT-5, gdy limitu 5 h zostało tyle % albo
+mniej), druga to stop tygodniowy (`WEEKLY_STOP` przy tylu % tygodnia). Wpisujesz
+liczby całkowite 0–100 bez `%`. Zwykle stop tygodniowy jest niższy niż pauza 5 h;
+odwrotne ustawienie przejdzie, ale z ostrzeżeniem. `--idle` to minuty
+bezczynności Codexa do końca pracy strażnika (1–10080), `--max-hours` najdłuższy
+czas jego pracy (1–720). Status pokazuje obecne progi. W menu: `g`, potem np.
+`5 1` albo `5 1 720 48`.
 
 Bezpieczniki:
 
@@ -291,7 +301,12 @@ Bezpieczniki:
   dlaczego. Strażnik nie zostaje wyłączony.
 - Gdy Hubi nie zna poprzedniego ustawienia, start z nowym CP albo Codexem
   sprawdza wszystkie pliki `state.codex-*`: żaden Codex w pauzie nie zostanie bez „wznów”.
-- W menu każdy restart (`p`, `w`, `v`) i zatrzymanie (`z`) potwierdzasz klawiszem `q`.
+- Nowe progi: strażnik startuje ponownie z tym samym CP i celem, także w pauzie
+  (stan wraca z pliku). W blokadzie tygodniowej zmiana jest odrzucana. Pozostałe
+  `WD_…` i opcje restartu zostają. Zła liczba jest odrzucana, zanim strażnik się
+  zatrzyma; gdy strażnik i tak odrzuci próg, wraca z poprzednimi progami. Gdy
+  strażnik nie działa, progi zapisują się na następny start.
+- W menu każdy restart (`p`, `w`, `g`, `v`) i zatrzymanie (`z`) potwierdzasz klawiszem `q`.
 - Hubi nigdy nie tworzy `reset.armed`, nie uruchamia `reset_credit.py` i nie pisze
   do Codexa.
 
