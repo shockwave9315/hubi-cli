@@ -13,6 +13,7 @@ import time
 import unittest
 from unittest.mock import patch
 
+from hubi6 import guard as G
 from hubi6 import menu
 from hubi6.adapters.tmux import NEW_PANE_HINT, label
 from hubi6.config import Config
@@ -46,6 +47,17 @@ def workload(kind, instance, name, state, *, created, attached=0, status=None, e
 
 def snapshot(workloads, names=("alpha", "beta", "praca"), issues=()):
     return Snapshot(list(workloads), [ref(n, i) for i, n in enumerate(names)], list(issues), "OK", None, 1, "0", True, True, 1.0, 2)
+
+
+def guard_status(running=True, state="PAUSED_5H"):
+    s = G.Status(True, "active" if running else "", time.time()-600,
+                 G.Setup("CP20", "codex/praca", "codex/praca/a-rather-long-reviewer-name", (("WD_LOW", "7"),)),
+                 "unit" if running else "saved")
+    s.state = {"CP": "CP20", "STATE": state, "PAUSE_WINDOW": "1792856773"}
+    s.versions = ["v4.9"]
+    s.log = ["2026-10-24T13:34:58Z CP20 codex/praca PAUSE_REQUESTED: LIMIT-5 wysłany przy 7%, reset 1792856773 "+"x"*80,
+             "2026-10-24T13:41:00Z CP20 codex/praca PAUSED_5H: pauza potwierdzona: Codex bezczynny"]
+    return s
 
 
 def sample():
@@ -145,6 +157,11 @@ class RenderTests(unittest.TestCase):
             "detail": menu.frame_detail(view, menu.Ui(screen="detail", selected=items[1].record.id), width, height, g),
             "github": menu.frame_github(view, menu.Ui(screen="github"), width, height, g, catalogue, repos),
             "help": menu.frame_help(view, menu.Ui(screen="help"), width, height, g),
+            "main-guard": menu.frame_main(replace(view, guard=guard_status()), menu.Ui(), width, height, g),
+            "guard": menu.frame_guard(replace(view, guard=guard_status()), menu.Ui(screen="guard"), width, height, g),
+            "guard-stopped": menu.frame_guard(replace(view, guard=guard_status(False, "WEEKLY_STOP")),
+                                              menu.Ui(screen="guard"), width, height, g),
+            "guard-unread": menu.frame_guard(view, menu.Ui(screen="guard"), width, height, g),
         }
 
     def test_no_frame_wraps_or_overflows_at_any_size(self):
@@ -164,6 +181,25 @@ class RenderTests(unittest.TestCase):
         for english in ("RUNNING", "ATTACHED", "EXITED", "Choice", "workloads", "back", "primary"):
             self.assertNotIn(english, text)
         self.assertNotIn("Claude Code", text)        # a generic agent title is noise, not information
+
+    def test_guard_line_and_screen(self):
+        frames = self.frames(100, 30)
+        main = "\n".join(menu.render(frames["main-guard"], menu.Theme(False), 100))
+        for expected in ("STRAŻNIK", "CP20", "PAUSED_5H", "v4.9", "codex/praca →", "wznowienie 24.10 17:48", "s strażnik"):
+            self.assertIn(expected, main)
+        self.assertLess(main.index("STRAŻNIK"), main.index("REPOZYTORIA"))
+        plain_main = "\n".join(menu.render(frames["main"], menu.Theme(False), 100))
+        self.assertNotIn("STRAŻNIK", plain_main)               # no guard, no line and no key
+        self.assertNotIn("strażnik", plain_main)
+        screen = "\n".join(menu.render(frames["guard"], menu.Theme(False), 100))
+        for expected in ("STRAŻNIK CODEXA", "Strażnik: działa", "CP CP20", "pauza do odnowienia", "wznowienie: 24.10 17:48",
+                         "Ostatnie wpisy logu", "24.10 15:41:00 CP20 PAUSED_5H", "z zatrzymaj", "p zmień CP",
+                         "w Codex i kontakt", "v wersja", "l limity", "0 wróć"):
+            self.assertIn(expected, screen)
+        stopped = "\n".join(menu.render(frames["guard-stopped"], menu.Theme(False), 100))
+        for expected in ("nie działa", "u uruchom", "blokada tygodniowa", "usuń plik state.codex-praca"):
+            self.assertIn(expected, stopped)
+        self.assertIn("Nie udało się odczytać", "\n".join(menu.render(frames["guard-unread"], menu.Theme(False), 100)))
 
     def test_default_instance_is_shown_as_a_polish_label_everywhere(self):
         frames = self.frames(64, 25)
@@ -480,7 +516,7 @@ class FakeApp:
     """Records lifecycle calls; nothing here touches tmux, systemd or a PTY."""
 
     def __init__(self, workloads=(), titles=None):
-        self.c = replace(Config.load(), ui_color=False)
+        self.c = replace(Config.load(), ui_color=False, guard_dir=None)
         self.workloads, self.calls, self.r = list(workloads), [], None
         self.tmux, self.git = FakeTmux(titles or {}), FakeGit()
         self.fail_start = None
@@ -540,6 +576,156 @@ class TickReader:
             return "q"
         self.clock.now += timeout
         return None
+
+
+class FakeGuard:
+    def __init__(self, status):
+        self.current, self.calls, self.fail = status, [], None
+
+    def status(self, remember=False, log_lines=5):
+        return self.current
+
+    def act(self, name, *args):
+        self.calls.append((name,)+args)
+        if self.fail:
+            raise HubiError(self.fail)
+
+    def start(self, setup=None):
+        self.act("start", setup)
+        return setup or self.current.setup
+
+    def stop(self):
+        self.act("stop")
+        return True
+
+    def change_cp(self, cp):
+        self.act("cp", cp)
+        return self.current.setup, replace(self.current.setup, cp=cp)
+
+    def change_who(self, codex, contact):
+        self.act("who", codex, contact)
+        return self.current.setup, replace(self.current.setup, codex=codex, contact=contact)
+
+    def switch_version(self, label):
+        self.act("version", label)
+        return True
+
+    def versions(self):
+        return [("v4.8", Path("watchdog.v48.sh")), ("v4.9", Path("watchdog.v49.sh"))]
+
+    def limits(self, setup=None):
+        self.act("limits")
+        return {"status": "ok"}, time.time()
+
+
+class ScriptReader:
+    def __init__(self, keys=(), lines=()):
+        self.keys, self.lines, self.asked = list(keys), list(lines), []
+
+    def key(self, timeout=None):
+        return self.keys.pop(0) if self.keys else None
+
+    def prompt(self, text, destructive=False):
+        self.asked.append(text)
+        return self.lines.pop(0) if self.lines else None
+
+    def settle(self):
+        pass
+
+    def rearm(self):
+        pass
+
+
+class GuardMenuTests(unittest.TestCase):
+    def menu(self, status, keys=(), lines=()):
+        class Stream(io.StringIO):
+            def fileno(self):
+                raise OSError()
+        m = menu.Menu(FakeApp(), ScriptReader(keys, lines), menu.Screen(Stream()))
+        m.screen.size = lambda: (100, 30)
+        m.guard = FakeGuard(status)
+        m.refresh()
+        return m
+
+    def test_s_opens_the_guard_screen_only_when_there_is_a_guard(self):
+        m = self.menu(guard_status())
+        m.handle("s")
+        self.assertEqual(m.ui.screen, "guard")
+        m.handle("0")
+        self.assertEqual(m.ui.screen, "main")
+        m = self.menu(G.Status(False))
+        m.handle("s")
+        self.assertEqual(m.ui.screen, "main")
+        self.assertIn("nic tu nie robi", m.ui.message)
+
+    def test_keys_steer_the_guard(self):
+        m = self.menu(guard_status(state="RUNNING"), keys=["q", "q", "q", "q", "x"],
+                      lines=["CP21", "codex/praca claude/praca", "v4.8"])
+        m.handle("s")
+        m.handle("p")
+        self.assertEqual(m.guard.calls[-1], ("cp", "CP21"))
+        self.assertIn("Strażnik działa: CP21", m.ui.message)
+        m.handle("w")
+        self.assertEqual(m.guard.calls[-1], ("who", "codex/praca", "claude/praca"))
+        m.handle("v")
+        self.assertEqual(m.guard.calls[-1], ("version", "v4.8"))
+        self.assertIn("v4.8", m.reader.asked[-1])                  # the prompt lists the kept versions
+        m.handle("l")
+        self.assertEqual(m.guard.calls[-1], ("limits",))
+        m.handle("z")                                               # q confirms
+        self.assertEqual(m.guard.calls[-1], ("stop",))
+        calls = len(m.guard.calls)
+        m.handle("z")                                               # any other key cancels
+        self.assertEqual(len(m.guard.calls), calls)
+        self.assertEqual(m.ui.message, "Anulowano")
+
+    def test_start_uses_the_last_setup_or_asks_for_one(self):
+        m = self.menu(guard_status(False, "RUNNING"), keys=["q"])
+        m.handle("s")
+        m.handle("u")
+        self.assertEqual(m.guard.calls, [("start", None)])
+        status = guard_status(False, "RUNNING")
+        status.setup = None
+        m = self.menu(status, lines=["CP21 codex/praca/1 claude/praca", "CP21 %5 claude/praca"])
+        m.handle("s")
+        m.handle("u")
+        self.assertEqual(m.guard.calls[-1][1].words(), "CP21 codex/praca claude/praca")
+        m.handle("u")
+        self.assertEqual(len(m.guard.calls), 1)                     # a pane number never reaches the guard
+        self.assertIn("nazwy Hubi", m.ui.message)
+
+    def test_refusals_are_shown_in_polish(self):
+        m = self.menu(guard_status(), keys=["q"], lines=["CP21"])
+        m.guard.fail = ("Guard is in PAUSED_5H for codex/praca: a new CP or Codex would lose the pause; "
+                        "wait for RUNNING or restart with the same CP and Codex")
+        m.handle("s")
+        m.handle("p")
+        self.assertIn("zgubiłby stan pauzy", m.ui.message)
+        self.assertEqual(m.ui.level, "bad")
+
+    def test_every_restart_is_confirmed_and_says_what_it_risks(self):
+        m = self.menu(guard_status(), keys=["x", "x", "x", "x"], lines=["CP21", "codex/praca claude/praca", "v4.8"])
+        m.handle("s")
+        for key in "pwvz":
+            m.handle(key)
+            self.assertEqual(m.ui.message, "Anulowano", key)
+        self.assertEqual(m.guard.calls, [])
+        shown = []
+        m.say = lambda text, level="muted": shown.append(text)
+        m.reader.keys = ["x"]
+        m.handle("z")
+        self.assertTrue(any("Jest w pauzie: nikt nie wyśle Codexowi „wznów”." in text for text in shown), shown)
+        m = self.menu(guard_status(state="RUNNING"), lines=["codex/praca"])
+        m.handle("s")
+        m.handle("w")
+        self.assertIn("Podaj Codexa i kontakt", m.ui.message)
+
+    def test_empty_answers_cancel(self):
+        m = self.menu(guard_status(state="RUNNING"), lines=["", ""])
+        m.handle("s")
+        m.handle("p")
+        m.handle("w")
+        self.assertEqual(m.guard.calls, [])
 
 
 class LoopTests(unittest.TestCase):

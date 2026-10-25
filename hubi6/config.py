@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import pwd
+import re
 import stat
 import tomllib
 
@@ -51,6 +52,10 @@ class Config:
     # Work outside any repository (a persistent shell or an agent in ~).
     # None disables it. Always a plain directory, never a Git working tree.
     home_workspace: Path | None = None
+    # The Codex limit guard (strażnik) that `hubi guard` and the menu show and
+    # steer. None hides it. The unit is a transient systemd user service.
+    guard_dir: Path | None = None
+    guard_unit: str = "praca-codex-watchdog"
 
     @classmethod
     def load(cls, path: str | None = None):
@@ -67,13 +72,13 @@ class Config:
                 data = tomllib.loads(source.read_text())
             except (OSError, ValueError) as e:
                 raise HubiError(f"Invalid config: {source}: {e}") from e
-        if not isinstance(data, dict) or set(data)-{"repos_root", "agents", "github", "stop", "lock_timeout", "ui", "home_workspace"}:
+        if not isinstance(data, dict) or set(data)-{"repos_root", "agents", "github", "stop", "lock_timeout", "ui", "home_workspace", "guard"}:
             raise HubiError("Unknown configuration keys")
         if "repos_root" in data and not isinstance(data["repos_root"], str):
             raise HubiError("repos_root must be a path string")
         if not isinstance(data.get("home_workspace", ""), str):
             raise HubiError("home_workspace must be a path string")
-        for section in ("agents", "github", "stop", "ui"):
+        for section in ("agents", "github", "stop", "ui", "guard"):
             if not isinstance(data.get(section, {}), dict):
                 raise HubiError(f"{section} must be a TOML table")
         uid = os.getuid()
@@ -118,12 +123,23 @@ class Config:
             raise HubiError("Unknown ui configuration keys")
         if type(ui.get("color", True)) is not bool or type(ui.get("icons", True)) is not bool:
             raise HubiError("Invalid ui configuration")
+        guard = data.get("guard", {})
+        if set(guard)-{"dir", "unit"}:
+            raise HubiError("Unknown guard configuration keys")
+        guard_dir, guard_unit = guard.get("dir", str(home/".cache/praca/codex-watchdog")), guard.get("unit", "praca-codex-watchdog")
+        if not isinstance(guard_dir, str) or not isinstance(guard_unit, str) or not re.fullmatch(r"[A-Za-z0-9_.:@-]+", guard_unit) \
+                or guard_unit.endswith(".service"):
+            raise HubiError("Invalid guard configuration")
+        guard_dir = Path(guard_dir).expanduser() if guard_dir else None   # "" hides the guard
+        if guard_dir is not None and not guard_dir.is_absolute():
+            raise HubiError("Invalid guard configuration")
         return cls(home, repos, runtime_base, state, cache, config_base, socket, service, rid,
                    defaults, owner, ttl, lock_timeout=positive_number(data.get("lock_timeout", 3), "lock_timeout"),
                    home_workspace=home_workspace(data.get("home_workspace"), home, repos),
                    clone_timeout=positive_number(github.get("clone_timeout", 300), "github.clone_timeout"),
                    ui_refresh=positive_number(ui.get("refresh", 2), "ui.refresh"),
-                   ui_color=ui.get("color", True), ui_icons=ui.get("icons", True), **values)
+                   ui_color=ui.get("color", True), ui_icons=ui.get("icons", True),
+                   guard_dir=guard_dir, guard_unit=guard_unit, **values)
 
     @property
     def runtime(self):

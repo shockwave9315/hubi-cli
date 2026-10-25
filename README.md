@@ -41,6 +41,8 @@ zostawiona na wypadek wycofania zmian ([opis v5](docs/v5/README.md)).
 - Lista repozytoriów z GitHuba z klonowaniem.
 - Terminal albo agent poza repozytorium, w katalogu domowym (`h`): trwała
   powłoka do zwykłej pracy na devboksie, do której wracasz jak do każdej sesji.
+- Strażnik limitu Codexa widoczny i sterowany bez agenta (`s`, `hubi guard`):
+  stan, CP, cel, wersja, log; zmiana CP, celu i wersji jednym poleceniem.
 
 Restart maszyny kończy sesje. Rozmowę z agentem wznowisz potem klawiszem `r`
 przy starcie.
@@ -118,6 +120,7 @@ Ominięcie menu: `ssh -t HOST 'HUBI_NOAUTO=1 bash -il'`.
 | `i` | szczegóły sesji: podgląd, współdzielenie, przejęcie, naprawa |
 | `r` | widok repozytorium i `git status` |
 | `g` | repozytoria na GitHubie, klonowanie |
+| `s` | strażnik limitu Codexa (tylko gdy jest skonfigurowany) |
 | `?` | pomoc |
 | `q` / `x` | powłoka / rozłącz (`x` tylko po autologinie) |
 | `0`, Esc | wróć |
@@ -173,6 +176,7 @@ hubi inspect ID               # szczegóły (JSON)
 hubi send TYP REPO [NAZWA] -m TEKST  # wyślij wiadomość do sesji po nazwie
 hubi pane TYP REPO [NAZWA]    # panel tmux działającej sesji, np. %14
 hubi github list              # repozytoria na GitHubie
+hubi guard status             # strażnik limitu Codexa (szczegóły niżej)
 hubi doctor                   # diagnostyka
 hubi --classic                # starsze menu liniowe, awaryjne
 ```
@@ -244,6 +248,53 @@ Taka jednostka dostaje środowisko menedżera systemd, a nie agenta. Bez
 `--setenv=PATH="$PATH"` nie znajdzie `hubi` w `~/.local/bin`; inne potrzebne
 zmienne też przekaż przez `--setenv=`.
 
+### Strażnik limitu Codexa
+
+Strażnik (`~/.cache/praca/codex-watchdog`, jednostka `praca-codex-watchdog`)
+pilnuje limitów Codexa: przy niskim limicie każe mu zrobić pauzę, po odnowieniu
+wysyła „wznów”. Hubi pokazuje go i nim steruje, a sam skrypt zostaje bez zmian.
+Hubi czyta jego pliki i jednostkę systemd, a uruchamia go tak, jak opisuje jego
+README.
+
+Na ekranie głównym jest wiersz `STRAŻNIK`: czy działa, CP, stan (`RUNNING`,
+`PAUSED_5H`…), godzina wznowienia w pauzie, wersja, cel i kontakt. Klawisz `s`
+otwiera szczegóły z ostatnimi wpisami logu i klawiszami: `u` uruchom, `z`
+zatrzymaj, `p` nowy CP, `w` Codex i kontakt, `v` wersja, `l` limity. Godziny są
+w czasie polskim.
+
+```console
+hubi guard status [--limits]          # stan; --limits czyta też limity (5–20 s, najwyżej co 2 min)
+hubi guard log [-n 20]                # ostatnie wpisy logu, czas polski
+hubi guard cp CP21                    # ten sam Codex i kontakt, nowy CP
+hubi guard who codex/praca claude/praca   # inny Codex i kontakt
+hubi guard stop
+hubi guard start [CP CODEX KONTAKT]   # bez argumentów: ostatnie ustawienie
+hubi guard version [v4.8]             # lista wersji; z argumentem: przełącz i uruchom ponownie
+```
+
+Bezpieczniki:
+
+- CP albo Codexa zmienisz tylko w stanie `RUNNING`. W pauzie strażnik trzyma
+  stan pod nazwą CP, więc zmiana by go zgubiła i Codex nie dostałby „wznów”.
+  Ponowny start z tym samym CP i Codexem, także z innym kontaktem, działa zawsze.
+- Restart zachowuje `PATH`, wszystkie `WD_…` i opcje restartu z działającej
+  jednostki. Bez `codex` w `PATH` start jest odrzucany.
+- Nazwy sesji jak w Hubi (`codex/praca`, `claude/praca`, `codex/praca/temp-rev`);
+  numery paneli (`%N`) nie przechodzą. `codex/praca/1` to to samo co `codex/praca`.
+- Przy blokadzie tygodniowej (`WEEKLY_STOP`) start jest odrzucany z instrukcją
+  ręcznego wznowienia. Hubi nie usuwa pliku stanu sam.
+- `version` podmienia `watchdog.sh` na kopię `watchdog.vXX.sh` (nowy plik, nie
+  nadpisanie w miejscu) i restartuje działającego strażnika. Odmawia, gdy
+  `watchdog.sh` nie odpowiada żadnej zachowanej wersji, bo zmiana by przepadła.
+- Gdy nowa wersja, CP albo cel nie wystartuje (np. v4.8 nie przyjmuje Codexa jako
+  kontaktu), Hubi wraca do wersji i ustawienia, które przed chwilą działały, i mówi
+  dlaczego. Strażnik nie zostaje wyłączony.
+- Gdy Hubi nie zna poprzedniego ustawienia, start z nowym CP albo Codexem
+  sprawdza wszystkie pliki `state.codex-*`: żaden Codex w pauzie nie zostanie bez „wznów”.
+- W menu każdy restart (`p`, `w`, `v`) i zatrzymanie (`z`) potwierdzasz klawiszem `q`.
+- Hubi nigdy nie tworzy `reset.armed`, nie uruchamia `reset_credit.py` i nie pisze
+  do Codexa.
+
 ## Konfiguracja
 
 Plik `~/.config/hubi6/config.toml` jest opcjonalny. Wzór z opisem:
@@ -257,6 +308,8 @@ Plik `~/.config/hubi6/config.toml` jest opcjonalny. Wzór z opisem:
 | `[agents] codex` | `["codex", "--no-daemon"]` | polecenie Codexa |
 | `[ui] refresh` | `2` | odświeżanie listy w sekundach |
 | `[ui] icons` | `true` | `false` = sam ASCII |
+| `[guard] dir` | `~/.cache/praca/codex-watchdog` | katalog strażnika limitu Codexa; `""` ukrywa strażnika |
+| `[guard] unit` | `praca-codex-watchdog` | jego jednostka systemd użytkownika (bez `.service`) |
 
 Codex startuje z `--no-daemon` celowo. Bez tej flagi wszystkie sesje Codexa
 dzielą jeden proces w tle, który siedzi w pierwszej z nich, i zatrzymanie jej

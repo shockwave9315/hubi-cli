@@ -87,6 +87,26 @@ def parser():
             c.add_argument("--generation", help="odrzuć nieaktualne potwierdzenie")
         if name == "attach":
             c.add_argument("--mode", choices=("normal", "view", "shared", "takeover"), default="normal", help="tryb wejścia")
+    c = sub.add_parser("guard", help="strażnik limitu Codexa: podgląd i sterowanie",
+                       epilog="Zmiana CP albo celu tylko w stanie RUNNING (w pauzie zgubiłaby stan pauzy); ponowny start "
+                              "z tym samym CP i celem zawsze. Nazwy sesji jak w Hubi: codex/praca, claude/praca, "
+                              "codex/praca/temp-rev; numerów paneli (%%N) nie przyjmuje.")
+    g = c.add_subparsers(dest="guard_command", required=True, parser_class=polish)
+    s = g.add_parser("status", help="stan strażnika")
+    s.add_argument("--limits", action="store_true", help="odczytaj też limity Codexa (5–20 s, najwyżej co 2 min)")
+    s.add_argument("--json", action="store_true", help=as_json)
+    s = g.add_parser("log", help="ostatnie wpisy logu strażnika")
+    s.add_argument("-n", type=int, default=20, metavar="LICZBA", help="ile wpisów (domyślnie 20)")
+    s = g.add_parser("cp", help="uruchom strażnika ponownie z nowym CP")
+    s.add_argument("cp", metavar="CP", help="np. CP21")
+    s = g.add_parser("who", help="uruchom strażnika ponownie z innym Codexem i kontaktem")
+    s.add_argument("codex", metavar="CODEX", help="np. codex/praca")
+    s.add_argument("contact", metavar="KONTAKT", help="np. claude/praca albo codex/praca/temp-rev")
+    g.add_parser("stop", help="zatrzymaj strażnika")
+    s = g.add_parser("start", help="uruchom strażnika (bez argumentów: z ostatnim ustawieniem)")
+    s.add_argument("words", nargs="*", metavar="CP CODEX KONTAKT", help="np. CP21 codex/praca claude/praca")
+    s = g.add_parser("version", help="wersje strażnika; z argumentem: przełącz na tę wersję i uruchom ponownie")
+    s.add_argument("version", nargs="?", metavar="WERSJA", help="np. v4.8")
     c = sub.add_parser("github", help="repozytoria na GitHubie")
     g = c.add_subparsers(dest="github_command", required=True, parser_class=polish)
     ls = g.add_parser("list", help="lista repozytoriów")
@@ -142,14 +162,24 @@ def execute(args):
               "\n".join(f"{k}: {display(v)}" for k, v in result["checks"].items()))
         return {"PASS": 0, "WARN": 3, "FAIL": 1}[result["status"]]
     if args.command == "list":
+        from .guard import Guard, summary
         s = app.snapshot()
+        try:
+            guard = Guard(app).status(log_lines=0)
+        except HubiError:
+            guard = None
         if args.json:
-            print(json.dumps(s.data(), ensure_ascii=True, indent=2))
+            data = s.data()
+            if guard is not None:
+                data["guard"] = guard.data()
+            print(json.dumps(data, ensure_ascii=True, indent=2))
         else:
             print("Runtime: "+RUNTIME_PL.get(s.runtime_health, s.runtime_health))
             for w in s.workloads:
                 print(f"{w.record.id}  {w.record.kind}/{name_pl(w.record.instance)}  {STATE_PL[w.state]}  repo:{HEALTH_PL[w.repo_health]}  "
                       f"klienci:{w.session.attached if w.session else 0}  {display(w.record.repo.path)}")
+            if guard is not None and guard.configured:
+                print("Strażnik: "+summary(guard))
             for issue in s.issues:
                 print(pl(display(issue)), file=sys.stderr)
         return 0 if s.runtime_health == "OK" and all(w.state != State.UNKNOWN for w in s.workloads) else 1
@@ -177,6 +207,8 @@ def execute(args):
         app.send(args.type, args.repo, instance_of(args.instance), text, enter=not args.no_enter)
     elif args.command == "attach":
         return app.attach(args.id, args.mode)
+    elif args.command == "guard":
+        return guard(app, args)
     elif args.command == "github":
         from .github import GitHub
         gh = GitHub(app)
@@ -193,6 +225,56 @@ def execute(args):
                           f"{' prywatne' if repo['isPrivate'] else ''}{' fork' if repo['isFork'] else ''}{' archiwum' if repo['isArchived'] else ''}")
                 if result.error:
                     print(pl(result.error), file=sys.stderr)
+    return 0
+
+
+def guard(app, args):
+    from .guard import Guard, Setup, canonical, log_line, report
+    g = Guard(app)
+    command = args.guard_command
+    if command == "status":
+        s = g.status(remember=True)
+        if args.limits and s.configured:
+            s.limits, s.limits_at = g.limits(s.setup)
+        print(json.dumps(s.data(), ensure_ascii=True, indent=2) if args.json else "\n".join(report(s)))
+        return 0
+    g.require()
+    if command == "log":
+        s = g.status(log_lines=max(1, min(args.n, 500)))
+        for line in s.log:
+            print(log_line(line, s.setup.codex if s.setup else ""))
+    elif command == "stop":
+        print("Zatrzymano strażnika." if g.stop() else "Strażnik nie działał.")
+    elif command == "start":
+        setup = None
+        if args.words:
+            if len(args.words) != 3:
+                raise HubiError("Give CP, Codex and contact, or nothing")
+            cp, codex, contact = args.words
+            setup = Setup(cp, canonical(codex, kind="codex"), canonical(contact))
+        setup = g.start(setup)
+        print(f"Strażnik działa: {setup.words()}")
+    elif command == "cp":
+        old, new = g.change_cp(args.cp)
+        print(f"Strażnik działa: {new.words()} (było {old.cp})")
+    elif command == "who":
+        old, new = g.change_who(args.codex, args.contact)
+        print(f"Strażnik działa: {new.words()} (było {old.codex} → {old.contact})")
+    elif command == "version":
+        if not args.version:
+            current = g.current_versions()
+            for label, path in g.versions():
+                print(f"{'*' if label in current else ' '} {label}  {path.name}")
+            if not current:
+                print("watchdog.sh nie odpowiada żadnej z tych wersji")
+            return 0
+        running = g.status(log_lines=0).running
+        if not g.switch_version(args.version):
+            print(f"watchdog.sh już jest wersją {args.version}.")
+        elif running:
+            print(f"Strażnik działa z wersją {args.version}.")
+        else:
+            print(f"watchdog.sh to teraz wersja {args.version}. Strażnik nie działa: hubi guard start")
     return 0
 
 

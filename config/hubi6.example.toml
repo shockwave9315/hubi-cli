@@ -33,3 +33,9 @@ refresh = 2
 color = true
 # false replaces the Unicode icons and spinner with plain ASCII.
 icons = true
+
+[guard]
+# The Codex limit guard shown by `hubi guard`, `hubi list` and the menu (key s).
+# "" hides it. The unit is its transient systemd user service, without .service.
+dir = "~/.cache/praca/codex-watchdog"
+unit = "praca-codex-watchdog"
