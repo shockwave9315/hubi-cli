@@ -751,6 +751,17 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(app.calls[0], ("start", "claude", ref("alpha").path, "rev", True))
         self.assertEqual((m.ui.instance, m.ui.resume), ("", False))
 
+    def test_codex_resume_returns_the_stopped_session_with_a_saved_conversation(self):
+        m, app = self.make()
+        app.saved[("codex", ref("praca").path)] = ["primary"]
+        self.press(m, "c", "r", "3")
+        self.assertEqual(app.calls[0], ("start", "codex", ref("praca").path, "primary", True))
+        m, app = self.make()                          # several saved: asked by name, as for Claude
+        app.saved[("codex", ref("praca").path)] = ["test", "primary"]
+        os.write(self.wr, b"test\n")
+        self.press(m, "c", "r", "3")
+        self.assertEqual(app.calls[0], ("start", "codex", ref("praca").path, "test", True))
+
     def test_claude_resume_asks_which_name_when_several_are_saved(self):
         for typed, expected in ((b"1\n", "primary"), (b"rev\n", "rev"), (b"glowna\n", None), (b"\n", None)):
             m, app = self.make()

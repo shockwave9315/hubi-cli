@@ -930,13 +930,13 @@ class Menu:
 
         Without a typed name a new conversation takes the first free automatic
         name. "Resume" without a name returns a stopped session that has a saved
-        Claude conversation, under its own name: the only one directly, else the
-        one the user names. Only when no such session exists does it take a free
-        name and Claude's own list of conversations.
+        conversation, under its own name: the only one directly, else the one
+        the user names. Only when no such session exists does it take a free
+        name and the agent's own list of conversations.
         """
         named, resume = self.ui.instance, self.ui.resume and kind != "terminal"
         self.refresh()                                # the name is chosen from the current inventory
-        if resume and not named and kind == "claude":
+        if resume and not named:
             named = self.resume_choice(kind, ref.path)
             if named is None:
                 return

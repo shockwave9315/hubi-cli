@@ -30,7 +30,17 @@ from pathlib import Path
 signal.signal(signal.SIGHUP,signal.SIG_IGN)
 print("FAKE AGENT READY",flush=True)
 Path(".agent-"+str(os.getpid())).write_text(json.dumps({"argv":sys.argv,"env":dict(os.environ)}))
-while True: time.sleep(.1)
+opened = {}
+while True:
+    # Like Codex: keep every conversation file listed in .open open until exit.
+    try:
+        for name in Path(".open").read_text().split():
+            if name not in opened:
+                opened[name] = open(name, "a")
+                Path(".opened-"+str(os.getpid())).write_text(str(len(opened)))
+    except OSError:
+        pass
+    time.sleep(.1)
 ''')
     fake.chmod(0o700)
     (conf/"config.toml").write_text('[agents]\ncodex = ["/usr/bin/python3", "'+str(fake)+'"]\nclaude = ["/usr/bin/python3", "'+str(fake)+'", "--permission-mode", "bypassPermissions"]\n')

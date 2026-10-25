@@ -103,6 +103,15 @@ class Store:
                     {"kind": record.kind, "repo": record.repo.path, "instance": record.instance,
                      "conversation": conversation, "bound": time.time()})
 
+    def unbind_conversation(self, key):
+        """Forget the conversation of one session name: a new conversation replaces it."""
+        if not HEX20.fullmatch(key):
+            raise HubiError("Invalid lock identity")
+        try:
+            (self.c.conversations/(key+".json")).unlink()
+        except FileNotFoundError:
+            pass
+
     def bindings(self):
         """Every readable binding, newest first. Damaged files are skipped, never removed."""
         found = []
