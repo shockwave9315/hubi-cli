@@ -387,6 +387,16 @@ class GuardTests(Fixture):
         self.assertIn("hubi guard start CP20", pl(e.exception))
         self.assertEqual(self.g.saved().cp, "CP20")        # a failed start never replaces the last good setup
 
+    def test_a_failed_start_keeps_the_last_good_setup(self):
+        self.sd.launch()
+        self.g.stop()
+        self.sd.refuse = "zły próg"
+        with self.assertRaises(HubiError) as e:
+            self.g.start(G.Setup("CP21", "codex/praca", "claude/praca"))
+        self.assertIn("zaraz po starcie: zły próg", pl(e.exception))
+        self.assertFalse(self.sd.active)
+        self.assertEqual(self.g.saved().words(), "CP20 codex/praca codex/praca/temp-rev")
+
     def test_a_new_setup_that_dies_brings_the_old_one_back(self):
         self.sd.launch()
         self.sd.refuse_when = lambda d, argv: "zły próg" if argv[2] == "CP21" else ""

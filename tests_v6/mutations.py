@@ -58,7 +58,12 @@ def main():
         ('guard-remember-after-start', 'hubi6/guard.py',
          '        for _ in range(8):\n            self.sleep(.25)',
          '        self.remember(replace(setup, env=tuple(sorted(env.items()))))\n        for _ in range(8):\n            self.sleep(.25)',
-         'tests_v6.test_guard.GuardTests.test_a_guard_that_dies_at_once_is_reported_with_its_reason',
+         'tests_v6.test_guard.GuardTests.test_a_failed_start_keeps_the_last_good_setup',
+         'AssertionError'),
+        ('guard-goes-back', 'hubi6/guard.py',
+         '                    self.go_back(setup, e, back)\n',
+         '',
+         'tests_v6.test_guard.GuardTests.test_a_version_that_rejects_the_setup_brings_the_old_version_back',
          'AssertionError'),
     ]
     for label, filename, before, after, test, expected in cases:
