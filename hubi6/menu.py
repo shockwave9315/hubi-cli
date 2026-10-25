@@ -1234,14 +1234,15 @@ class Menu:
                 setup = guard.start(setup)
             return self.say(f"Strażnik działa: {setup.words()}", "ok")
         if key == "z" and status.running:
-            if not self.confirm("Zatrzymać strażnika?"):
+            paused = status.state.get("STATE") in PAUSED
+            if not self.confirm("Zatrzymać strażnika?"+(" Jest w pauzie: nikt nie wyśle Codexowi „wznów”." if paused else "")):
                 return self.say("Anulowano", "muted")
             with self.busy("Zatrzymuję strażnika"):
                 guard.stop()
             return self.say("Zatrzymano strażnika", "ok")
         if key == "p":
             answer = (self.ask_line("Nowy CP (np. CP21): ") or "").strip()
-            if not answer:
+            if not answer or not self.confirm(f"Uruchomić strażnika ponownie z {answer}?"):
                 return self.say("Anulowano", "muted")
             with self.busy("Uruchamiam strażnika z nowym CP"):
                 old, new = guard.change_cp(answer)
@@ -1251,14 +1252,17 @@ class Menu:
             if not words:
                 return self.say("Anulowano", "muted")
             if len(words) != 2:
-                raise HubiError("Give CP, Codex and contact, or nothing")
+                raise HubiError("Give Codex and contact")
+            if not self.confirm(f"Uruchomić strażnika ponownie: {words[0]} → {words[1]}?"):
+                return self.say("Anulowano", "muted")
             with self.busy("Uruchamiam strażnika z nowym celem"):
                 old, new = guard.change_who(words[0], words[1])
             return self.say(f"Strażnik działa: {new.words()}", "ok")
         if key == "v":
             labels = [label for label, _ in guard.versions()]
             answer = (self.ask_line(f"Wersja ({', '.join(labels[-4:])}): ") or "").strip()
-            if not answer:
+            again = " i uruchomić ponownie" if status.running else ""
+            if not answer or not self.confirm(f"Przełączyć strażnika na {answer}{again}?"):
                 return self.say("Anulowano", "muted")
             with self.busy("Przełączam wersję strażnika"):
                 changed = guard.switch_version(answer)

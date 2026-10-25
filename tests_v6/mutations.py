@@ -35,8 +35,8 @@ def main():
          'AssertionError: HubiError not raised'),
         # The guard's hard rules (brief from the owner, 25.10).
         ('guard-pause-rule', 'hubi6/guard.py',
-         '            if state.get("STATE") in PAUSED and moved and',
-         '            if False and',
+         '            if state.get("STATE") in PAUSED and (name != mine',
+         '            if False and (name != mine',
          'tests_v6.test_guard.GuardTests.test_pause_refuses_a_new_cp_or_codex_but_allows_the_same_restart',
          'AssertionError: HubiError not raised'),
         ('guard-weekly-lock', 'hubi6/guard.py',
@@ -50,9 +50,9 @@ def main():
          'tests_v6.test_guard.GuardTests.test_new_cp_in_running_keeps_every_setting',
          'AssertionError'),
         ('guard-new-inode', 'hubi6/guard.py',
-         '                shutil.copy2(source, temp)               # like cp -p: mode and times of the version\n'
-         '                os.replace(temp, target)',
-         '                shutil.copyfile(source, target)',
+         '            shutil.copy2(source, temp)               # like cp -p: mode and times of the version\n'
+         '            os.replace(temp, self.dir/"watchdog.sh")',
+         '            shutil.copyfile(source, self.dir/"watchdog.sh")',
          'tests_v6.test_guard.GuardTests.test_version_switch_restarts_with_the_same_setup',
          'AssertionError'),
         ('guard-remember-after-start', 'hubi6/guard.py',

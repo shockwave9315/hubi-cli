@@ -204,8 +204,11 @@ The guard script stays as it is. Hubi reads its directory (`state.<codex>`,
 way the guard's README does, keeping the running unit's `PATH`, `WD_*` and
 restart options. A change of CP or guarded Codex is refused while that Codex's
 state is a pause (`PAUSE_REQUESTED`, `PAUSED_5H`, `RESUME_REQUESTED`): the guard
-keeps a pause only under its CP name. A weekly lock refuses the start with the
-manual steps. Version switches replace `watchdog.sh` by rename, never in place
+keeps a pause only under its CP name. Without a remembered setup every paused `state.codex-*` file counts
+(pane-numbered v3.2 files never do). A weekly lock refuses the start with the
+manual steps. A running guard is never left stopped: when a new CP, Codex,
+contact or version dies at start, Hubi restores the previous script and setup
+and says why. Version switches replace `watchdog.sh` by rename, never in place
 under a running bash. Hubi never creates `reset.armed`, never runs
 `reset_credit.py` and never writes to Codex. Its own memo of the last setup is
 `$XDG_STATE_HOME/hubi6/guard.json`, written only by `hubi guard`, the menu and

@@ -36,6 +36,7 @@ class FakeSystemd:
         self.cwd = None
         self.since = 1792823690.0
         self.refuse = ""                  # journal text of a guard that exits right after start
+        self.refuse_when = None           # (directory, argv) -> journal text, "" = it starts
         self.journal_text = ""
         self.limits_out = "status=ok five_left=64 five_reset=1792900000 week_left=53 week_reset=1793300000 allowed=true"
         self.limits_runs = 0
@@ -59,8 +60,9 @@ class FakeSystemd:
             self.props = dict(argv[i+1].split("=", 1) for i in range(split) if argv[i] == "-p")
             self.argv, self.cwd = argv[split+1:], cwd
             self.starts += 1
-            if self.refuse:
-                self.journal_text, self.active = self.refuse, False
+            why = self.refuse or (self.refuse_when(self.dir, self.argv) if self.refuse_when else "")
+            if why:
+                self.journal_text, self.active = why, False
             else:
                 self.active, self.since = True, time.time()
         elif argv[0] == "journalctl":
@@ -385,6 +387,59 @@ class GuardTests(Fixture):
         self.assertIn("hubi guard start CP20", pl(e.exception))
         self.assertEqual(self.g.saved().cp, "CP20")        # a failed start never replaces the last good setup
 
+    def test_a_new_setup_that_dies_brings_the_old_one_back(self):
+        self.sd.launch()
+        self.sd.refuse_when = lambda d, argv: "zły próg" if argv[2] == "CP21" else ""
+        with self.assertRaises(HubiError) as e:
+            self.g.change_cp("CP21")
+        self.assertIn("nie wystartowało: Strażnik zakończył się zaraz po starcie: zły próg; strażnik działa znowu z CP20",
+                      pl(e.exception))
+        self.assertTrue(self.sd.active)
+        self.assertEqual(self.sd.argv[2:], ["CP20", "codex/praca", "codex/praca/temp-rev"])
+        self.assertEqual(self.sd.env["WD_MAX_HOURS"], "48")
+        self.assertEqual(self.g.saved().cp, "CP20")
+
+    def test_a_version_that_rejects_the_setup_brings_the_old_version_back(self):
+        # The live case: v4.8 takes only claude/… as the contact, the guard runs with codex/praca/temp-rev.
+        self.sd.launch()
+        self.sd.refuse_when = lambda d, argv: ("użycie: watchdog.sh <CP> <Codex> <Claude>"
+                                               if "v4.8" in (d/"watchdog.sh").read_text() and argv[4].startswith("codex/") else "")
+        v49 = (self.dir/"watchdog.v49.sh").read_text()
+        with self.assertRaises(HubiError) as e:
+            self.g.switch_version("v4.8")
+        self.assertIn("Wersja v4.8 nie przyjęła tego ustawienia", pl(e.exception))
+        self.assertIn("wrócono do v4.9, strażnik działa", pl(e.exception))
+        self.assertTrue(self.sd.active)
+        self.assertEqual((self.dir/"watchdog.sh").read_text(), v49)
+        self.assertEqual(self.g.current_versions(), ["v4.9"])
+        self.assertEqual(self.sd.argv[2:], ["CP20", "codex/praca", "codex/praca/temp-rev"])
+        # With a Claude contact v4.8 starts.
+        self.g.change_who("codex/praca", "claude/praca")
+        self.assertTrue(self.g.switch_version("v4.8"))
+        self.assertTrue(self.sd.active)
+
+    def test_when_going_back_fails_too_both_reasons_and_the_old_setup_are_shown(self):
+        self.sd.launch()
+        self.sd.refuse = "zły próg"
+        with self.assertRaises(HubiError) as e:
+            self.g.switch_version("v4.8")
+        text = pl(e.exception)
+        self.assertIn("powrót też nie", text)
+        self.assertIn("Poprzednie ustawienie: hubi guard start CP20 codex/praca codex/praca/temp-rev", text)
+        self.assertEqual(self.g.current_versions(), ["v4.9"])   # the script that ran is back anyway
+
+    def test_without_a_saved_setup_every_paused_codex_counts(self):
+        state(self.dir, "codex-praca", CP="CP20", STATE="PAUSED_5H", PAUSE_WINDOW="1792856773")
+        state(self.dir, "5", CP="CP17", STATE="PAUSED_5H", PAUSE_WINDOW="1792607871")   # v3.2, a pane number
+        self.before = sorted(self.before+["state.5"])
+        self.assertIsNone(self.g.saved())
+        with self.assertRaises(HubiError) as e:
+            self.g.start(G.Setup("CP21", "codex/hubi-cli", "claude/hubi-cli"))
+        self.assertIn("state.codex-praca", str(e.exception))
+        self.assertEqual(self.sd.starts, 0)
+        self.g.start(G.Setup("CP20", "codex/praca", "claude/praca"))   # the paused Codex itself, its own CP
+        self.assertTrue(self.sd.active)
+
     def test_stop_when_nothing_runs(self):
         self.assertFalse(self.g.stop())
         self.assertFalse(self.sd.commands("systemctl --user stop"))
@@ -560,7 +615,9 @@ class GuardLabTests(unittest.TestCase):
         (bin_dir/"codex").write_text("#!/bin/sh\nexit 0\n")
         (bin_dir/"codex").chmod(0o755)
         (d/"watchdog.v49.sh").write_text(STAND_IN)
-        (d/"watchdog.v48.sh").write_text(STAND_IN+"# v4.8\n")
+        # Like the real v4.8: the contact must be a Claude session.
+        (d/"watchdog.v48.sh").write_text(STAND_IN.replace(
+            '[[ $CP == CP99 ]]', '[[ $CONTACT == claude/* ]] || { echo "użycie: v4.8 chce claude/…" >&2; exit 2; }\n[[ $CP == CP99 ]]'))
         shutil.copy2(d/"watchdog.v49.sh", d/"watchdog.sh")
         (d/"limits.py").write_text("print('status=ok five_left=50 five_reset=1 week_left=40 week_reset=2 allowed=true')\n")
         unit = f"hubi6-lab-guard-{tag}"
@@ -597,6 +654,24 @@ class GuardLabTests(unittest.TestCase):
             g.change_who("codex/praca", "claude/praca/inny")        # same CP and Codex: allowed in a pause
             self.assertEqual(seen()[:3], ["CP21", "codex/praca", "claude/praca/inny"])
 
+            # The review's probe: v4.8 refuses a Codex contact. The guard must keep running on v4.9.
+            g.change_who("codex/praca", "codex/praca/temp-rev")
+            with self.assertRaises(HubiError) as e:
+                g.switch_version("v4.8")
+            self.assertIn("back to v4.9, the guard runs", str(e.exception))
+            s = g.status()
+            self.assertTrue(s.running)
+            self.assertEqual(s.versions, ["v4.9"])
+            self.assertEqual(seen()[:3], ["CP21", "codex/praca", "codex/praca/temp-rev"])
+            # A new CP that dies at once brings the old one back too (in RUNNING: a pause refuses any new CP).
+            state(d, "codex-praca", CP="CP21", STATE="RUNNING")
+            with self.assertRaises(HubiError) as e:
+                g.change_cp("CP99")
+            self.assertIn("runs again with CP21", str(e.exception))
+            self.assertTrue(g.status().running)
+            self.assertEqual(seen()[0], "CP21")
+
+            g.change_who("codex/praca", "claude/praca/inny")
             self.assertTrue(g.switch_version("v4.8"))
             self.assertEqual(g.status().versions, ["v4.8"])
             self.assertEqual(seen()[:3], ["CP21", "codex/praca", "claude/praca/inny"])

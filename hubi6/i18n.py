@@ -60,6 +60,7 @@ EXACT = {
     "The guard PATH has no codex; start Hubi from a login shell": "W PATH strażnika nie ma codex; uruchom Hubi z powłoki logowania",
     "watchdog.sh matches no kept watchdog.v*.sh; save it as a version first": "watchdog.sh nie odpowiada żadnej zachowanej watchdog.v*.sh; najpierw zapisz go jako wersję",
     "Give CP, Codex and contact, or nothing": "Podaj CP, Codexa i kontakt albo nic (wtedy ostatnie ustawienie)",
+    "Give Codex and contact": "Podaj Codexa i kontakt, np. codex/praca claude/praca",
     "Unknown guard configuration keys": "Nieznane klucze w sekcji guard konfiguracji",
     "Invalid guard configuration": "Nieprawidłowa sekcja guard konfiguracji",
     # systemd adapter
@@ -231,8 +232,12 @@ TEMPLATES = (
      "Blokada tygodniowa w pliku state.{key}: gdy limit wróci, wpisz Codexowi „{cp} wznów”, usuń ten plik i włącz strażnika ponownie"),
     ("Guard is in {gstate} for {codex}: a new CP or Codex would lose the pause; wait for RUNNING or restart with the same CP and Codex",
      "Strażnik jest w stanie {gstate} dla {codex}: nowy CP albo inny Codex zgubiłby stan pauzy; poczekaj na RUNNING albo uruchom ponownie z tym samym CP i celem"),
-    ("Guard stopped; the new start failed: {cause}. Previous setup: hubi guard start {words}",
-     "Strażnik zatrzymany, a nowy start się nie udał: {cause}. Poprzednie ustawienie: hubi guard start {words}"),
+    ("Guard stopped; the new start failed: {cause}; going back failed too: {cause_back}. Previous setup: hubi guard start {words}",
+     "Strażnik zatrzymany: nowy start się nie udał ({cause}), powrót też nie ({cause_back}). Poprzednie ustawienie: hubi guard start {words}"),
+    ("The new guard setup did not start: {cause}; the guard runs again with {words}",
+     "Nowe ustawienie strażnika nie wystartowało: {cause}; strażnik działa znowu z {words}"),
+    ("Guard version {name} did not start: {cause}; back to {previous}, the guard runs",
+     "Wersja {name} nie przyjęła tego ustawienia: {cause}; wrócono do {previous}, strażnik działa"),
     ("{program}: TimeoutExpired", "{program}: przekroczony limit czasu"),
     ("{program}: FileNotFoundError", "{program}: nie znaleziono programu"),
     ("{program}: PermissionError", "{program}: brak uprawnień"),
@@ -264,8 +269,8 @@ def pl(message):
             fields = match.groupdict()
             if "state" in fields and fields["state"] in State.__members__:
                 fields["state"] = STATE_PL[State[fields["state"]]]   # the word `hubi list` shows
-            if "cause" in fields:
-                fields["cause"] = pl(fields["cause"])              # a nested error, itself translated
+            for name in [n for n in fields if n.startswith("cause")]:
+                fields[name] = pl(fields[name])                    # a nested error, itself translated
             return target.format(**fields)
     return text
 

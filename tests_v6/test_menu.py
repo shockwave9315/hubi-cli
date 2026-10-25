@@ -659,7 +659,8 @@ class GuardMenuTests(unittest.TestCase):
         self.assertIn("nic tu nie robi", m.ui.message)
 
     def test_keys_steer_the_guard(self):
-        m = self.menu(guard_status(state="RUNNING"), keys=["q", "x"], lines=["CP21", "codex/praca claude/praca", "v4.8"])
+        m = self.menu(guard_status(state="RUNNING"), keys=["q", "q", "q", "q", "x"],
+                      lines=["CP21", "codex/praca claude/praca", "v4.8"])
         m.handle("s")
         m.handle("p")
         self.assertEqual(m.guard.calls[-1], ("cp", "CP21"))
@@ -694,13 +695,30 @@ class GuardMenuTests(unittest.TestCase):
         self.assertIn("nazwy Hubi", m.ui.message)
 
     def test_refusals_are_shown_in_polish(self):
-        m = self.menu(guard_status(), lines=["CP21"])
+        m = self.menu(guard_status(), keys=["q"], lines=["CP21"])
         m.guard.fail = ("Guard is in PAUSED_5H for codex/praca: a new CP or Codex would lose the pause; "
                         "wait for RUNNING or restart with the same CP and Codex")
         m.handle("s")
         m.handle("p")
         self.assertIn("zgubiłby stan pauzy", m.ui.message)
         self.assertEqual(m.ui.level, "bad")
+
+    def test_every_restart_is_confirmed_and_says_what_it_risks(self):
+        m = self.menu(guard_status(), keys=["x", "x", "x", "x"], lines=["CP21", "codex/praca claude/praca", "v4.8"])
+        m.handle("s")
+        for key in "pwvz":
+            m.handle(key)
+            self.assertEqual(m.ui.message, "Anulowano", key)
+        self.assertEqual(m.guard.calls, [])
+        shown = []
+        m.say = lambda text, level="muted": shown.append(text)
+        m.reader.keys = ["x"]
+        m.handle("z")
+        self.assertTrue(any("Jest w pauzie: nikt nie wyśle Codexowi „wznów”." in text for text in shown), shown)
+        m = self.menu(guard_status(state="RUNNING"), lines=["codex/praca"])
+        m.handle("s")
+        m.handle("w")
+        self.assertIn("Podaj Codexa i kontakt", m.ui.message)
 
     def test_empty_answers_cancel(self):
         m = self.menu(guard_status(state="RUNNING"), lines=["", ""])

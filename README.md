@@ -286,6 +286,12 @@ Bezpieczniki:
 - `version` podmienia `watchdog.sh` na kopię `watchdog.vXX.sh` (nowy plik, nie
   nadpisanie w miejscu) i restartuje działającego strażnika. Odmawia, gdy
   `watchdog.sh` nie odpowiada żadnej zachowanej wersji, bo zmiana by przepadła.
+- Gdy nowa wersja, CP albo cel nie wystartuje (np. v4.8 nie przyjmuje Codexa jako
+  kontaktu), Hubi wraca do wersji i ustawienia, które przed chwilą działały, i mówi
+  dlaczego. Strażnik nie zostaje wyłączony.
+- Gdy Hubi nie zna poprzedniego ustawienia, start z nowym CP albo Codexem
+  sprawdza wszystkie pliki `state.codex-*`: żaden Codex w pauzie nie zostanie bez „wznów”.
+- W menu każdy restart (`p`, `w`, `v`) i zatrzymanie (`z`) potwierdzasz klawiszem `q`.
 - Hubi nigdy nie tworzy `reset.armed`, nie uruchamia `reset_credit.py` i nie pisze
   do Codexa.
 

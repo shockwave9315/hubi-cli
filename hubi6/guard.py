@@ -255,9 +255,20 @@ class Guard:
 
     def read_state(self, codex):
         """The guard's state file for one Codex: known keys and plain values only."""
+        return self.read_state_file("state."+key_of(codex))
+
+    def paused_files(self):
+        """Every state file of a Codex named the Hubi way that holds a pause.
+
+        Files named by a pane number (state.5) are v3.2 leftovers and never count.
+        """
+        return sorted(path.name for path in self.dir.glob("state.codex-*")
+                      if self.read_state_file(path.name).get("STATE") in PAUSED)
+
+    def read_state_file(self, name):
         state = {}
         try:
-            with open(self.dir/("state."+key_of(codex)), encoding="utf-8", errors="replace") as f:
+            with open(self.dir/name, encoding="utf-8", errors="replace") as f:
                 lines = f.read(65536).splitlines()
         except FileNotFoundError:
             return state
@@ -395,11 +406,15 @@ class Guard:
         another Codex would drop it, and the paused Codex would never get "wznów".
         Restarting with the same CP and Codex is always allowed.
         """
-        for codex in {old.codex, new.codex} if old else {new.codex}:
-            state = self.read_state(codex)
-            moved = old is None or new.cp != old.cp or new.codex != old.codex
-            if state.get("STATE") in PAUSED and moved and (new.codex != codex or new.cp != state.get("CP")):
-                raise HubiError(f"Guard is in {state['STATE']} for {codex}: a new CP or Codex would lose the pause; "
+        if old is not None and new.cp == old.cp and new.codex == old.codex:
+            return
+        mine = "state."+key_of(new.codex)
+        # Without a known last setup, any Codex may be the one waiting for "wznów".
+        files = {mine, "state."+key_of(old.codex)} if old else {mine, *self.paused_files()}
+        for name in sorted(files):
+            state = self.read_state_file(name)
+            if state.get("STATE") in PAUSED and (name != mine or new.cp != state.get("CP")):
+                raise HubiError(f"Guard is in {state['STATE']} for {name}: a new CP or Codex would lose the pause; "
                                 "wait for RUNNING or restart with the same CP and Codex")
 
     def check_session(self, name):
@@ -504,9 +519,31 @@ class Guard:
             try:
                 self._start(new, failed=info["state"] == "failed")
             except HubiError as e:
-                raise HubiError(f"Guard stopped; the new start failed: {e}. "
-                                f"Previous setup: hubi guard start {old.words()}") from e
+                if not running:
+                    raise
+                self.go_back(old, e)
+                raise HubiError(f"The new guard setup did not start: {e}; the guard runs again with {old.words()}") from e
             return old, new
+
+    def go_back(self, old, error, script=None):
+        """The guard was running a moment ago: never leave Codex without it."""
+        try:
+            if script is not None:
+                self.install(script)
+            self._start(old, failed=True)
+        except HubiError as again:
+            raise HubiError(f"Guard stopped; the new start failed: {error}; going back failed too: {again}. "
+                            f"Previous setup: hubi guard start {old.words()}") from again
+
+    def install(self, source):
+        """watchdog.sh becomes a copy of source by rename: bash reads a script while running it."""
+        fd, temp = tempfile.mkstemp(prefix=".hubi6-watchdog-", dir=self.dir)
+        os.close(fd)
+        try:
+            shutil.copy2(source, temp)               # like cp -p: mode and times of the version
+            os.replace(temp, self.dir/"watchdog.sh")
+        finally:
+            Path(temp).unlink(missing_ok=True)
 
     def change_cp(self, cp):
         cp = cp.strip()
@@ -529,9 +566,11 @@ class Guard:
             target = self.dir/"watchdog.sh"
             if source.read_bytes() == target.read_bytes():
                 return False
-            if not self.current_versions():
+            previous = self.current_versions()
+            if not previous:
                 # Overwriting would destroy an edit kept nowhere else.
                 raise HubiError("watchdog.sh matches no kept watchdog.v*.sh; save it as a version first")
+            back = self.dir/version_file(previous[-1])
             info = self.unit_info()
             if info["state"] == "unknown":
                 raise HubiError("Systemd state UNKNOWN; operation refused")
@@ -541,20 +580,15 @@ class Guard:
                 self.check_weekly(setup.codex)
                 self.remember(setup)
                 self._stop()
-            # A new inode, never a rewrite in place: bash reads a script while running it.
-            fd, temp = tempfile.mkstemp(prefix=".hubi6-watchdog-", dir=self.dir)
-            os.close(fd)
-            try:
-                shutil.copy2(source, temp)               # like cp -p: mode and times of the version
-                os.replace(temp, target)
-            finally:
-                Path(temp).unlink(missing_ok=True)
+            self.install(source)
             if running:
                 try:
                     self._start(setup)
                 except HubiError as e:
-                    raise HubiError(f"Guard stopped; the new start failed: {e}. "
-                                    f"Previous setup: hubi guard start {setup.words()}") from e
+                    # e.g. v4.8 takes no Codex as the contact: back to the version that ran.
+                    self.go_back(setup, e, back)
+                    raise HubiError(f"Guard version {version_label(source)} did not start: {e}; "
+                                    f"back to {previous[-1]}, the guard runs") from e
             return True
 
 
