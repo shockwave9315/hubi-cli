@@ -46,6 +46,22 @@ EXACT = {
     "home_workspace must be outside repos_root": "home_workspace musi leżeć poza katalogiem repozytoriów (repos_root)",
     "Repository name is empty": "Pusta nazwa repozytorium (katalog domowy podaj jawnie jako ~)",
     "An agent needs an explicit repository or ~": "Agent wymaga jawnie podanego repozytorium albo ~ (katalog domowy)",
+    # the Codex limit guard (hubi guard)
+    "Guard sessions are Hubi names like codex/praca, not pane numbers": "Strażnik przyjmuje nazwy Hubi, np. codex/praca, a nie numery paneli",
+    "The contact must be a Claude session or another named Codex session": "Kontakt to sesja Claude albo inna sesja Codexa z własną nazwą, np. codex/praca/temp-rev",
+    "Unusual guard restart options; change the guard by hand": "Nietypowe opcje restartu strażnika; zmień go ręcznie",
+    "Saved guard setup is unreadable": "Zapisane ustawienie strażnika jest nieczytelne",
+    "The guard unit was started some other way; change it by hand": "Strażnik został uruchomiony inaczej niż zwykle; zmień go ręcznie",
+    "Another guard change is in progress; try again": "Trwa inna zmiana strażnika; spróbuj za chwilę",
+    "Guard is not configured: no watchdog.sh in the guard directory": "Strażnik nie jest skonfigurowany: brak watchdog.sh w katalogu strażnika",
+    "Invalid guard unit name in the configuration": "Nieprawidłowa nazwa jednostki strażnika w konfiguracji",
+    "The guard is already running; use cp, who or version to change it": "Strażnik już działa; zmienisz go poleceniem cp, who albo version",
+    "No earlier guard setup known; give CP, Codex and contact": "Nie znam wcześniejszego ustawienia strażnika; podaj CP, Codexa i kontakt",
+    "The guard PATH has no codex; start Hubi from a login shell": "W PATH strażnika nie ma codex; uruchom Hubi z powłoki logowania",
+    "watchdog.sh matches no kept watchdog.v*.sh; save it as a version first": "watchdog.sh nie odpowiada żadnej zachowanej watchdog.v*.sh; najpierw zapisz go jako wersję",
+    "Give CP, Codex and contact, or nothing": "Podaj CP, Codexa i kontakt albo nic (wtedy ostatnie ustawienie)",
+    "Unknown guard configuration keys": "Nieznane klucze w sekcji guard konfiguracji",
+    "Invalid guard configuration": "Nieprawidłowa sekcja guard konfiguracji",
     # systemd adapter
     "Malformed systemd inventory: missing or duplicate unit identity": "Nieprawidłowa lista jednostek systemd: brak lub duplikat identyfikatora",
     "Refusing foreign systemd unit": "Odmowa: obca jednostka systemd",
@@ -204,6 +220,19 @@ TEMPLATES = (
     ("Workload failed or EXITED during startup; inspect/stop {ident}", "Sesja zakończyła się w trakcie startu; obejrzyj lub usuń {ident}"),
     ("{name}: {error}; reconcile using a surviving runtime receipt, otherwise inspect/move this file manually",
      "{name}: {error}; napraw sesję na podstawie zachowanego potwierdzenia albo obejrzyj/przenieś ten plik ręcznie"),
+    ("Invalid guard session name: {name}", "Nieprawidłowa nazwa sesji dla strażnika: {name} (np. codex/praca, claude/praca)"),
+    ("Invalid guard version: {name}", "Nieprawidłowa wersja strażnika: {name} (np. v4.8)"),
+    ("Invalid checkpoint name: {name}", "Nieprawidłowa nazwa CP: {name} (np. CP21)"),
+    ("Unusual guard setting {name}; change the guard by hand", "Nietypowe ustawienie strażnika {name}; zmień go ręcznie"),
+    ("No such guard version: {name}", "Nie ma takiej wersji strażnika: {name}"),
+    ("The guard did not stop; check systemctl --user status {unit}", "Strażnik się nie zatrzymał; sprawdź systemctl --user status {unit}"),
+    ("The guard stopped right after start: {why}", "Strażnik zakończył się zaraz po starcie: {why}"),
+    ("Weekly limit lock in state.{key}: when the limit is back, send Codex \"{cp} wznów\", delete that file and start the guard again",
+     "Blokada tygodniowa w pliku state.{key}: gdy limit wróci, wpisz Codexowi „{cp} wznów”, usuń ten plik i włącz strażnika ponownie"),
+    ("Guard is in {gstate} for {codex}: a new CP or Codex would lose the pause; wait for RUNNING or restart with the same CP and Codex",
+     "Strażnik jest w stanie {gstate} dla {codex}: nowy CP albo inny Codex zgubiłby stan pauzy; poczekaj na RUNNING albo uruchom ponownie z tym samym CP i celem"),
+    ("Guard stopped; the new start failed: {cause}. Previous setup: hubi guard start {words}",
+     "Strażnik zatrzymany, a nowy start się nie udał: {cause}. Poprzednie ustawienie: hubi guard start {words}"),
     ("{program}: TimeoutExpired", "{program}: przekroczony limit czasu"),
     ("{program}: FileNotFoundError", "{program}: nie znaleziono programu"),
     ("{program}: PermissionError", "{program}: brak uprawnień"),
@@ -235,6 +264,8 @@ def pl(message):
             fields = match.groupdict()
             if "state" in fields and fields["state"] in State.__members__:
                 fields["state"] = STATE_PL[State[fields["state"]]]   # the word `hubi list` shows
+            if "cause" in fields:
+                fields["cause"] = pl(fields["cause"])              # a nested error, itself translated
             return target.format(**fields)
     return text
 

@@ -19,6 +19,7 @@ import unicodedata
 
 from .core.model import HubiError, RepoHealth, State, actions, display
 from .github import GitHub
+from .guard import PAUSED, WEEKLY, Guard, Setup, canonical, report, summary
 from .i18n import DEFAULT_INSTANCE, HEALTH_PL, KIND_PL, RUNTIME_PL, STATE_PL, age, instance_of, name_pl, place, pl, plural
 from .tui import Input, terminal
 
@@ -29,6 +30,7 @@ PAGE = 9
 TICK = .12
 KINDS = {"l": "claude", "c": "codex", "t": "terminal"}
 HOME_KEY = "h"            # the home workspace: a shell or an agent outside any repository
+GUARD_KEY = "s"           # the Codex limit guard (strażnik)
 HOME_NOTE = "bez repo"
 SHELLS = {"bash", "zsh", "sh", "dash", "fish", "ksh", "tmux", "python3", "sleep", ""}
 GENERIC_TITLES = {"", "claude", "claude code", "codex", "openai codex"}
@@ -181,6 +183,7 @@ class View:
     now: float
     home: object = None       # RepoRow of the home workspace, None when disabled/unavailable
     frame: int = 0            # spinner frame, from the menu's own clock
+    guard: object = None      # guard.Status, None when the guard cannot be read
 
 
 def places(view):
@@ -401,15 +404,18 @@ def frame_main(view, ui, width, height, glyphs):
     repos = [repo_row(HOME_KEY if row is view.home else "", row, width, glyphs, selected=ui.cursor == len(shown)+n)
              for n, row in enumerate(places(view))]
     hints = [("1-9", "wejdź"), ("l", "Claude"), ("c", "Codex"), ("t", "terminal"), ("d", "zatrzymaj"),
-             ("i", "szczegóły"), ("r", "repo"), (HOME_KEY, "~ bez repo"), ("g", "GitHub"), ("?", "pomoc"),
-             ("q", "shell" if ui.autologin else "wyjdź")]
+             ("i", "szczegóły"), ("r", "repo"), (HOME_KEY, "~ bez repo"), (GUARD_KEY, "strażnik"), ("g", "GitHub"),
+             ("?", "pomoc"), ("q", "shell" if ui.autologin else "wyjdź")]
     if view.home is None:
         hints.remove((HOME_KEY, "~ bez repo"))
+    guard = guard_line(view.guard, width, glyphs)
+    if guard is None:
+        hints.remove((GUARD_KEY, "strażnik"))
     if ui.autologin:
         hints.append(("x", "rozłącz"))
     bottom = [rule(width, glyphs)]+flow(hints, width)
     bottom += [[(" "+pad(banner, width-2)+" ", "confirm")]] if banner and not ui.message else message_lines(ui, width)
-    room = height-len(top)-len(bottom)-2          # two section titles
+    room = height-len(top)-len(bottom)-2-(guard is not None)   # two section titles and the guard
     keep_details = len(rows)+len(details)+len(repos) <= room
     if not keep_details:                           # busy agents keep theirs while space allows
         busy = {n: d for n, d in details.items() if shown[n].busy}
@@ -424,10 +430,47 @@ def frame_main(view, ui, width, height, glyphs):
         hidden = len(repos)-max(0, left-1)
         repos = repos[:max(0, left-1)]+[[(f"    {glyphs.more} i jeszcze {hidden} (", "muted"), ("r", "key"), (" = wszystkie)", "muted")]]
     section = [(" REPOZYTORIA", "section"), (f"  {len(view.repos)}", "muted")]
-    spare = height-len(bottom)-len(top)-2-len(body)-len(repos)
+    spare = height-len(bottom)-len(top)-2-len(body)-len(repos)-(guard is not None)
     gap = [[""]] if spare >= 2 else []
-    lines = top+gap+[title]+body+gap+[section]+repos
+    lines = top+gap+[title]+body+gap+([guard] if guard is not None else [])+[section]+repos
     return lines[:max(0, height-len(bottom))]+bottom
+
+
+def guard_style(status):
+    if status.unit == "unknown" or status.problem or status.state.get("STATE") in (WEEKLY, "?"):
+        return "bad"
+    if not status.running or status.state.get("STATE") in PAUSED or status.changed:
+        return "warn"
+    return "ok"
+
+
+def guard_line(status, width, glyphs):
+    """The guard in one main-screen line, or None when there is no guard."""
+    if status is None or not status.configured:
+        return None
+    style = guard_style(status)
+    mark = glyphs.ok if style == "ok" else glyphs.bad
+    return [" ", (pad(GUARD_KEY, 2), "key"), " ", ("STRAŻNIK ", "section"), (mark+" ", style),
+            (clip(display(summary(status)), max(4, width-15)), style if style != "ok" else "")]
+
+
+def frame_guard(view, ui, width, height, glyphs):
+    top = [head(view, "STRAŻNIK CODEXA", width, glyphs)]
+    status = view.guard
+    if status is None:
+        top.append([(" Nie udało się odczytać strażnika.", "bad")])
+        hints = []
+    else:
+        for n, line in enumerate(report(status, view.now)):
+            style = guard_style(status) if n == 0 else ("section" if not line.startswith(" ") else "")
+            top.append([(" "+clip(line, width-2), style)])
+        hints = []
+        if status.configured:
+            hints = [("z", "zatrzymaj")] if status.running else [("u", "uruchom")]
+            hints += [("p", "zmień CP"), ("w", "Codex i kontakt"), ("v", "wersja"), ("l", "limity")]
+    hints.append(("0", "wróć"))
+    bottom = [rule(width, glyphs)]+flow(hints, width)+message_lines(ui, width)
+    return top[:max(0, height-len(bottom))]+bottom
 
 
 def start_options(ui, *, talks):
@@ -572,6 +615,7 @@ HELP = (
     ("i", "szczegóły: podgląd, dołączenie, przejęcie, naprawa"),
     ("r", "widok repozytorium i status Gita"),
     ("g", "repozytoria na GitHubie, klonowanie"),
+    (GUARD_KEY, "strażnik limitu Codexa: stan, log, CP, Codex i kontakt, wersja"),
     ("0", "wróć (także Esc i Backspace)"),
     ("strzałki", "kursor, Enter = wejdź"),
     ("q x", "q = shell, x = rozłącz SSH"),
@@ -765,6 +809,7 @@ class Menu:
         self.home_error = ""
         self.clock = time.monotonic
         self.touched = self.clock()
+        self.guard = Guard(app)
 
     # ---- presentation
 
@@ -781,6 +826,10 @@ class Menu:
         except HubiError as e:
             home, self.home_error = None, str(e)
         self.view = build_view(self.snapshot, self.app.tmux.titles(), home=home)
+        try:
+            self.view.guard = self.guard.status(remember=True)
+        except (HubiError, OSError):
+            self.view.guard = None
 
     def home(self):
         if self.view.home is None:
@@ -809,6 +858,8 @@ class Menu:
             lines = frame_github(view, ui, width, height, self.glyphs, self.catalogue, self.repos)
         elif ui.screen == "help":
             lines = frame_help(view, ui, width, height, self.glyphs)
+        elif ui.screen == "guard":
+            lines = frame_guard(view, ui, width, height, self.glyphs)
         self.screen.paint(render(lines, self.theme, width))
 
     @contextmanager
@@ -1016,7 +1067,8 @@ class Menu:
 
     def back(self):
         ui = self.ui
-        ui.screen = {"pick": "main", "repo": "main", "detail": "main", "github": "main", "help": "main"}.get(ui.screen, "main")
+        ui.screen = {"pick": "main", "repo": "main", "detail": "main", "github": "main", "help": "main",
+                     "guard": "main"}.get(ui.screen, "main")
         ui.verb, ui.page, ui.cursor, ui.instance, ui.resume = "", 0, -1, "", False
 
     def name_instance(self):
@@ -1071,6 +1123,8 @@ class Menu:
             ui.verb = "stop" if key == "d" else "info"
         elif key == "g":
             self.open_github()
+        elif key == GUARD_KEY and view.guard is not None and view.guard.configured:
+            ui.screen = "guard"
         elif key == "?":
             ui.screen = "help"
         elif key == " ":
@@ -1159,6 +1213,64 @@ class Menu:
             return self.stop(item, repair=True)
         return False
 
+    def on_guard(self, key):
+        status, guard = self.view.guard, self.guard
+        if status is None or not status.configured:
+            return False
+        if key == "u" and not status.running:
+            if status.setup:
+                if not self.confirm(f"Uruchomić strażnika: {status.setup.words()}?"):
+                    return self.say("Anulowano", "muted")
+                setup = None
+            else:
+                answer = self.ask_line("CP, Codex i kontakt (np. CP21 codex/praca claude/praca): ")
+                words = (answer or "").split()
+                if not words:
+                    return self.say("Anulowano", "muted")
+                if len(words) != 3:
+                    raise HubiError("Give CP, Codex and contact, or nothing")
+                setup = Setup(words[0], canonical(words[1], kind="codex"), canonical(words[2]))
+            with self.busy("Uruchamiam strażnika"):
+                setup = guard.start(setup)
+            return self.say(f"Strażnik działa: {setup.words()}", "ok")
+        if key == "z" and status.running:
+            if not self.confirm("Zatrzymać strażnika?"):
+                return self.say("Anulowano", "muted")
+            with self.busy("Zatrzymuję strażnika"):
+                guard.stop()
+            return self.say("Zatrzymano strażnika", "ok")
+        if key == "p":
+            answer = (self.ask_line("Nowy CP (np. CP21): ") or "").strip()
+            if not answer:
+                return self.say("Anulowano", "muted")
+            with self.busy("Uruchamiam strażnika z nowym CP"):
+                old, new = guard.change_cp(answer)
+            return self.say(f"Strażnik działa: {new.words()} (było {old.cp})", "ok")
+        if key == "w":
+            words = (self.ask_line("Codex i kontakt (np. codex/praca claude/praca): ") or "").split()
+            if not words:
+                return self.say("Anulowano", "muted")
+            if len(words) != 2:
+                raise HubiError("Give CP, Codex and contact, or nothing")
+            with self.busy("Uruchamiam strażnika z nowym celem"):
+                old, new = guard.change_who(words[0], words[1])
+            return self.say(f"Strażnik działa: {new.words()}", "ok")
+        if key == "v":
+            labels = [label for label, _ in guard.versions()]
+            answer = (self.ask_line(f"Wersja ({', '.join(labels[-4:])}): ") or "").strip()
+            if not answer:
+                return self.say("Anulowano", "muted")
+            with self.busy("Przełączam wersję strażnika"):
+                changed = guard.switch_version(answer)
+            if not changed:
+                return self.say(f"watchdog.sh już jest wersją {answer}", "muted")
+            return self.say(f"Strażnik: wersja {answer}"+("" if status.running else "; nie działa, u = uruchom"), "ok")
+        if key == "l":
+            with self.busy("Czytam limity Codexa (do 20 s)"):
+                guard.limits(status.setup)
+            return None
+        return False
+
     def on_github(self, key):
         ui, repos = self.ui, self.repos
         pages = max(1, (len(repos)+PAGE-1)//PAGE)
@@ -1213,7 +1325,7 @@ class Menu:
             self.back()
             return None
         handler = {"main": self.on_main, "pick": self.on_pick, "repo": self.on_repo, "detail": self.on_detail,
-                   "github": self.on_github, "help": lambda _key: False}[ui.screen]
+                   "github": self.on_github, "guard": self.on_guard, "help": lambda _key: False}[ui.screen]
         try:
             result = handler(key)
         except HubiError as e:

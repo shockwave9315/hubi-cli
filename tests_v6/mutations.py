@@ -33,6 +33,33 @@ def main():
          '    mask = payload.get("umask", 0o022)',
          'tests_v6.test_umask.UmaskRuntimeTests.test_invalid_umask_refuses_the_start',
          'AssertionError: HubiError not raised'),
+        # The guard's hard rules (brief from the owner, 25.10).
+        ('guard-pause-rule', 'hubi6/guard.py',
+         '            if state.get("STATE") in PAUSED and moved and',
+         '            if False and',
+         'tests_v6.test_guard.GuardTests.test_pause_refuses_a_new_cp_or_codex_but_allows_the_same_restart',
+         'AssertionError: HubiError not raised'),
+        ('guard-weekly-lock', 'hubi6/guard.py',
+         '        if state.get("STATE") == WEEKLY:\n            raise',
+         '        if False:\n            raise',
+         'tests_v6.test_guard.GuardTests.test_weekly_lock_says_how_to_resume_by_hand',
+         'AssertionError: HubiError not raised'),
+        ('guard-keeps-settings', 'hubi6/guard.py',
+         '        env = dict(setup.env)\n',
+         '        env = dict(DEFAULT_ENV)\n',
+         'tests_v6.test_guard.GuardTests.test_new_cp_in_running_keeps_every_setting',
+         'AssertionError'),
+        ('guard-new-inode', 'hubi6/guard.py',
+         '                shutil.copy2(source, temp)               # like cp -p: mode and times of the version\n'
+         '                os.replace(temp, target)',
+         '                shutil.copyfile(source, target)',
+         'tests_v6.test_guard.GuardTests.test_version_switch_restarts_with_the_same_setup',
+         'AssertionError'),
+        ('guard-remember-after-start', 'hubi6/guard.py',
+         '        for _ in range(8):\n            self.sleep(.25)',
+         '        self.remember(replace(setup, env=tuple(sorted(env.items()))))\n        for _ in range(8):\n            self.sleep(.25)',
+         'tests_v6.test_guard.GuardTests.test_a_guard_that_dies_at_once_is_reported_with_its_reason',
+         'AssertionError'),
     ]
     for label, filename, before, after, test, expected in cases:
         with tempfile.TemporaryDirectory(prefix='hubi6-mutation-', dir=Path.home()) as tmp:

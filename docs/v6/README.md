@@ -193,6 +193,24 @@ directory is accepted for new sessions; sessions created before a change of
 `home_workspace` remain visible and stoppable. Agents started there act on the
 whole home directory with their usual permissions.
 
+## Codex limit guard
+
+`hubi6/guard.py` shows and steers the praca Codex limit guard (`[guard] dir`,
+default `~/.cache/praca/codex-watchdog`; `[guard] unit`, default
+`praca-codex-watchdog`) from `hubi guard …`, `hubi list` and the menu (`s`).
+The guard script stays as it is. Hubi reads its directory (`state.<codex>`,
+`log`, `watchdog.v*.sh`, `limits.py` at most every two minutes) and
+`systemctl --user show` of its unit. It starts the unit with `systemd-run` the
+way the guard's README does, keeping the running unit's `PATH`, `WD_*` and
+restart options. A change of CP or guarded Codex is refused while that Codex's
+state is a pause (`PAUSE_REQUESTED`, `PAUSED_5H`, `RESUME_REQUESTED`): the guard
+keeps a pause only under its CP name. A weekly lock refuses the start with the
+manual steps. Version switches replace `watchdog.sh` by rename, never in place
+under a running bash. Hubi never creates `reset.armed`, never runs
+`reset_credit.py` and never writes to Codex. Its own memo of the last setup is
+`$XDG_STATE_HOME/hubi6/guard.json`, written only by `hubi guard`, the menu and
+successful starts. `hubi list` stays read-only.
+
 ## Configuration and deployment materials
 
 Configuration: `$XDG_CONFIG_HOME/hubi6/config.toml` (default
