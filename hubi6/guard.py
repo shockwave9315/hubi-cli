@@ -684,12 +684,19 @@ def thresholds_text(setup):
 
 
 def thresholds_note(setup):
-    """A warning when the weekly stop sits above the 5-hour pause (usually it is lower)."""
+    """Warnings for thresholds the guard takes but that rarely make sense."""
     t = setup.thresholds()
+    notes = []
+    # The guard resumes only when the 5-hour limit is back to WD_RESUME_MIN (20%):
+    # a pause threshold at or above it pauses Codex again right after "wznów".
+    resume = dict(setup.env).get("WD_RESUME_MIN", "20")
+    if resume.isdigit() and int(t["WD_LOW"]) >= int(resume):
+        notes.append(f"uwaga: pauza 5 h ({t['WD_LOW']}%) nie jest niżej niż próg wznowienia ({int(resume)}%); "
+                     "Codex dostanie pauzę zaraz po wznowieniu")
     if int(t["WD_WEEK_LOW"]) > int(t["WD_LOW"]):
-        return (f"uwaga: stop tygodniowy ({t['WD_WEEK_LOW']}%) jest wyżej niż pauza 5 h ({t['WD_LOW']}%); "
-                "zwykle jest niżej")
-    return ""
+        notes.append(f"uwaga: stop tygodniowy ({t['WD_WEEK_LOW']}%) jest wyżej niż pauza 5 h ({t['WD_LOW']}%); "
+                     "zwykle jest niżej")
+    return "; ".join(notes)
 
 
 def version_text(s):

@@ -547,6 +547,13 @@ class GuardTests(Fixture):
         odd = setup.with_thresholds({"WD_WEEK_LOW": "10"})
         self.assertIn("stop tygodniowy (10%) jest wyżej niż pauza 5 h (7%)", G.thresholds_note(odd))
         self.assertEqual(dict(odd.env), {"WD_LOW": "7", "WD_WEEK_LOW": "10"})
+        # Review: a pause at or above the resume threshold (20%) pauses Codex again right after "wznów".
+        self.assertIn("pauza 5 h (20%) nie jest niżej niż próg wznowienia (20%)",
+                      G.thresholds_note(setup.with_thresholds({"WD_LOW": "20"})))
+        self.assertEqual(G.thresholds_note(setup.with_thresholds({"WD_LOW": "19"})), "")
+        own = setup.with_thresholds({"WD_LOW": "25"})
+        own = G.replace(own, env=tuple(sorted({**dict(own.env), "WD_RESUME_MIN": "30"}.items())))
+        self.assertEqual(G.thresholds_note(own), "")      # the unit's own resume threshold counts
 
     def test_stop_when_nothing_runs(self):
         self.assertFalse(self.g.stop())
