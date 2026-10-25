@@ -305,11 +305,16 @@ Plik `~/.config/hubi6/config.toml` jest opcjonalny. Wzór z opisem:
 | `repos_root` | `~/repos` | gdzie szukać repozytoriów |
 | `home_workspace` | `~` | katalog dla sesji poza repozytorium, poza `repos_root`; `""` wyłącza |
 | `[agents] claude` | `["claude", "--permission-mode", "bypassPermissions"]` | polecenie Claude |
-| `[agents] codex` | `["codex", "--no-daemon"]` | polecenie Codexa |
+| `[agents] codex` | `["codex", "--no-daemon", "-c", "check_for_update_on_startup=false"]` | polecenie Codexa |
 | `[ui] refresh` | `2` | odświeżanie listy w sekundach |
 | `[ui] icons` | `true` | `false` = sam ASCII |
 | `[guard] dir` | `~/.cache/praca/codex-watchdog` | katalog strażnika limitu Codexa; `""` ukrywa strażnika |
 | `[guard] unit` | `praca-codex-watchdog` | jego jednostka systemd użytkownika (bez `.service`) |
+
+Codex startuje bez okna aktualizacji (`check_for_update_on_startup=false`). W tym
+oknie domyślne jest „Update now”, więc każdy Enter, także z `hubi send` albo od
+strażnika, instalował aktualizację i zamykał Codexa razem z sesją. Aktualizujesz
+ręcznie: `npm install -g @openai/codex`, gdy żaden Codex nie pracuje.
 
 Codex startuje z `--no-daemon` celowo. Bez tej flagi wszystkie sesje Codexa
 dzielą jeden proces w tle, który siedzi w pierwszej z nich, i zatrzymanie jej
