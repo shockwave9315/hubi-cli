@@ -195,6 +195,9 @@ whole home directory with their usual permissions.
 
 ## Codex limit guard
 
+The guard's own files (bash script, kept versions, `limits.py`, its tests) live
+in `guard/`; `guard/install.sh` copies missing files into the guard directory and
+refuses when a different file of the same name is already there.
 `hubi6/guard.py` shows and steers the praca Codex limit guard (`[guard] dir`,
 default `~/.cache/praca/codex-watchdog`; `[guard] unit`, default
 `praca-codex-watchdog`) from `hubi guard …`, `hubi list` and the menu (`s`).

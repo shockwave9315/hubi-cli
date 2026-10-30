@@ -43,7 +43,8 @@ zostawiona na wypadek wycofania zmian ([opis v5](docs/v5/README.md)).
   powłoka do zwykłej pracy na devboksie, do której wracasz jak do każdej sesji.
 - Strażnik limitu Codexa widoczny i sterowany bez agenta (`s`, `hubi guard`):
   stan, CP, cel, progi, wersja, log; zmiana CP, celu, progów i wersji jednym
-  poleceniem.
+  poleceniem. Sam strażnik jest w repozytorium (`guard/`, instalacja
+  `bash guard/install.sh`).
 
 Restart maszyny kończy sesje. Rozmowę z agentem wznowisz potem klawiszem `r`
 przy starcie.
@@ -251,11 +252,20 @@ zmienne też przekaż przez `--setenv=`.
 
 ### Strażnik limitu Codexa
 
-Strażnik (`~/.cache/praca/codex-watchdog`, jednostka `praca-codex-watchdog`)
-pilnuje limitów Codexa: przy niskim limicie każe mu zrobić pauzę, po odnowieniu
-wysyła „wznów”. Hubi pokazuje go i nim steruje, a sam skrypt zostaje bez zmian.
-Hubi czyta jego pliki i jednostkę systemd, a uruchamia go tak, jak opisuje jego
-README.
+Strażnik pilnuje limitów Codexa: przy niskim limicie każe mu zrobić pauzę, po
+odnowieniu wysyła „wznów”. To skrypt w bashu, bez AI. Jego pliki są w katalogu
+[`guard/`](guard/README.md): skrypt i jego wersje, odczyt limitów, testy i pełny
+opis działania. Instalacja do katalogu strażnika
+(`~/.cache/praca/codex-watchdog`, jednostka `praca-codex-watchdog`):
+
+```console
+bash guard/install.sh     # kopiuje tylko brakujące pliki, inny plik o tej samej nazwie zatrzymuje instalację
+hubi guard start CP1 codex/<repo> claude/<repo>
+```
+
+Hubi pokazuje strażnika i nim steruje, a sam skrypt zostaje bez zmian. Hubi
+czyta jego pliki i jednostkę systemd, a uruchamia go tak, jak opisuje
+`guard/README.md`.
 
 Na ekranie głównym jest wiersz `STRAŻNIK`: czy działa, CP, stan (`RUNNING`,
 `PAUSED_5H`…), godzina wznowienia w pauzie, wersja, cel i kontakt. Klawisz `s`
