@@ -5,6 +5,7 @@ directory. The guard's own test suite (guard/tests/run.sh) runs in the lab UID.
 """
 from pathlib import Path
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -17,8 +18,8 @@ SRC = ROOT/"guard"
 FILES = ["README.md", "limits.py", "reset_credit.py", "watchdog.sh", "watchdog.v4.sh", "watchdog.v48.sh", "watchdog.v49.sh"]
 
 
-def install(dest):
-    return subprocess.run(["bash", str(SRC/"install.sh"), str(dest)], capture_output=True, text=True, timeout=30,
+def install(dest, src=SRC):
+    return subprocess.run(["bash", str(src/"install.sh"), str(dest)], capture_output=True, text=True, timeout=30,
                           env={**os.environ, "WD_DIR": ""})
 
 
@@ -76,7 +77,35 @@ class GuardSourceTests(unittest.TestCase):
         p = install(self.dest)
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn("skopiowano 6 z 7", p.stdout)
+        self.assertIn("zostawiono: README.md (własny)", p.stdout)
         self.assertEqual((self.dest/"README.md").read_text(), "notatki właściciela\n")
+
+    def test_a_version_kept_only_in_the_guard_directory_is_not_a_conflict(self):
+        # Review #18 B: hubi guard version switches to any watchdog.v*.sh of the directory.
+        self.dest.mkdir()
+        (self.dest/"watchdog.v47.sh").write_text("#!/usr/bin/env bash\n# v4.7\n")
+        shutil.copy2(self.dest/"watchdog.v47.sh", self.dest/"watchdog.sh")
+        p = install(self.dest)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("zostawiono: watchdog.sh (= watchdog.v47.sh)", p.stdout)
+        self.assertEqual((self.dest/"watchdog.sh").read_text(), "#!/usr/bin/env bash\n# v4.7\n")
+
+    def test_a_failed_copy_is_an_error_and_leaves_no_temp_file(self):
+        # Review #18 A: a cp error once counted as copied and left .install-* behind.
+        if os.geteuid() == 0:
+            self.skipTest("root reads any file")
+        src = self.dest.parent/"src"
+        shutil.copytree(SRC, src)
+        (src/"limits.py").chmod(0)
+        p = install(self.dest, src)
+        self.assertEqual(p.returncode, 1, p.stdout)
+        self.assertIn("przerwane przy limits.py", p.stderr)
+        self.assertFalse((self.dest/"limits.py").exists())
+        self.assertEqual([f.name for f in self.dest.iterdir() if f.name.startswith(".install")], [])
+        (src/"limits.py").chmod(0o644)
+        p = install(self.dest, src)                      # the next run finishes the job
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(sorted(f.name for f in self.dest.iterdir()), FILES)
 
 
 @unittest.skipUnless(LAB, "the guard's own tests use tmux; they run only in the lab UID")

@@ -37,7 +37,7 @@ Strażnik jest częścią repozytorium hubi-cli (katalog `guard/`). Potrzebuje H
 bash guard/install.sh            # do ~/.cache/praca/codex-watchdog (inny katalog: pierwszy argument)
 ```
 
-Skrypt kopiuje tylko brakujące pliki. Gdy w katalogu jest już inny plik o tej samej nazwie (np. Twoja zmiana), nic nie kopiuje i to zgłasza. Działającego strażnika nie rusza. `watchdog.sh` przełączony na inną zachowaną wersję nie jest konfliktem, a różny `README.md` zostaje bez zmian. Inny katalog strażnika ustawisz w Hubi w `[guard] dir`.
+Skrypt kopiuje tylko brakujące pliki. Gdy w katalogu jest już inny plik o tej samej nazwie (np. Twoja zmiana), nic nie kopiuje i to zgłasza. Działającego strażnika nie rusza. `watchdog.sh` przełączony na inną zachowaną wersję (z repozytorium albo z katalogu strażnika) nie jest konfliktem, a różny `README.md` zostaje bez zmian. Gdy kopiowanie się nie uda, skrypt kończy się błędem i mówi, przy którym pliku. Inny katalog strażnika ustawisz w Hubi w `[guard] dir`.
 
 Pliki:
 
@@ -113,7 +113,8 @@ Każde ustawienie podajesz zmienną `WD_…` przy starcie (domyślne wartości s
 - `WD_CAP_RE`, `WD_CAP_RETRY_MIN` (5), `WD_CAP_MAX` (3), `WD_CAP_SLOW_MIN` (30) — rozpoznanie błędu „model at capacity” i odstępy między wznowieniami;
 - `WD_REPORT_TO` — nazwa Hubi, którą teksty „wznów” podają Codexowi dla zgłoszeń, STOP i linii gotowości (np. `codex/praca/temp-rev`). Puste oznacza kontakt. Linia pauzy z `LIMIT-5` i zgłoszenia strażnika zawsze idą do kontaktu;
 - `WD_CODEX_ARGS_RE`, `WD_CLAUDE_ARGS_RE` — wzorzec polecenia procesu na pierwszym planie panelu (Codex: `node …/bin/codex`, Claude: `…/claude`). Podgląd: `ps -t <tty panelu> -o pid,stat,args`;
-- `WD_DIR`, `WD_TMUX_SOCK`, `WD_PANE_CMD`, `WD_SEND_CMD`, `WD_LIMITS_CMD` — katalog, gniazdo tmux Hubi i polecenia (domyślnie `~/.local/bin/hubi6 pane`, `hubi6 send`, `limits.py`).
+- `WD_DIR`, `WD_TMUX_SOCK`, `WD_PANE_CMD`, `WD_SEND_CMD`, `WD_LIMITS_CMD` — katalog, gniazdo tmux Hubi i polecenia (domyślnie `~/.local/bin/hubi6 pane`, `hubi6 send`, `limits.py`);
+- rzadziej używane: `WD_REPAUSE_MAX` (3), `WD_BAR_RE`, `WD_ACTIVE_SEC` (30), `WD_RESET_AT` (1), `WD_RESET_CMD`, `WD_RESET_TRIES_MAX` (1), a do testów `WD_DRYRUN`, `WD_MAX_POLLS` i `WD_…_SEC`. Opis każdej jest na górze `watchdog.sh`.
 
 Teksty wiadomości są w liniach z `send_to`.
 
